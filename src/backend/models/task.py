@@ -5,6 +5,7 @@ from sqlalchemy import event, inspect as sqlalchemy_inspect
 from . import db
 
 _UNLOADED = object()
+_SOURCE_TASK_ID_MAX_LENGTH = 36
 
 
 def _compact_text(value, max_length=None):
@@ -226,6 +227,7 @@ class PublicationTask(db.Model):
             self.user_id = _compact_text(params.get('user_id'), 64)
             self.parent_task_id = _compact_text(params.get('parent_task_id'), 36)
             self.parent_feature = _compact_text(params.get('parent_feature'), 80)
+            self.source_feature = _compact_text(params.get('source_feature'), 80)
             self.report_visual_scheme_key = _compact_text(
                 params.get('visual_scheme_key')
                 or _nested(params, 'report_stick_figure_video_workflow', 'visual_scheme_key')
@@ -236,18 +238,24 @@ class PublicationTask(db.Model):
             zsxq_publish = params.get('zsxq_publish') if isinstance(params.get('zsxq_publish'), dict) else {}
             mp3_workflow = params.get('mp3_video_workflow') if isinstance(params.get('mp3_video_workflow'), dict) else {}
             mp3_audio = mp3_workflow.get('audio') if isinstance(mp3_workflow.get('audio'), dict) else {}
-            self.source_task_id = _compact_text(
+            projected_source_task_id = _source_task_id_projection(
+                self,
                 params.get('source_task_id')
                 or zsxq_publish.get('source_task_id')
                 or mp3_workflow.get('audio_asset_id')
                 or mp3_audio.get('attachment_id')
                 or mp3_audio.get('audio_asset_id')
                 or (result.get('source_task_id') if result_loaded else None),
-                36,
             )
-            self.source_feature = _compact_text(params.get('source_feature'), 80)
+            if projected_source_task_id is not _UNLOADED:
+                self.source_task_id = projected_source_task_id
         elif result_loaded and result.get('source_task_id'):
-            self.source_task_id = _compact_text(result.get('source_task_id'), 36)
+            projected_source_task_id = _source_task_id_projection(
+                self,
+                result.get('source_task_id'),
+            )
+            if projected_source_task_id is not _UNLOADED:
+                self.source_task_id = projected_source_task_id
 
         if result_loaded:
             self.task_video_path = _compact_text(result.get('video_path'), 600)
@@ -594,6 +602,43 @@ def _loaded_model_attr(record, name, default=None):
         return getattr(record, name, default)
     except Exception:
         return default
+
+
+def _source_task_id_projection(record, value):
+    """Project an identity without ever creating a new truncated key.
+
+    Eleven completed MP3 rows predate this contract and already contain the
+    exact 36-character prefix of a typed ``pipeline:<uuid>`` reference.  They
+    remain updateable, but the exception is deliberately restricted to that
+    persisted legacy fingerprint.  Every new or changed overlong identity
+    fails before PostgreSQL can reject it or the application can corrupt it.
+    """
+    text = _compact_text(value)
+    if text is None or len(text) <= _SOURCE_TASK_ID_MAX_LENGTH:
+        return text
+
+    try:
+        state = sqlalchemy_inspect(record)
+    except Exception:
+        state = None
+    current = _loaded_model_attr(record, 'source_task_id', _UNLOADED)
+    feature = _loaded_model_attr(record, 'feature', _UNLOADED)
+    source_feature = _loaded_model_attr(record, 'source_feature', _UNLOADED)
+    if (
+        state is not None
+        and state.persistent
+        and current is not _UNLOADED
+        and feature == 'mp3_video_workflow'
+        and source_feature == 'zsxq_attachment'
+        and text.startswith('pipeline:')
+        and str(current or '').strip() == text[:_SOURCE_TASK_ID_MAX_LENGTH]
+    ):
+        return str(current).strip()
+
+    raise ValueError(
+        'source_task_id exceeds 36 characters; store the owner in '
+        'source_feature and a canonical ID in source_task_id'
+    )
 
 
 @event.listens_for(PublicationTask, "before_insert")

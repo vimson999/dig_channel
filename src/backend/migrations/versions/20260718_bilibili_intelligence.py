@@ -32,7 +32,8 @@ def upgrade():
         )
         """
     )
-    op.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_bilibili_competitors_uid ON public.bilibili_competitors (uid)")
+    # ``uid ... UNIQUE`` already creates the constraint-owned unique index.
+    # Avoid the historical standalone duplicate on fresh installations.
     op.execute("CREATE INDEX IF NOT EXISTS ix_bilibili_competitors_content_type ON public.bilibili_competitors (content_type)")
     op.execute("CREATE INDEX IF NOT EXISTS ix_bilibili_competitors_active ON public.bilibili_competitors (active)")
     op.execute("CREATE INDEX IF NOT EXISTS ix_bilibili_competitors_type_active ON public.bilibili_competitors (content_type, active)")
@@ -79,7 +80,9 @@ def upgrade():
         )
         """
     )
-    op.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_bilibili_competitor_videos_bvid ON public.bilibili_competitor_videos (bvid)")
+    # ``bvid ... UNIQUE`` above already creates the constraint-owned unique
+    # index.  Do not recreate the historical standalone duplicate on fresh
+    # installations; live databases use the separately gated cleanup tool.
     op.execute("CREATE INDEX IF NOT EXISTS ix_bilibili_competitor_videos_competitor_id ON public.bilibili_competitor_videos (competitor_id)")
     op.execute("CREATE INDEX IF NOT EXISTS ix_bilibili_competitor_videos_content_type ON public.bilibili_competitor_videos (content_type)")
     op.execute("CREATE INDEX IF NOT EXISTS ix_bilibili_competitor_videos_published_at ON public.bilibili_competitor_videos (published_at)")

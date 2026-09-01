@@ -9,6 +9,7 @@ const html = read('src/frontend/pdf-merge-workflow.html');
 const script = read('src/frontend/js/pdf-merge-workflow.js');
 const navigation = read('src/frontend/js/shared-navigation.js');
 const pdfTools = read('src/frontend/pdf-tools.html');
+const constructorBody = script.match(/constructor\(\) \{([\s\S]*?)\n    \}/)?.[1] || '';
 
 for (const id of [
   'pdf-merge-files-input',
@@ -44,6 +45,19 @@ assert(script.includes('/retry'), 'client must expose retry action');
 assert(script.includes('/download'), 'client must expose output download action');
 assert(script.includes('textContent'), 'dynamic PDF names must be rendered as text, not HTML');
 assert(!script.includes('.innerHTML'), 'PDF merge controller must not inject dynamic file names as HTML');
+assert(
+  !constructorBody.includes('this.loadAssets()'),
+  'PDF asset catalogue must not load automatically on initial page construction',
+);
+assert(
+  !script.includes("assetSearch?.addEventListener('input'")
+    && !script.includes('scheduleAssetSearch'),
+  'PDF asset search must wait for an explicit refresh instead of using input debounce',
+);
+assert(
+  html.includes('输入关键词后点击“刷新资产”；不输入关键词直接刷新可加载全部已清洗 PDF'),
+  'PDF asset area must explain explicit search and empty-search-all behavior',
+);
 assert(
   navigation.includes("filename === 'pdf-merge-workflow.html'")
     && navigation.includes("return 'pdf-merge-workflow'"),

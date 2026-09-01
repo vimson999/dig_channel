@@ -498,10 +498,12 @@ class Mp3VideoWorkflowDetailPage {
                 onAfterCancel: async () => this.refreshBilibiliUploads(),
             });
         }
-        if (!this.biliCredentialsError && !this.biliPanel.credentialsLoaded) {
-            this.biliPanel.credentials = this.biliCredentials.slice();
-            this.biliPanel.credentialsLoaded = true;
-        }
+        // The detail page is the sole owner of the initial credential request.
+        // Propagate both success and failure so the shared panel does not start
+        // a second request after the first one times out at the browser edge.
+        this.biliPanel.credentials = this.biliCredentials.slice();
+        this.biliPanel.credentialsError = this.biliCredentialsError;
+        this.biliPanel.credentialsLoaded = true;
         this.biliPanel.setJob(job, { formDraft });
         this.biliPanelDraft = this.biliPanel.readFormDraft?.() || formDraft || null;
         this.biliPanelDraftJobId = String(job?.job_id || job?.id || this.jobId || '');

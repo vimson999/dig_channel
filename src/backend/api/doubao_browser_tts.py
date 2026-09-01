@@ -14,7 +14,10 @@ from services.doubao_browser_tts import (
     QUEUE_NAME,
     status_payload as browser_status_payload,
 )
-from services.runtime_guard import apply_async_after_db_release
+from services.runtime_guard import (
+    apply_async_after_db_release,
+    revoke_celery_task_after_db_commit,
+)
 from tasks.doubao_browser_tts import process_doubao_browser_tts_job
 from utils.auth_utils import require_login
 
@@ -222,9 +225,7 @@ def cancel_job(current_user, job_id):
         payload = _job_payload(task)
         return jsonify({"success": True, "message": "任务已结束", **payload, "data": payload})
 
-    if task.celery_task_id:
-        celery_app.control.revoke(task.celery_task_id, terminate=False)
-
+    celery_task_id = str(task.celery_task_id or "").strip()
     result = dict(task.result or {})
     result["canceled_at"] = datetime.utcnow().isoformat() + "Z"
     task.status = "canceled"
@@ -232,10 +233,17 @@ def cancel_job(current_user, job_id):
     task.completed_at = datetime.utcnow()
     task.result = result
     flag_modified(task, "result")
-    db.session.commit()
-
     payload = _job_payload(task)
-    return jsonify({"success": True, "message": "任务已取消", **payload, "data": payload})
+    db.session.commit()
+    revoked = revoke_celery_task_after_db_commit(
+        celery_task_id,
+        operation=f"doubao browser TTS cancel revoke task={task.id}",
+        business_task_id=str(task.id),
+    )
+    message = "任务已取消"
+    if celery_task_id and not revoked:
+        message += "；broker 撤回失败，终态门禁将拦截旧消息"
+    return jsonify({"success": True, "message": message, **payload, "data": payload})
 
 
 @doubao_browser_tts_bp.route("/jobs/<job_id>/retry", methods=["POST"])

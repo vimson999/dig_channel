@@ -86,6 +86,34 @@ class ContentRetentionCleanupServiceTest(unittest.TestCase):
             self.assertTrue(new_batch.exists())
             self.assertTrue(new_pdf.exists())
 
+    def test_cleanup_collects_expired_web_submission_directories(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            submission = root / "runtime" / "content_pipeline" / "web_uploads" / "submission-1"
+            raw_file = submission / "raw" / "网页投递.pdf"
+            raw_file.parent.mkdir(parents=True)
+            raw_file.write_bytes(b"raw-pdf")
+            _touch_tree(submission, days_old=5)
+
+            service = _service(root)
+            service._protected_paths = lambda *_, **__: set()
+            result = service.run(
+                policy=ContentRetentionPolicy(
+                    web_upload_days=2,
+                    include_content_pipeline_batches=False,
+                    include_manual_publish=False,
+                    include_pytest_batches=False,
+                    include_sync_raw=False,
+                    include_processed_videos=False,
+                ),
+                dry_run=True,
+            )
+
+            self.assertEqual(result["candidate_count"], 1)
+            self.assertEqual(result["candidates"][0]["category"], "web_upload")
+            self.assertEqual(result["candidates"][0]["kind"], "directory")
+            self.assertEqual(result["candidates"][0]["path"], str(submission.resolve()))
+
     def test_content_pipeline_large_file_expiry_uses_file_mtime_not_parent_directory_mtime(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

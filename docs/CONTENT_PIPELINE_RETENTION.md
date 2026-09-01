@@ -8,6 +8,7 @@
 - 自动清理计划默认保留 3 天、每 24 小时执行一次、默认真实删除。
 - 数据库记录、topic/raw JSON、manifest 等小元数据不作为主要清理目标。
 - `runtime/content_pipeline/batches` 按批次内大文件自身 mtime 判断是否过期；即使父目录最近被碰过，过期 PDF/MP3/WAV/Office/ZIP 等大文件也会进入候选。
+- `runtime/content_pipeline/web_uploads/<submission-id>` 保存网页投递的原件；仍被未收尾任务引用的目录会受保护，默认在 3 天后按整个提交目录清理。
 - `data/processed` 只扫描生成的 `.mp4`；按视频文件自身 mtime 判断是否过期，默认保留 3 天。JSON、WAV/MP3、字幕、ASR/TTS 缓存和其他非 MP4 文件不在这一类清理范围内。
 - `pending` / `processing` / `failed` 任务引用的文件默认只保护 3 天；超过 `unfinished_reference_protect_days` 后，视为历史残留，按文件或目录自身保留期进入清理候选。
 
@@ -92,6 +93,7 @@ CONTENT_RETENTION_EMAIL_NOTIFY=0
 ## 清理范围
 
 - `runtime/content_pipeline/batches/*` 内的 PDF、MP3、M4A、WAV、Office、ZIP 等大文件
+- `runtime/content_pipeline/web_uploads/*` 下过期的网页投递原件目录
 - `runtime/content_pipeline/manual_publish/*`
 - pytest 项目的 `runtime/batches/*`
 - `data/zsxq/*/*/files/*` 下的 PDF、MP3、M4A、WAV、Office、ZIP 等大附件

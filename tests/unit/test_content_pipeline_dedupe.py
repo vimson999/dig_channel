@@ -12,9 +12,10 @@ BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from models import db  # noqa: E402
+from models import ContentPipelineAsset, db  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
 from services.content_pipeline import audio_clean_task_service, pdf_clean_task_service  # noqa: E402
+from services.content_pipeline.dedupe_service import mark_task_assets  # noqa: E402
 
 
 class ContentPipelineDedupeTest(unittest.TestCase):
@@ -134,6 +135,43 @@ class ContentPipelineDedupeTest(unittest.TestCase):
         self.assertEqual(payload["result"]["dedupe"]["received_count"], 2)
         self.assertEqual(payload["result"]["dedupe"]["unique_count"], 1)
         self.assertEqual(payload["result"]["dedupe"]["duplicate_count"], 1)
+
+    def test_retry_start_does_not_downgrade_a_cleaned_canonical_asset(self):
+        task_id = "retry-preserves-cleaned"
+        cleaned = ContentPipelineAsset(
+            media_type="pdf",
+            content_sha256="1" * 64,
+            canonical_task_id=task_id,
+            source_path=str(self._path("cleaned.pdf", b"cleaned")),
+            filename="cleaned.pdf",
+            status="cleaned",
+        )
+        reserved = ContentPipelineAsset(
+            media_type="pdf",
+            content_sha256="2" * 64,
+            canonical_task_id=task_id,
+            source_path=str(self._path("reserved.pdf", b"reserved")),
+            filename="reserved.pdf",
+            status="reserved",
+        )
+        db.session.add_all([cleaned, reserved])
+        db.session.commit()
+
+        updated = mark_task_assets(task_id, status="cleaning")
+        db.session.refresh(cleaned)
+        db.session.refresh(reserved)
+
+        self.assertEqual(updated, 1)
+        self.assertEqual(cleaned.status, "cleaned")
+        self.assertEqual(reserved.status, "cleaning")
+
+        updated = mark_task_assets(task_id, status="failed")
+        db.session.refresh(cleaned)
+        db.session.refresh(reserved)
+
+        self.assertEqual(updated, 1)
+        self.assertEqual(cleaned.status, "cleaned")
+        self.assertEqual(reserved.status, "failed")
 
 if __name__ == "__main__":
     unittest.main()

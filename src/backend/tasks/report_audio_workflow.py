@@ -60,6 +60,7 @@ from services.runtime_guard import (
     guard_publication_task_start,
     is_retryable_db_error,
     release_db_session_quietly,
+    revoke_celery_task_after_db_commit,
     retry_exception_types,
 )
 from services.workflow_notification_service import (
@@ -3136,10 +3137,14 @@ def _report_video_completion_contract(video_result, audio, payload):
 
 def _cancel_duplicate_publisher_tasks(tasks, *, keep_id):
     changed = False
+    revoke_snapshots = []
     for task in tasks:
         if not task or task.id == keep_id or task.status in TERMINAL_STATUSES:
             continue
-        _revoke_child_task(task)
+        revoke_snapshots.append(SimpleNamespace(
+            id=str(task.id),
+            celery_task_id=str(task.celery_task_id or ""),
+        ))
         result = dict(task.result or {})
         result["error"] = f"重复视频子任务已取消，保留 {keep_id}"
         task.status = "canceled"
@@ -3151,6 +3156,8 @@ def _cancel_duplicate_publisher_tasks(tasks, *, keep_id):
         changed = True
     if changed:
         db.session.commit()
+        for snapshot in revoke_snapshots:
+            _revoke_child_task(snapshot)
 
 
 def _wait_child(parent_id, child_id, label, *, start_progress, end_progress):
@@ -3636,13 +3643,16 @@ def _retry_limit(env_name, default):
 
 
 def _revoke_child_task(child):
-    celery_task_id = getattr(child, "celery_task_id", None)
+    child_id = str(getattr(child, "id", None) or "-")
+    celery_task_id = str(getattr(child, "celery_task_id", None) or "").strip()
     if not celery_task_id:
         return
-    try:
-        celery_app.control.revoke(celery_task_id, terminate=False)
-    except Exception as exc:
-        logger.warning("撤销子任务失败: child=%s celery=%s error=%s", child.id, celery_task_id, exc)
+    revoke_celery_task_after_db_commit(
+        celery_task_id,
+        operation=f"report audio child revoke child={child_id}",
+        business_task_id=child_id,
+        log=logger,
+    )
 
 
 def _compact_error(message, limit=180):

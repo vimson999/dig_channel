@@ -6,8 +6,14 @@ class Mp3VideoWorkflowPage {
         this.audioAssetPagination = { page: 1, per_page: 10, has_more: false };
         this.audioAssetScope = 'all';
         this.audioAssetSearchTimer = null;
+        this.audioAssetComposing = false;
         this.audioAssetRequestSeq = 0;
+        this.audioAssetClientId = this.createAudioAssetClientId();
+        this.audioAssetClientInFlight = 0;
+        this.audioAssetLoadPromise = null;
+        this.audioAssetPendingLoad = null;
         this.audioAssetWorkflowSeq = 0;
+        this.audioAssetsLoading = false;
         this.selectedAudioAsset = null;
         this.uploadedAudioFile = null;
         this.uploadedAudioObjectUrl = '';
@@ -21,6 +27,7 @@ class Mp3VideoWorkflowPage {
         this.jobPagination = { page: 1, per_page: 10, total: 0, pages: 0 };
         this.historyRequestSeq = 0;
         this.pollTimer = null;
+        this.pollInFlight = false;
         this.els = {
             providerStatus: document.getElementById('provider-status'),
             workerStatus: document.getElementById('worker-status'),
@@ -70,7 +77,7 @@ class Mp3VideoWorkflowPage {
         this.syncJobSearchInput();
         this.syncJobDateInput();
         this.refreshStatus();
-        this.loadAudioAssets({ silent: true });
+        this.loadAudioAssets({ silent: true, trigger: 'initial' });
         this.loadHistory({ silent: true });
         this.resetPollTimer();
         this.render();
@@ -203,15 +210,19 @@ class Mp3VideoWorkflowPage {
     bind() {
         this.els.refreshStatusBtn.addEventListener('click', () => this.refreshStatus());
         this.els.restartWorkerBtn.addEventListener('click', () => this.restartWorker());
-        this.els.audioAssetRefreshBtn.addEventListener('click', () => this.loadAudioAssets({ page: this.audioAssetPage }));
+        this.els.audioAssetRefreshBtn.addEventListener('click', () => this.loadAudioAssets({ page: this.audioAssetPage, forceRefresh: true, trigger: 'refresh' }));
         this.els.audioUploadInput?.addEventListener('change', (event) => this.handleAudioUploadChange(event));
         this.els.clearAudioUploadBtn?.addEventListener('click', () => this.clearUploadedAudio());
         this.els.audioAssetTabs?.addEventListener('click', (event) => this.handleAudioAssetScopeClick(event));
+        this.els.audioAssetSearch.addEventListener('compositionstart', () => this.handleAudioAssetCompositionStart());
+        this.els.audioAssetSearch.addEventListener('compositionend', () => this.handleAudioAssetCompositionEnd());
         this.els.audioAssetSearch.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') this.loadAudioAssets({ page: 1 });
+            if (event.key === 'Enter' && !event.isComposing && !this.audioAssetComposing) {
+                this.loadAudioAssets({ page: 1, trigger: 'enter' });
+            }
         });
-        this.els.audioAssetSearch.addEventListener('input', () => this.scheduleAudioAssetSearch());
-        this.els.audioAssetSearch.addEventListener('search', () => this.scheduleAudioAssetSearch());
+        this.els.audioAssetSearch.addEventListener('input', (event) => this.scheduleAudioAssetSearch(event));
+        this.els.audioAssetSearch.addEventListener('search', () => this.scheduleAudioAssetSearch(null, 'search'));
         this.els.audioAssetList.addEventListener('click', (event) => this.handleAudioAssetClick(event));
         this.els.audioAssetList.addEventListener('keydown', (event) => {
             if (event.key === 'Enter' || event.key === ' ') this.handleAudioAssetClick(event);
@@ -310,7 +321,10 @@ class Mp3VideoWorkflowPage {
 
     async refreshWorkerStatus() {
         try {
-            const result = await this.request('/api/v1/celery/status', { timeoutMs: 30000 });
+            const params = new URLSearchParams({
+                services: ['mp3_video_workflow', 'render'].join(','),
+            });
+            const result = await this.request(`/api/v1/celery/runtime-status?${params.toString()}`, { timeoutMs: 5000 });
             const services = result.data?.services || result.services || [];
             const workflow = services.find((item) => item.id === 'mp3_video_workflow');
             const render = services.find((item) => item.id === 'render');
@@ -344,25 +358,71 @@ class Mp3VideoWorkflowPage {
         }
     }
 
-    scheduleAudioAssetSearch() {
+    handleAudioAssetCompositionStart() {
+        this.audioAssetComposing = true;
         clearTimeout(this.audioAssetSearchTimer);
-        this.audioAssetSearchTimer = setTimeout(() => this.loadAudioAssets({ page: 1, silent: true }), 350);
+        this.audioAssetSearchTimer = null;
     }
 
-    async loadAudioAssets({ page = this.audioAssetPage, silent = false } = {}) {
+    handleAudioAssetCompositionEnd() {
+        this.audioAssetComposing = false;
+        this.scheduleAudioAssetSearch(null, 'composition_end');
+    }
+
+    scheduleAudioAssetSearch(event = null, trigger = 'debounce') {
+        if (this.audioAssetComposing || event?.isComposing) return;
+        clearTimeout(this.audioAssetSearchTimer);
+        this.audioAssetSearchTimer = setTimeout(() => this.loadAudioAssets({ page: 1, silent: true, trigger }), 350);
+    }
+
+    createAudioAssetClientId() {
+        const timestamp = Date.now().toString(36);
+        const random = Math.random().toString(36).slice(2, 10);
+        return `mp3-${timestamp}-${random}`;
+    }
+
+    loadAudioAssets({ page = this.audioAssetPage, silent = false, forceRefresh = false, trigger = 'manual' } = {}) {
         const seq = ++this.audioAssetRequestSeq;
         const q = this.els.audioAssetSearch.value.trim();
+        this.audioAssetPendingLoad = { page, silent, seq, q, forceRefresh, trigger };
+        if (this.audioAssetLoadPromise) return this.audioAssetLoadPromise;
+        const loadPromise = this.drainAudioAssetLoads().finally(() => {
+            if (this.audioAssetLoadPromise === loadPromise) this.audioAssetLoadPromise = null;
+        });
+        this.audioAssetLoadPromise = loadPromise;
+        return loadPromise;
+    }
+
+    async drainAudioAssetLoads() {
+        while (this.audioAssetPendingLoad) {
+            const load = this.audioAssetPendingLoad;
+            this.audioAssetPendingLoad = null;
+            await this.loadAudioAssetsOnce(load);
+        }
+    }
+
+    async loadAudioAssetsOnce({ page, silent, seq, q, forceRefresh = false, trigger = 'manual' }) {
+        this.audioAssetsLoading = true;
         this.renderAudioAssetTabs();
-        if (!silent) this.els.audioAssetSummary.textContent = `加载${this.audioAssetScopeLabel()}中...`;
+        this.renderAudioAssets();
+        if (!this.audioAssetClientId) this.audioAssetClientId = this.createAudioAssetClientId();
+        this.audioAssetClientInFlight = Math.max(0, Number(this.audioAssetClientInFlight || 0)) + 1;
+        const clientInFlight = this.audioAssetClientInFlight;
         try {
             const params = new URLSearchParams({
                 page: String(page),
                 per_page: String(this.audioAssetPerPage),
                 scope: this.audioAssetScope,
+                client_id: this.audioAssetClientId,
+                client_seq: String(seq),
+                client_trigger: String(trigger || 'manual'),
+                client_inflight: String(clientInFlight),
             });
             if (q) params.set('q', q);
+            if (forceRefresh) params.set('refresh', '1');
             const result = await this.request(`/api/mp3-video-workflows/audio-assets?${params.toString()}`, { timeoutMs: 20000 });
             if (seq !== this.audioAssetRequestSeq) return;
+            this.audioAssetsLoading = false;
             this.audioAssets = (result.data?.items || result.items || []).map((item) => ({
                 ...item,
                 workflow_loading: true,
@@ -373,9 +433,12 @@ class Mp3VideoWorkflowPage {
             this.loadAudioAssetWorkflowStats(this.audioAssets);
         } catch (error) {
             if (seq !== this.audioAssetRequestSeq) return;
+            this.audioAssetsLoading = false;
             this.els.audioAssetSummary.textContent = `加载失败：${error.message}`;
             this.els.audioAssetList.innerHTML = '';
             this.els.audioAssetPagination.innerHTML = '';
+        } finally {
+            this.audioAssetClientInFlight = Math.max(0, Number(this.audioAssetClientInFlight || 0) - 1);
         }
     }
 
@@ -448,7 +511,7 @@ class Mp3VideoWorkflowPage {
         this.clearUploadedAudio({ clearSelection: true });
         this.selectedAudioAsset = null;
         this.updateSelectedAudioPanel();
-        this.loadAudioAssets({ page: 1 });
+        this.loadAudioAssets({ page: 1, trigger: 'scope' });
     }
 
     audioAssetScopeLabel() {
@@ -518,14 +581,14 @@ class Mp3VideoWorkflowPage {
         const button = event.target.closest('[data-audio-page]');
         if (!button || button.disabled) return;
         const page = Number(button.dataset.audioPage);
-        if (Number.isFinite(page) && page > 0) this.loadAudioAssets({ page });
+        if (Number.isFinite(page) && page > 0) this.loadAudioAssets({ page, trigger: 'pagination' });
     }
 
     handleAudioAssetPageJump(event) {
         event.preventDefault();
         const input = event.target.querySelector('input[name="audio_page"]');
         const page = Number(input?.value || 1);
-        if (Number.isFinite(page) && page > 0) this.loadAudioAssets({ page: Math.floor(page) });
+        if (Number.isFinite(page) && page > 0) this.loadAudioAssets({ page: Math.floor(page), trigger: 'page_jump' });
     }
 
     updateSelectedAudioPanel() {
@@ -776,9 +839,16 @@ class Mp3VideoWorkflowPage {
     resetPollTimer() {
         clearInterval(this.pollTimer);
         const delay = Math.max(1000, Number(this.els.pollDelay.value || 3000));
-        this.pollTimer = setInterval(() => {
+        this.pollTimer = setInterval(async () => {
+            if (document.hidden || this.pollInFlight) return;
             const hasActive = this.jobs.some((job) => ['queued', 'running', 'pending', 'processing'].includes(job.status));
-            if (hasActive) this.loadHistory({ page: this.jobPage, silent: true });
+            if (!hasActive) return;
+            this.pollInFlight = true;
+            try {
+                await this.loadHistory({ page: this.jobPage, silent: true });
+            } finally {
+                this.pollInFlight = false;
+            }
         }, delay);
     }
 
@@ -789,6 +859,12 @@ class Mp3VideoWorkflowPage {
 
     renderAudioAssets() {
         this.renderAudioAssetTabs();
+        if (this.audioAssetsLoading) {
+            this.els.audioAssetSummary.textContent = '正在加载已清洗 MP3…';
+            this.els.audioAssetList.innerHTML = '<div class="rounded-md border border-dashed border-slate-300 p-4 text-sm text-slate-500"><i class="fas fa-spinner fa-spin mr-2"></i>正在读取清洗资产目录…</div>';
+            this.els.audioAssetPagination.innerHTML = '';
+            return;
+        }
         const page = this.audioAssetPagination.page || this.audioAssetPage;
         const scanned = this.audioAssetPagination.scanned || 0;
         const skipped = this.audioAssetPagination.skipped_missing || 0;

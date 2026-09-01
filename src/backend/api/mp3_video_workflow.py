@@ -10,8 +10,9 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
-from flask import Blueprint, jsonify, request, send_file
+from flask import Blueprint, current_app, g, jsonify, request, send_file
 from sqlalchemy import func, or_, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import load_only
@@ -24,6 +25,7 @@ from models.platform_credential import PlatformCredentialAccount
 from models.task import PublicationTask
 from services import gemini_browser
 from services.bilibili_publish import (
+    bilibili_upload_action_row as shared_bilibili_upload_action_row,
     bilibili_upload_child_payload as shared_bilibili_upload_child_payload,
     bilibili_upload_children as shared_bilibili_upload_children,
     cancel_bilibili_upload_child as shared_cancel_bilibili_upload_child,
@@ -63,7 +65,12 @@ from services.mp3_video_workflow import (
     regenerate_visual_artifact,
     status_payload as workflow_status_payload,
 )
-from services.runtime_guard import apply_async_after_db_release, release_db_session_quietly
+from services.runtime_guard import (
+    apply_async_after_db_release,
+    assert_db_session_clean,
+    release_db_session_quietly,
+    revoke_celery_task_after_db_commit,
+)
 from services.asr_cache_service import probe_media_duration
 from tasks.mp3_video_workflow import process_mp3_video_workflow_job
 from utils.auth_utils import require_login
@@ -82,7 +89,21 @@ STATUS_MAP = {
 SYSTEM_USER_ID = "system"
 WORKFLOW_SOURCE_FEATURE = "zsxq_attachment"
 UPLOAD_SOURCE_FEATURE = "local_mp3_upload"
+CONTENT_PIPELINE_ASSET_SOURCE_FEATURE = "content_pipeline_asset"
 DEFAULT_AUDIO_UPLOAD_MAX_MB = 512
+AUDIO_ASSET_CLIENT_TRIGGERS = {
+    "composition_end",
+    "debounce",
+    "enter",
+    "initial",
+    "manual",
+    "page_jump",
+    "pagination",
+    "refresh",
+    "scope",
+    "search",
+}
+AUDIO_ASSET_CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 try:
     DOWNLOAD_RESULT_CACHE_TTL_SECONDS = int(os.environ.get("MP3_VIDEO_WORKFLOW_DOWNLOAD_RESULT_CACHE_TTL", "30"))
 except (TypeError, ValueError):
@@ -129,6 +150,7 @@ _job_list_cache = {}
 _job_list_cache_lock = threading.RLock()
 _job_detail_cache = {}
 _job_detail_cache_lock = threading.RLock()
+_JOB_PAYLOAD_BILIBILI_UNSET = object()
 
 JOB_LIST_COLUMNS = (
     PublicationTask.id,
@@ -192,6 +214,20 @@ def _visible_user_ids(current_user_or_id):
     if user_id:
         values.add(user_id)
     return values
+
+
+def _audio_asset_source_identity(audio_asset_id, *, is_upload=False):
+    reference = str(audio_asset_id or "").strip()
+    if is_upload:
+        return UPLOAD_SOURCE_FEATURE, reference
+    if reference.startswith("pipeline:"):
+        asset_id = reference.split(":", 1)[1].strip()
+        try:
+            asset_id = str(uuid.UUID(asset_id))
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise ValueError("内容流水线音频素材 ID 无效") from exc
+        return CONTENT_PIPELINE_ASSET_SOURCE_FEATURE, asset_id
+    return WORKFLOW_SOURCE_FEATURE, reference
 
 
 @mp3_video_workflow_bp.route("/status", methods=["GET"])
@@ -280,9 +316,40 @@ def bilibili_seasons(_current_user):
         return jsonify({"success": False, "message": str(exc)}), 502
 
 
+def _audio_asset_client_trace():
+    """Return log-safe ownership metadata without persisting user input."""
+    raw_client_id = (request.args.get("client_id") or "").strip()
+    client_id = (
+        raw_client_id
+        if AUDIO_ASSET_CLIENT_ID_RE.fullmatch(raw_client_id)
+        else "unknown"
+    )
+    raw_trigger = (request.args.get("client_trigger") or "").strip().lower()
+    client_trigger = (
+        raw_trigger
+        if raw_trigger in AUDIO_ASSET_CLIENT_TRIGGERS
+        else "unknown"
+    )
+
+    def bounded_trace_int(name, maximum):
+        raw_value = (request.args.get(name) or "").strip()
+        if not re.fullmatch(r"[0-9]{1,10}", raw_value):
+            return 0
+        value = int(raw_value)
+        return value if 1 <= value <= maximum else 0
+
+    return {
+        "client_id": client_id,
+        "client_seq": bounded_trace_int("client_seq", 1_000_000_000),
+        "client_trigger": client_trigger,
+        "client_inflight": bounded_trace_int("client_inflight", 16),
+    }
+
+
 @mp3_video_workflow_bp.route("/audio-assets", methods=["GET"])
 @require_login
 def audio_assets(_current_user):
+    client_trace = _audio_asset_client_trace()
     page = _bounded_int(request.args.get("page"), 1, 1, 100000)
     per_page = _bounded_int(request.args.get("per_page"), 30, 1, 100)
     payload = list_audio_assets(
@@ -292,6 +359,22 @@ def audio_assets(_current_user):
         group_id=(request.args.get("group_id") or "").strip(),
         tab_id=(request.args.get("tab_id") or "").strip(),
         scope=(request.args.get("scope") or "all").strip(),
+        force_refresh=_truthy(request.args.get("refresh"), default=False),
+    )
+    pagination = payload.get("pagination") or {}
+    current_app.logger.info(
+        "[MP3_AUDIO_ASSET_CLIENT] request_id=%s client_id=%s client_seq=%s "
+        "client_trigger=%s client_inflight=%s force_refresh=%s cache_hit=%s "
+        "cache_age_ms=%s items=%s",
+        getattr(g, "request_id", "unknown"),
+        client_trace["client_id"],
+        client_trace["client_seq"],
+        client_trace["client_trigger"],
+        client_trace["client_inflight"],
+        _truthy(request.args.get("refresh"), default=False),
+        pagination.get("catalog_cache_hit"),
+        pagination.get("catalog_cache_age_ms"),
+        len(payload.get("items") or []),
     )
     return jsonify({"success": True, "data": payload, "items": payload["items"]})
 
@@ -405,7 +488,10 @@ def create_job(current_user):
             audio = audio_meta_from_asset_reference(audio_asset_id)
         except ValueError as exc:
             return jsonify({"success": False, "message": str(exc)}), 400
-    source_feature = UPLOAD_SOURCE_FEATURE if audio_file else WORKFLOW_SOURCE_FEATURE
+    source_feature, source_task_id = _audio_asset_source_identity(
+        audio_asset_id,
+        is_upload=bool(audio_file),
+    )
     task = PublicationTask(
         status="pending",
         current_step="queued",
@@ -414,7 +500,7 @@ def create_job(current_user):
             "feature": FEATURE_NAME,
             "user_id": user_id,
             "source_feature": source_feature,
-            "source_task_id": audio_asset_id,
+            "source_task_id": source_task_id,
             FEATURE_NAME: {
                 "audio_asset_id": audio_asset_id,
                 "input_source": source_mode,
@@ -438,7 +524,7 @@ def create_job(current_user):
             "generate_subtitles": generate_subtitles,
             "direct_ds_response_chars": len(ds_response_text) if source_mode == "ds_response" else 0,
             "source_feature": source_feature,
-            "source_task_id": audio_asset_id,
+            "source_task_id": source_task_id,
             "children": {},
             "logs": [],
         },
@@ -641,14 +727,236 @@ def get_bilibili_uploads(current_user, job_id):
     })
 
 
+def _task_json_text(column, *path):
+    expression = column
+    for key in path:
+        expression = expression[key]
+    return expression.as_string()
+
+
+def _bilibili_upload_parent_snapshot(
+    current_user,
+    job_id,
+    *,
+    credential_id,
+    requested_cover_key,
+):
+    effective_feature = func.coalesce(
+        func.nullif(PublicationTask.feature, ""),
+        _task_json_text(PublicationTask.params, "feature"),
+    )
+    effective_user_id = func.coalesce(
+        func.nullif(PublicationTask.user_id, ""),
+        _task_json_text(PublicationTask.params, "user_id"),
+    )
+    credential_name = func.coalesce(
+        PlatformCredentialAccount.owner_label,
+        PlatformCredentialAccount.name,
+        PlatformCredentialAccount.masked_summary,
+        PlatformCredentialAccount.id,
+    )
+    result = PublicationTask.result
+    allowed_user_ids = _visible_user_ids(current_user)
+
+    def build_query(*, legacy_projection):
+        projected_user_id = (
+            effective_user_id if legacy_projection else PublicationTask.user_id
+        )
+        query = (
+            db.session.query(
+                PublicationTask.id.label("id"),
+                projected_user_id.label("user_id"),
+                func.coalesce(
+                    _task_json_text(result, "landscape_video", "video_path"),
+                    _task_json_text(
+                        result,
+                        "landscape_video",
+                        "landscape_video_path",
+                    ),
+                ).label("landscape_video_path"),
+                func.coalesce(
+                    _task_json_text(result, "vertical_video", "video_path"),
+                    _task_json_text(
+                        result,
+                        "vertical_video",
+                        "vertical_video_path",
+                    ),
+                ).label("vertical_video_path"),
+                _task_json_text(result, "plan", "xiaojunjun_video_title").label(
+                    "landscape_title"
+                ),
+                _task_json_text(result, "plan", "ciketc_video_title").label(
+                    "vertical_title"
+                ),
+                _task_json_text(result, "plan", "title").label("plan_title"),
+                _task_json_text(
+                    result,
+                    "artifacts",
+                    requested_cover_key or "__none__",
+                    "path",
+                ).label("requested_cover_path"),
+                _task_json_text(
+                    result,
+                    "artifacts",
+                    "xiaojunjun_cover",
+                    "path",
+                ).label("xiaojunjun_cover_path"),
+                _task_json_text(
+                    result,
+                    "artifacts",
+                    "finance_cover",
+                    "path",
+                ).label("finance_cover_path"),
+                _task_json_text(
+                    result,
+                    "artifacts",
+                    "xiaojunjun_background",
+                    "path",
+                ).label("xiaojunjun_background_path"),
+                _task_json_text(
+                    result,
+                    "artifacts",
+                    "podcast_cover",
+                    "path",
+                ).label("podcast_cover_path"),
+                _task_json_text(
+                    result,
+                    "artifacts",
+                    "vertical_cover",
+                    "path",
+                ).label("vertical_cover_path"),
+                _task_json_text(
+                    result,
+                    "artifacts",
+                    "audio_background",
+                    "path",
+                ).label("audio_background_path"),
+                credential_name.label("credential_name"),
+            )
+            .outerjoin(
+                PlatformCredentialAccount,
+                PlatformCredentialAccount.id == str(credential_id or ""),
+            )
+            .filter(PublicationTask.id == str(job_id))
+        )
+        if legacy_projection:
+            return query.filter(effective_feature == FEATURE_NAME).filter(
+                effective_user_id.in_(allowed_user_ids)
+            )
+        return query.filter(PublicationTask.feature == FEATURE_NAME).filter(
+            PublicationTask.user_id.in_(allowed_user_ids)
+        )
+
+    def load_projected_snapshot():
+        return build_query(legacy_projection=False).first()
+
+    row = _db_retry(
+        load_projected_snapshot,
+        f"mp3 video workflow get Bilibili upload parent {job_id}",
+        attempts=3,
+    )
+    if row is None:
+
+        def load_legacy_snapshot():
+            return build_query(legacy_projection=True).first()
+
+        row = _db_retry(
+            load_legacy_snapshot,
+            f"mp3 video workflow get legacy Bilibili upload parent {job_id}",
+            attempts=3,
+        )
+    if row is None:
+        return None
+
+    artifacts = {
+        "xiaojunjun_cover": {"path": row.xiaojunjun_cover_path},
+        "finance_cover": {"path": row.finance_cover_path},
+        "xiaojunjun_background": {"path": row.xiaojunjun_background_path},
+        "podcast_cover": {"path": row.podcast_cover_path},
+        "vertical_cover": {"path": row.vertical_cover_path},
+        "audio_background": {"path": row.audio_background_path},
+    }
+    if requested_cover_key:
+        artifacts[str(requested_cover_key)] = {"path": row.requested_cover_path}
+    return SimpleNamespace(
+        id=str(row.id),
+        user_id=str(row.user_id or ""),
+        credential_name=row.credential_name,
+        result={
+            "plan": {
+                "xiaojunjun_video_title": row.landscape_title,
+                "ciketc_video_title": row.vertical_title,
+                "title": row.plan_title,
+            },
+            "landscape_video": {"video_path": row.landscape_video_path},
+            "vertical_video": {"video_path": row.vertical_video_path},
+            "artifacts": artifacts,
+        },
+    )
+
+
+def _bilibili_upload_fallback_response_text(job_id):
+    result = PublicationTask.result
+
+    def load_fallback_text():
+        return (
+            db.session.query(
+                _task_json_text(result, "source", "response_text").label("source_response"),
+                _task_json_text(result, "source", "initial_response_text").label(
+                    "source_initial"
+                ),
+                _task_json_text(result, "source", "final_response_text").label(
+                    "source_final"
+                ),
+                _task_json_text(result, "initial_response_text").label("initial_response"),
+                _task_json_text(result, "gemini", "response_text").label("gemini_response"),
+                _task_json_text(result, "gemini", "initial_response_text").label(
+                    "gemini_initial"
+                ),
+                _task_json_text(result, "gemini", "final_response_text").label(
+                    "gemini_final"
+                ),
+            )
+            .filter(PublicationTask.id == str(job_id))
+            .first()
+        )
+
+    row = _db_retry(
+        load_fallback_text,
+        f"mp3 video workflow get Bilibili title fallback {job_id}",
+        attempts=3,
+    )
+    if row is None:
+        return ""
+    return next(
+        (
+            str(value).strip()
+            for value in row
+            if str(value or "").strip()
+        ),
+        "",
+    )
+
+
 @mp3_video_workflow_bp.route("/jobs/<job_id>/bilibili-upload", methods=["POST"])
 @require_login
 def submit_bilibili_upload(current_user, job_id):
-    task = _get_owned_task(current_user, job_id)
+    data = _request_payload()
+    credential_id = _clean_upload_text(
+        data.get("credential_id") or data.get("platform_credential_id"),
+        max_length=80,
+    )
+    cover_key = str(data.get("cover_key") or "").strip()
+    task = _bilibili_upload_parent_snapshot(
+        current_user,
+        job_id,
+        credential_id=credential_id,
+        requested_cover_key=cover_key,
+    )
+    release_db_session_quietly()
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
 
-    data = _request_payload()
     video_key = str(data.get("video_key") or data.get("video") or "landscape").strip().lower()
     if video_key not in {"landscape", "vertical"}:
         return jsonify({"success": False, "message": "video_key 只能是 landscape 或 vertical"}), 400
@@ -660,11 +968,18 @@ def submit_bilibili_upload(current_user, job_id):
 
     result = task.result or {}
     ds = _ds_extract_payload(result)
-    title = _clean_bilibili_upload_title(data.get("title")) or _default_bilibili_title(result, ds, video_key)
+    manual_title = _clean_bilibili_upload_title(data.get("title"))
+    title = manual_title or _default_bilibili_title(result, ds, video_key)
+    if not title and not manual_title:
+        fallback_text = _bilibili_upload_fallback_response_text(job_id)
+        if fallback_text:
+            result = {**result, "source": {"response_text": fallback_text}}
+            ds = _ds_extract_payload(result)
+            title = _default_bilibili_title(result, ds, video_key)
+    release_db_session_quietly()
     if not title:
         return jsonify({"success": False, "message": "B站标题不能为空"}), 400
 
-    cover_key = str(data.get("cover_key") or "").strip()
     cover_path, resolved_cover_key = _resolve_bilibili_cover(result, video_key, cover_key)
     if cover_key and not cover_path:
         return jsonify({"success": False, "message": f"封面产物不存在：{cover_key}"}), 400
@@ -689,6 +1004,7 @@ def submit_bilibili_upload(current_user, job_id):
                     else ("ds_6" if video_key == "landscape" else "ds_7")
                 ),
             },
+            credential_name=task.credential_name,
         )
     except ValueError as exc:
         return jsonify({"success": False, "message": str(exc)}), 400
@@ -714,39 +1030,36 @@ def submit_bilibili_upload(current_user, job_id):
 @mp3_video_workflow_bp.route("/jobs/<job_id>/bilibili-upload/<upload_task_id>/cancel", methods=["POST"])
 @require_login
 def cancel_bilibili_upload(current_user, job_id, upload_task_id):
-    task = _get_owned_task(current_user, job_id)
+    task = _get_owned_task(
+        current_user,
+        job_id,
+        include_params=False,
+        include_result=False,
+    )
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
 
-    child = (
-        PublicationTask.query.options(load_only(
-            PublicationTask.id,
-            PublicationTask.celery_task_id,
-            PublicationTask.status,
-            PublicationTask.current_step,
-            PublicationTask.progress,
-            PublicationTask.error_message,
-            PublicationTask.feature,
-            PublicationTask.parent_feature,
-            PublicationTask.parent_task_id,
-            PublicationTask.created_at,
-            PublicationTask.completed_at,
-        ))
-        .filter(PublicationTask.id == upload_task_id)
-        .filter(PublicationTask.feature == "publisher")
-        .filter(PublicationTask.parent_feature == FEATURE_NAME)
-        .filter(PublicationTask.parent_task_id == task.id)
-        .first()
+    source_label = f"{FEATURE_NAME}:bilibili_upload"
+    row = shared_bilibili_upload_action_row(
+        upload_task_id,
+        parent_task_id=task.id,
+        parent_feature=FEATURE_NAME,
+        source_label=source_label,
+        for_update=True,
     )
-    if not child or not _bilibili_upload_child_payload(child):
+    if row is None:
         return jsonify({"success": False, "message": "B站上传任务不存在"}), 404
+    child, upload = row
+    item = shared_bilibili_upload_child_payload(
+        child,
+        source_label=source_label,
+        upload=upload,
+    )
 
-    ok, message = _cancel_bilibili_upload_child(child)
+    ok, message = shared_cancel_bilibili_upload_child(child, upload=upload)
     if ok:
         _clear_job_detail_cache(job_id)
-    item = getattr(child, "_bilibili_cancel_response_payload", None)
-    if item is None:
-        item = _bilibili_upload_child_payload(child)
+    item = getattr(child, "_bilibili_cancel_response_payload", None) or item
     status_code = 200 if ok else 409
     return jsonify({
         "success": ok,
@@ -832,7 +1145,9 @@ def cancel_douyin_upload(current_user, job_id, upload_task_id):
     if not child:
         return jsonify({"success": False, "message": "抖音上传任务不存在"}), 404
     ok, message = cancel_douyin_publish_task(child)
-    item = douyin_publish_payload(child)
+    item = getattr(child, "_browser_publish_cancel_response_payload", None)
+    if item is None:
+        item = douyin_publish_payload(child)
     if ok:
         _clear_job_detail_cache(job_id)
     return jsonify({"success": ok, "message": message, "data": {"upload_task": item}, "upload_task": item}), (200 if ok else 409)
@@ -903,7 +1218,9 @@ def cancel_wechat_channels_upload(current_user, job_id, upload_task_id):
     if not child:
         return jsonify({"success": False, "message": "视频号上传任务不存在"}), 404
     ok, message = cancel_wechat_channels_publish_task(child)
-    item = wechat_channels_publish_payload(child)
+    item = getattr(child, "_browser_publish_cancel_response_payload", None)
+    if item is None:
+        item = wechat_channels_publish_payload(child)
     if ok:
         _clear_job_detail_cache(job_id)
     return jsonify({"success": ok, "message": message, "data": {"upload_task": item}, "upload_task": item}), (200 if ok else 409)
@@ -918,8 +1235,8 @@ def cancel_job(current_user, job_id):
     if task.status in {"completed", "failed", "canceled"}:
         payload = _job_payload(task)
         return jsonify({"success": True, "message": "任务已结束", **payload, "data": payload})
-    if task.celery_task_id:
-        celery_app.control.revoke(task.celery_task_id, terminate=False)
+    task_id = str(task.id)
+    celery_task_id = str(task.celery_task_id or "").strip()
     result = dict(task.result or {})
     result["canceled_at"] = datetime.utcnow().isoformat() + "Z"
     task.status = "canceled"
@@ -927,10 +1244,18 @@ def cancel_job(current_user, job_id):
     task.completed_at = datetime.utcnow()
     task.result = result
     flag_modified(task, "result")
-    db.session.commit()
-    _clear_job_detail_cache(task.id)
     payload = _job_payload(task)
-    return jsonify({"success": True, "message": "任务已取消", **payload, "data": payload})
+    db.session.commit()
+    _clear_job_detail_cache(task_id)
+    revoked = revoke_celery_task_after_db_commit(
+        celery_task_id,
+        operation=f"mp3 video workflow cancel revoke task={task_id}",
+        business_task_id=task_id,
+    )
+    message = "任务已取消"
+    if celery_task_id and not revoked:
+        message += "；broker 撤回失败，终态门禁将拦截旧消息"
+    return jsonify({"success": True, "message": message, **payload, "data": payload})
 
 
 @mp3_video_workflow_bp.route("/jobs/<job_id>/retry", methods=["POST"])
@@ -973,25 +1298,12 @@ def retry_job(current_user, job_id):
     task.completed_at = None
     task.result = result
     flag_modified(task, "result")
-    db.session.commit()
-    try:
-        celery_task = apply_async_after_db_release(
-            process_mp3_video_workflow_job,
-            args=[task.id],
-            queue=QUEUE_NAME,
-            retry=False,
-        )
-    except Exception as exc:
-        task.status = "failed"
-        task.current_step = "failed"
-        task.error_message = f"续跑任务入队失败: {exc}"
-        task.completed_at = datetime.utcnow()
-        db.session.commit()
-        return jsonify({"success": False, "message": task.error_message}), 502
-    task.celery_task_id = celery_task.id
-    db.session.commit()
-    _clear_job_detail_cache(task.id)
-    payload = _job_payload(task)
+    payload, enqueue_error = _commit_and_enqueue_prepared_job(
+        task,
+        enqueue_error_prefix="续跑任务入队失败",
+    )
+    if enqueue_error:
+        return jsonify({"success": False, "message": enqueue_error}), 502
     return jsonify({"success": True, "message": "任务已从失败处续跑", **payload, "data": payload})
 
 
@@ -1010,25 +1322,12 @@ def continue_full_video(current_user, job_id):
         payload = _job_payload(task)
         return jsonify({"success": False, "message": message, **payload, "data": payload}), 400
 
-    db.session.commit()
-    try:
-        celery_task = apply_async_after_db_release(
-            process_mp3_video_workflow_job,
-            args=[task.id],
-            queue=QUEUE_NAME,
-            retry=False,
-        )
-    except Exception as exc:
-        task.status = "failed"
-        task.current_step = "failed"
-        task.error_message = f"完整视频续跑任务入队失败: {exc}"
-        task.completed_at = datetime.utcnow()
-        db.session.commit()
-        return jsonify({"success": False, "message": task.error_message}), 502
-    task.celery_task_id = celery_task.id
-    db.session.commit()
-    _clear_job_detail_cache(task.id)
-    payload = _job_payload(task)
+    payload, enqueue_error = _commit_and_enqueue_prepared_job(
+        task,
+        enqueue_error_prefix="完整视频续跑任务入队失败",
+    )
+    if enqueue_error:
+        return jsonify({"success": False, "message": enqueue_error}), 502
     return jsonify({"success": True, "message": "已从关键帧继续生成完整视频", **payload, "data": payload})
 
 
@@ -1048,25 +1347,12 @@ def regenerate_videos(current_user, job_id):
         payload = _job_payload(task)
         return jsonify({"success": False, "message": message, **payload, "data": payload}), 400
 
-    db.session.commit()
-    try:
-        celery_task = apply_async_after_db_release(
-            process_mp3_video_workflow_job,
-            args=[task.id],
-            queue=QUEUE_NAME,
-            retry=False,
-        )
-    except Exception as exc:
-        task.status = "failed"
-        task.current_step = "failed"
-        task.error_message = f"视频重生成任务入队失败: {exc}"
-        task.completed_at = datetime.utcnow()
-        db.session.commit()
-        return jsonify({"success": False, "message": task.error_message}), 502
-    task.celery_task_id = celery_task.id
-    db.session.commit()
-    _clear_job_detail_cache(task.id)
-    payload = _job_payload(task)
+    payload, enqueue_error = _commit_and_enqueue_prepared_job(
+        task,
+        enqueue_error_prefix="视频重生成任务入队失败",
+    )
+    if enqueue_error:
+        return jsonify({"success": False, "message": enqueue_error}), 502
     plan_audio = (payload.get("plan") or {}).get("audio") or {}
     range_text = (
         f"（{_format_audio_time(plan_audio.get('start_seconds'))}"
@@ -1084,28 +1370,39 @@ def regenerate_videos(current_user, job_id):
 @mp3_video_workflow_bp.route("/jobs/<job_id>/artifacts/<artifact_key>/regenerate", methods=["POST"])
 @require_login
 def regenerate_artifact(current_user, job_id, artifact_key):
-    task = _get_owned_task(current_user, job_id)
-    if not task:
-        return jsonify({"success": False, "message": "任务不存在"}), 404
-    if task.status not in {"completed", "failed", "canceled"}:
-        payload = _job_payload(task)
-        return jsonify({"success": False, "message": "任务正在运行中，请等本轮结束后再重做封皮", **payload, "data": payload}), 409
-
     key = str(artifact_key or "").strip()
     if key not in VISUAL_ARTIFACT_KEYS:
         return jsonify({"success": False, "message": "这个产物不支持重做封皮/背景图"}), 400
 
+    task = _get_owned_task(current_user, job_id)
+    if not task:
+        release_db_session_quietly()
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+
+    expected_updated_at = task.updated_at
+    expected_status = str(task.status or "")
+    task_snapshot = _detached_job_payload_snapshot(task)
+    result = task_snapshot.result
+    assert_db_session_clean("MP3 visual artifact regeneration")
+    release_db_session_quietly()
+
+    if expected_status not in {"completed", "failed", "canceled"}:
+        payload = _job_payload(task_snapshot)
+        release_db_session_quietly()
+        return jsonify({"success": False, "message": "任务正在运行中，请等本轮结束后再重做封皮", **payload, "data": payload}), 409
+
     data = _request_payload()
     title_text = data.get("title_text") or data.get("title") or data.get("text") or ""
-    result = dict(task.result or {})
     plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
     if not plan:
         return jsonify({"success": False, "message": "当前任务缺少 DS/规划结果，不能重做封皮"}), 400
 
     infographic = result.get("infographic") if isinstance(result.get("infographic"), dict) else {}
+    bilibili_uploads = _bilibili_upload_children(task_snapshot.id)
+    release_db_session_quietly()
     try:
         new_artifact = regenerate_visual_artifact(
-            task.id,
+            task_snapshot.id,
             key,
             plan=plan,
             title_text=title_text,
@@ -1118,7 +1415,7 @@ def regenerate_artifact(current_user, job_id, artifact_key):
                 or ""
             ),
             audio=result.get("audio") if isinstance(result.get("audio"), dict) else {},
-            created_at=task.created_at,
+            created_at=task_snapshot.created_at,
         )
     except Mp3VideoWorkflowError as exc:
         return jsonify({"success": False, "message": str(exc)}), 400
@@ -1146,18 +1443,52 @@ def regenerate_artifact(current_user, job_id, artifact_key):
     logs.append({
         "step": "artifact_regenerated",
         "message": f"用户手动重做封皮/背景图：{key}",
-        "progress": task.progress or 100,
+        "progress": task_snapshot.progress or 100,
         "updated_at": now,
     })
     result["logs"] = logs[-160:]
 
-    task.result = result
-    flag_modified(task, "result")
+    written_at = datetime.utcnow()
+    update_query = PublicationTask.query.filter(
+        PublicationTask.id == task_snapshot.id,
+        PublicationTask.status == expected_status,
+    )
+    if expected_updated_at is None:
+        update_query = update_query.filter(PublicationTask.updated_at.is_(None))
+    else:
+        update_query = update_query.filter(PublicationTask.updated_at == expected_updated_at)
+    updated = update_query.update(
+        {
+            PublicationTask.result: result,
+            PublicationTask.updated_at: written_at,
+        },
+        synchronize_session=False,
+    )
+    if updated != 1:
+        db.session.rollback()
+        release_db_session_quietly()
+        return jsonify({
+            "success": False,
+            "message": "任务状态已变化，本次新图未覆盖最新任务结果；请刷新后重试",
+        }), 409
     db.session.commit()
-    _write_result_json_if_present(result)
-    _clear_download_result_cache(task.id)
+    release_db_session_quietly()
 
-    payload = _job_payload(task, include_raw=True)
+    _write_result_json_if_present(result)
+    _clear_download_result_cache(task_snapshot.id)
+
+    task_snapshot.result = result
+    task_snapshot.updated_at = written_at
+    payload = _job_payload(
+        task_snapshot,
+        include_raw=True,
+        bilibili_uploads=bilibili_uploads,
+    )
+    _store_job_detail(
+        _job_detail_cache_key(current_user, task_snapshot.id),
+        _job_detail_version(task_snapshot),
+        payload,
+    )
     return jsonify({"success": True, "message": "封皮已重做并替换，重新生成视频时会使用新版图片", **payload, "data": payload})
 
 
@@ -1231,6 +1562,87 @@ def download_video(current_user, job_id, video_key):
     if not _video_file_ready(path):
         return jsonify({"success": False, "message": "视频文件损坏或尚未完成，请重新生成"}), 409
     return send_file(path, mimetype="video/mp4", as_attachment=True, download_name=f"{job_id}-{video_key}.mp4")
+
+
+def _detached_job_payload_snapshot(task):
+    """Freeze the response fields before releasing the request's DB checkout."""
+    return SimpleNamespace(
+        id=str(task.id),
+        celery_task_id=task.celery_task_id,
+        status=str(task.status or ""),
+        current_step=task.current_step,
+        progress=task.progress,
+        error_message=task.error_message,
+        feature=task.feature,
+        user_id=task.user_id,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+        completed_at=task.completed_at,
+        params=copy.deepcopy(task.params) if isinstance(task.params, dict) else {},
+        result=copy.deepcopy(task.result) if isinstance(task.result, dict) else {},
+    )
+
+
+def _commit_and_enqueue_prepared_job(task, *, enqueue_error_prefix):
+    """Commit one prepared MP3 job without carrying an expired ORM into broker I/O.
+
+    The response snapshot and child summaries are frozen before the first commit.
+    Broker publication therefore receives only the stable task ID, and the returned
+    Celery ID is persisted with a narrow bulk update instead of reloading the wide
+    ``params/result`` row after each commit.
+    """
+    task_snapshot = _detached_job_payload_snapshot(task)
+    task_id = task_snapshot.id
+    bilibili_uploads = _bilibili_upload_children(task_id)
+    db.session.commit()
+    release_db_session_quietly()
+    assert_db_session_clean("MP3 workflow broker publish")
+
+    try:
+        celery_task = apply_async_after_db_release(
+            process_mp3_video_workflow_job,
+            args=[task_id],
+            queue=QUEUE_NAME,
+            retry=False,
+        )
+    except Exception as exc:
+        error_message = f"{enqueue_error_prefix}: {exc}"
+        failed_at = datetime.utcnow()
+        try:
+            PublicationTask.query.filter(
+                PublicationTask.id == task_id,
+            ).update(
+                {
+                    PublicationTask.status: "failed",
+                    PublicationTask.current_step: "failed",
+                    PublicationTask.error_message: error_message,
+                    PublicationTask.completed_at: failed_at,
+                },
+                synchronize_session=False,
+            )
+            db.session.commit()
+        finally:
+            release_db_session_quietly()
+        return None, error_message
+
+    try:
+        PublicationTask.query.filter(
+            PublicationTask.id == task_id,
+        ).update(
+            {PublicationTask.celery_task_id: celery_task.id},
+            synchronize_session=False,
+        )
+        db.session.commit()
+    finally:
+        release_db_session_quietly()
+
+    task_snapshot.celery_task_id = celery_task.id
+    _clear_job_detail_cache(task_id)
+    payload = _job_payload(
+        task_snapshot,
+        bilibili_uploads=bilibili_uploads,
+    )
+    return payload, None
 
 
 def _get_owned_task(
@@ -1499,6 +1911,32 @@ def _audio_asset_workflow_stats(asset_ids, user_id=None):
         return {}
 
     stats = {asset_id: _empty_audio_asset_workflow_stats() for asset_id in ids}
+    asset_id_by_source_identity = {}
+    ambiguous_source_identities = set()
+    for asset_id in ids:
+        source_identities = [(WORKFLOW_SOURCE_FEATURE, asset_id)]
+        if asset_id.startswith("pipeline:"):
+            normalized_asset_id = asset_id.split(":", 1)[1].strip()
+            source_identities = [
+                (CONTENT_PIPELINE_ASSET_SOURCE_FEATURE, normalized_asset_id),
+                (WORKFLOW_SOURCE_FEATURE, asset_id[:36]),
+            ]
+        for source_identity in source_identities:
+            _source_feature, source_key = source_identity
+            if not source_key:
+                continue
+            existing = asset_id_by_source_identity.get(source_identity)
+            if existing and existing != asset_id:
+                ambiguous_source_identities.add(source_identity)
+                continue
+            asset_id_by_source_identity[source_identity] = asset_id
+    for source_identity in ambiguous_source_identities:
+        asset_id_by_source_identity.pop(source_identity, None)
+    source_keys = list(
+        dict.fromkeys(source_key for _source_feature, source_key in asset_id_by_source_identity)
+    )
+    if not source_keys:
+        return stats
 
     def load_direct_rows():
         query = (
@@ -1510,10 +1948,11 @@ def _audio_asset_workflow_stats(asset_ids, user_id=None):
                 PublicationTask.progress.label("progress"),
                 PublicationTask.created_at.label("created_at"),
                 PublicationTask.completed_at.label("completed_at"),
+                PublicationTask.source_feature.label("source_feature"),
                 PublicationTask.source_task_id.label("source_task_id"),
             )
             .filter(PublicationTask.feature == FEATURE_NAME)
-            .filter(PublicationTask.source_task_id.in_(ids))
+            .filter(PublicationTask.source_task_id.in_(source_keys))
         )
         if user_id:
             query = query.filter(PublicationTask.user_id.in_(_visible_user_ids(user_id)))
@@ -1521,7 +1960,13 @@ def _audio_asset_workflow_stats(asset_ids, user_id=None):
 
     rows = _db_retry(load_direct_rows, "mp3 video workflow audio asset stats by source_task_id")
     for row in rows:
-        asset_id = str(row.source_task_id or "").strip()
+        source_identity = (
+            str(row.source_feature or "").strip(),
+            str(row.source_task_id or "").strip(),
+        )
+        asset_id = asset_id_by_source_identity.get(source_identity)
+        if not asset_id:
+            continue
         _append_workflow_stat(stats, asset_id, row)
 
     return stats
@@ -1586,7 +2031,14 @@ def _job_list_payload(task):
 
 
 def _audio_summary_from_task(task):
-    attachment_id = str(task.source_task_id or "").strip() or None
+    source_task_id = str(task.source_task_id or "").strip() or None
+    attachment_id = source_task_id
+    if (
+        source_task_id
+        and task.source_feature == CONTENT_PIPELINE_ASSET_SOURCE_FEATURE
+        and not source_task_id.startswith("pipeline:")
+    ):
+        attachment_id = f"pipeline:{source_task_id}"
     path = str(task.mp3_audio_path or "").strip()
     filename = str(task.mp3_audio_filename or "").strip()
     if path and not filename:
@@ -1606,7 +2058,7 @@ def _audio_summary_from_task(task):
     }
 
 
-def _job_payload(task, include_raw=False):
+def _job_payload(task, include_raw=False, *, bilibili_uploads=_JOB_PAYLOAD_BILIBILI_UNSET):
     result = task.result or {}
     params = task.params or {}
     request_payload = params.get(FEATURE_NAME) or {}
@@ -1656,7 +2108,11 @@ def _job_payload(task, include_raw=False):
             ),
             "history_count": len(result.get("regenerated_video_history") or []),
         },
-        "bilibili_uploads": _bilibili_upload_children(task.id),
+        "bilibili_uploads": (
+            _bilibili_upload_children(task.id)
+            if bilibili_uploads is _JOB_PAYLOAD_BILIBILI_UNSET
+            else bilibili_uploads
+        ),
         "landscape_video": result.get("landscape_video"),
         "vertical_video": result.get("vertical_video"),
         "ds_extract": _ds_extract_payload(result),
@@ -2225,12 +2681,20 @@ def _ds_extract_payload(result):
     clip = _extract_clip(sections.get("4") or raw_text)
     plan = result.get("plan") if isinstance(result, dict) and isinstance(result.get("plan"), dict) else {}
     plan_clip = _clip_from_plan(plan)
+    # Once the production planner has accepted and persisted a structured
+    # result, it is authoritative for display too. Re-parsing the raw model
+    # prose here can reintroduce headings or mixed separators that the planner
+    # already normalized and validated.
+    plan_title_1 = _clean_ds_title(_plan_title_option(plan, 0) or "")
+    plan_title_2 = _clean_ds_title(_plan_title_option(plan, 1) or plan.get("title") or "")
+    plan_title_6 = _clean_ds_title(plan.get("xiaojunjun_video_title") or "", prefer_closed_door=True)
+    plan_title_7 = _clean_ds_title(plan.get("ciketc_video_title") or "", prefer_closed_door=True)
     payload = {
-        "title_1": _clean_ds_title(sections.get("1", "")),
-        "title_2": _clean_ds_title(sections.get("2", "")),
+        "title_1": plan_title_1 or _clean_ds_title(sections.get("1", "")),
+        "title_2": plan_title_2 or _clean_ds_title(sections.get("2", "")),
         "clip": clip,
-        "title_6": _clean_ds_title(sections.get("6", ""), prefer_closed_door=True),
-        "title_7": _clean_ds_title(sections.get("7", ""), prefer_closed_door=True),
+        "title_6": plan_title_6 or _clean_ds_title(sections.get("6", ""), prefer_closed_door=True),
+        "title_7": plan_title_7 or _clean_ds_title(sections.get("7", ""), prefer_closed_door=True),
         "raw_text": raw_text,
         "raw_sections": sections,
     }

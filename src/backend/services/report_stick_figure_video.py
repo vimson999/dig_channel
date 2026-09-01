@@ -262,6 +262,7 @@ def render_scene_timeline(
     fps: int = DEFAULT_FPS,
     render_options=None,
     progress_callback=None,
+    output_root: str | Path | None = None,
 ) -> dict:
     if not scenes:
         raise ValueError("没有可合成的音画分镜")
@@ -345,12 +346,20 @@ def render_scene_timeline(
             f"音频 {whole_audio_seconds:.3f} 秒"
         )
 
-    output_path = Path(video_output_path(workflow_task_id))
+    if output_root is None:
+        output_path = Path(video_output_path(workflow_task_id))
+        manifest_path = Path(timeline_manifest_path(workflow_task_id))
+        subtitle_path = Path(subtitle_output_path(workflow_task_id))
+    else:
+        explicit_root = Path(output_root).expanduser().resolve()
+        video_root = explicit_root / "video"
+        video_root.mkdir(parents=True, exist_ok=True)
+        output_path = video_root / "video.mp4"
+        manifest_path = video_root / "timeline.json"
+        subtitle_path = video_root / "subtitles.ass"
     part_path = output_path.with_name(f"{output_path.stem}.part-{uuid.uuid4().hex[:8]}{output_path.suffix}")
     log_path = output_path.with_suffix(".ffmpeg.log")
-    manifest_path = Path(timeline_manifest_path(workflow_task_id))
     manifest_part = manifest_path.with_name(f"{manifest_path.name}.part-{uuid.uuid4().hex[:8]}")
-    subtitle_path = Path(subtitle_output_path(workflow_task_id))
     subtitle_part = subtitle_path.with_name(f"{subtitle_path.name}.part-{uuid.uuid4().hex[:8]}")
 
     subtitle_entries = _build_subtitle_entries(timeline) if options["subtitles_enabled"] else []

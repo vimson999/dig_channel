@@ -17,6 +17,11 @@
             tone: 'emerald',
             icon: 'fa-file-circle-xmark',
         },
+        web_upload: {
+            label: '网页投递原件',
+            tone: 'indigo',
+            icon: 'fa-cloud-arrow-up',
+        },
         manual_publish: {
             label: '手动发布临时目录',
             tone: 'amber',
@@ -39,6 +44,7 @@
         emerald: 'bg-emerald-50 text-emerald-700 border-emerald-100',
         amber: 'bg-amber-50 text-amber-700 border-amber-100',
         violet: 'bg-violet-50 text-violet-700 border-violet-100',
+        indigo: 'bg-indigo-50 text-indigo-700 border-indigo-100',
         slate: 'bg-slate-50 text-slate-700 border-slate-100',
     };
 
@@ -70,6 +76,8 @@
             'sync-raw-days',
             'include-content-batches',
             'content-batch-days',
+            'include-web-uploads',
+            'web-upload-days',
             'include-manual-publish',
             'manual-publish-days',
             'include-pytest-batches',
@@ -304,6 +312,8 @@
             sync_raw_days: readInt(els.syncRawDays, 3),
             include_content_pipeline_batches: Boolean(els.includeContentBatches?.checked),
             content_pipeline_batch_days: readInt(els.contentBatchDays, 3),
+            include_web_uploads: Boolean(els.includeWebUploads?.checked),
+            web_upload_days: readInt(els.webUploadDays, 3),
             include_manual_publish: Boolean(els.includeManualPublish?.checked),
             manual_publish_days: readInt(els.manualPublishDays, 3),
             include_pytest_batches: Boolean(els.includePytestBatches?.checked),
@@ -341,6 +351,8 @@
         setValue(els.syncRawDays, policy.sync_raw_days);
         setChecked(els.includeContentBatches, policy.include_content_pipeline_batches);
         setValue(els.contentBatchDays, policy.content_pipeline_batch_days);
+        setChecked(els.includeWebUploads, policy.include_web_uploads);
+        setValue(els.webUploadDays, policy.web_upload_days);
         setChecked(els.includeManualPublish, policy.include_manual_publish);
         setValue(els.manualPublishDays, policy.manual_publish_days);
         setChecked(els.includePytestBatches, policy.include_pytest_batches);
@@ -384,6 +396,8 @@
             setValue(els.syncRawDays, policy.sync_raw_days);
             setChecked(els.includeContentBatches, policy.include_content_pipeline_batches);
             setValue(els.contentBatchDays, policy.content_pipeline_batch_days);
+            setChecked(els.includeWebUploads, policy.include_web_uploads);
+            setValue(els.webUploadDays, policy.web_upload_days);
             setChecked(els.includeManualPublish, policy.include_manual_publish);
             setValue(els.manualPublishDays, policy.manual_publish_days);
             setChecked(els.includePytestBatches, policy.include_pytest_batches);
@@ -410,6 +424,8 @@
             'sync_raw_days',
             'include_content_pipeline_batches',
             'content_pipeline_batch_days',
+            'include_web_uploads',
+            'web_upload_days',
             'include_manual_publish',
             'manual_publish_days',
             'include_pytest_batches',
@@ -700,6 +716,7 @@
     function rootLabel(key) {
         return {
             content_pipeline_root: '内容流水线根目录',
+            web_uploads_dir: '网页投递暂存目录',
             zsxq_data_dir: '知识星球数据目录',
             processed_data_dir: '生成视频目录',
             pytest_project_dir: 'pytest 项目目录',

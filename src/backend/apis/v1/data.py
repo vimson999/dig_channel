@@ -59,25 +59,29 @@ def get_table_data(current_user):
                 channel_ids = [int(cid.strip()) for cid in request.args.get('channel_ids').split(',') if cid.strip()]
             except ValueError:
                 return handle_api_error(400, "频道ID格式错误")
+
+        page = int(request.args.get('page', 1))
+        per_page = min(int(request.args.get('per_page', 10)), 100)
+        if page < 1 or per_page < 1:
+            return handle_api_error(400, "page 和 per_page 必须为正整数")
         
-        # 获取表格数据（只获取当前用户的数据）
-        result = DataService.get_table_data(start_date, end_date, active_only, current_user.id, channel_ids)
+        # 日期行必须先在数据库层分页，避免为了 10 行页面物化整个日期范围。
+        result = DataService.get_table_data(
+            start_date,
+            end_date,
+            active_only,
+            current_user.id,
+            channel_ids,
+            page=page,
+            per_page=per_page,
+        )
         
         if result['success']:
             data = result['data']
             
-            # 分页处理
-            page = int(request.args.get('page', 1))
-            per_page = min(int(request.args.get('per_page', 10)), 100)
-            
-            rows = data['rows']
-            total_rows = len(rows)
+            total_rows = data['total_days']
             start_idx = (page - 1) * per_page
             end_idx = start_idx + per_page
-            page_rows = rows[start_idx:end_idx]
-            
-            # 更新数据
-            data['rows'] = page_rows
             data['pagination'] = {
                 'page': page,
                 'per_page': per_page,

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from flask import Blueprint, jsonify, request, send_file
+from sqlalchemy import func
 from sqlalchemy.orm.attributes import flag_modified
 
 from models import db
@@ -29,7 +30,7 @@ from services.pdf_merge_workflow import (
     validate_source_collection,
     workflow_upload_root,
 )
-from services.runtime_guard import maybe_guarded_apply_async
+from services.runtime_guard import maybe_guarded_apply_async, release_db_session_quietly
 from tasks.pdf_merge_workflow import process_job
 from utils.auth_utils import require_login
 
@@ -153,20 +154,53 @@ def list_jobs(current_user):
     user_id = _user_id(current_user)
     page = _bounded_int(request.args.get("page"), default=1, minimum=1, maximum=100000)
     per_page = _bounded_int(request.args.get("per_page"), default=20, minimum=1, maximum=100)
-    query = PublicationTask.query.filter(
+    workflow = PublicationTask.params[FEATURE_NAME]
+    result = PublicationTask.result
+    filters = (
         PublicationTask.feature == FEATURE_NAME,
         PublicationTask.user_id == user_id,
-    ).order_by(PublicationTask.created_at.desc(), PublicationTask.id.desc())
-    pagination = query.paginate(page=page, per_page=per_page, error_out=False)
-    items = [_job_payload(task) for task in pagination.items]
+    )
+    rows = (
+        db.session.query(
+            PublicationTask.id.label("id"),
+            PublicationTask.celery_task_id.label("celery_task_id"),
+            PublicationTask.status.label("status"),
+            PublicationTask.current_step.label("current_step"),
+            PublicationTask.progress.label("progress"),
+            PublicationTask.task_title.label("task_title"),
+            PublicationTask.error_message.label("error_message"),
+            PublicationTask.created_at.label("created_at"),
+            PublicationTask.updated_at.label("updated_at"),
+            PublicationTask.completed_at.label("completed_at"),
+            workflow["title"].as_string().label("workflow_title"),
+            workflow["sources"].label("sources"),
+            result["output"].label("output"),
+            result["logs"].label("logs"),
+            func.count(PublicationTask.id).over().label("total"),
+        )
+        .filter(*filters)
+        .order_by(PublicationTask.created_at.desc(), PublicationTask.id.desc())
+        .limit(per_page)
+        .offset((page - 1) * per_page)
+        .all()
+    )
+    total = int(rows[0].total or 0) if rows else 0
+    if not rows and page > 1:
+        total = int(
+            db.session.query(func.count(PublicationTask.id)).filter(*filters).scalar()
+            or 0
+        )
+    release_db_session_quietly()
+    items = [_job_list_payload(row) for row in rows]
+    pages = (total + per_page - 1) // per_page if total else 0
     data = {
         "items": items,
         "pagination": {
             "page": page,
             "per_page": per_page,
-            "total": pagination.total,
-            "pages": pagination.pages,
-            "has_more": page < pagination.pages,
+            "total": total,
+            "pages": pages,
+            "has_more": page < pages,
         },
     }
     return jsonify({"success": True, "data": data, **data})
@@ -552,6 +586,70 @@ def _job_payload(task: PublicationTask) -> dict[str, Any]:
     }
     if public_output and str(task.status or "").lower() == "completed":
         payload["download_url"] = f"/api/pdf-merge-workflows/jobs/{task.id}/download"
+    return payload
+
+
+def _job_list_payload(row) -> dict[str, Any]:
+    sources = []
+    for source in row.sources if isinstance(row.sources, list) else []:
+        if not isinstance(source, Mapping):
+            continue
+        item = {
+            "sequence": int(source.get("sequence") or 0),
+            "kind": str(source.get("kind") or ""),
+            "filename": _safe_source_filename(source.get("filename")),
+            "bytes": _nonnegative_int(source.get("bytes")),
+        }
+        if item["kind"] == "pipeline_asset":
+            item["asset_ref"] = str(source.get("asset_ref") or "")
+        sources.append(item)
+
+    output = row.output if isinstance(row.output, Mapping) else None
+    public_output = None
+    if output:
+        asset_id = str(output.get("asset_id") or "").strip()
+        asset_ref = str(output.get("asset_ref") or "").strip()
+        if asset_id and asset_ref == f"pipeline:{asset_id}":
+            public_output = {
+                "asset_id": asset_id,
+                "asset_ref": asset_ref,
+                "filename": normalize_output_filename(output.get("filename")),
+                "bytes": _nonnegative_int(output.get("bytes")),
+                "page_count": _nonnegative_int(output.get("page_count")),
+                "sha256": str(output.get("sha256") or ""),
+                "reused_asset": bool(output.get("reused_asset")),
+            }
+
+    logs = []
+    for log in (row.logs if isinstance(row.logs, list) else [])[-80:]:
+        if not isinstance(log, Mapping):
+            continue
+        logs.append({
+            "stage": str(log.get("stage") or ""),
+            "message": str(log.get("message") or ""),
+            "progress": _nonnegative_int(log.get("progress")),
+            "at": str(log.get("at") or ""),
+        })
+
+    title = row.task_title or row.workflow_title
+    payload = {
+        "job_id": str(row.id),
+        "status": str(row.status or "pending"),
+        "current_step": str(row.current_step or ""),
+        "progress": _nonnegative_int(row.progress),
+        "title": _title_without_extension(normalize_output_filename(title)),
+        "sources": sources,
+        "source_count": len(sources),
+        "output": public_output,
+        "error_message": str(row.error_message or "") or None,
+        "created_at": _iso(row.created_at),
+        "updated_at": _iso(row.updated_at),
+        "completed_at": _iso(row.completed_at),
+        "celery_task_id": str(row.celery_task_id or "") or None,
+        "logs": logs,
+    }
+    if public_output and str(row.status or "").lower() == "completed":
+        payload["download_url"] = f"/api/pdf-merge-workflows/jobs/{row.id}/download"
     return payload
 
 

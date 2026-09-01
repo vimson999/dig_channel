@@ -185,6 +185,19 @@ class TaskProjectionModelTest(unittest.TestCase):
         self.assertEqual(task.task_title, "发布标题")
         self.assertEqual(task.task_video_path, "/tmp/a.mp4")
 
+    def test_publication_task_rejects_overlong_source_identity_instead_of_truncating(self):
+        typed_reference = "pipeline:7a1f5b5e-eed3-4959-a676-d1a52fc2938d"
+
+        with self.assertRaisesRegex(ValueError, "source_task_id.*36"):
+            PublicationTask(
+                params={
+                    "feature": "mp3_video_workflow",
+                    "source_feature": "content_pipeline_asset",
+                    "source_task_id": typed_reference,
+                },
+                result={"source_task_id": typed_reference},
+            )
+
     def test_publication_task_projects_gemini_response_chars_without_whitespace(self):
         task = PublicationTask(
             params={"feature": "report_pdf_gemini"},

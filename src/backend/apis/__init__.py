@@ -55,6 +55,10 @@ def register_all_apis(app):
     from api.report_stick_figure_video_workflow import report_stick_figure_video_workflow_bp
     app.register_blueprint(report_stick_figure_video_workflow_bp)
 
+    # 用户文案 -> 豆包语音 -> Gemini 图片 -> MP4 的通用分步工作流
+    from api.script_video_workflow import script_video_workflow_bp
+    app.register_blueprint(script_video_workflow_bp)
+
     # 注册已同步 MP3 -> Gemini 图片 -> 横竖屏视频编排模块
     from api.mp3_video_workflow import mp3_video_workflow_bp
     app.register_blueprint(mp3_video_workflow_bp)
@@ -91,6 +95,7 @@ def register_all_apis(app):
         endpoints['report_pdf_evidence'] = '/api/report-pdf-evidence'
         endpoints['report_visual_plans'] = '/api/report-visual-plans'
         endpoints['report_stick_figure_video_workflows'] = '/api/report-stick-figure-video-workflows'
+        endpoints['script_video_workflows'] = '/api/script-video-workflows'
         endpoints['mp3_video_workflows'] = '/api/mp3-video-workflows'
         endpoints['bilibili_publish'] = '/api/bilibili-publish'
         if app.config.get('ENABLE_MHTML_API', False):

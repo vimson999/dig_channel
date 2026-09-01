@@ -57,6 +57,32 @@ def test_synced_pdf_page_expands_all_ten_rows_without_nested_scrolling():
     assert "overflow-" not in asset_list
 
 
+def test_cleaned_pdf_assets_are_the_default_workbench_input():
+    """The workbench should open on canonical cleaned PDF assets, not raw upload."""
+    html = (
+        PROJECT_ROOT / "src/frontend/report-audio-workflow-test.html"
+    ).read_text(encoding="utf-8")
+
+    upload_control = html.split('id="pdf-source-upload"', 1)[1].split(">", 1)[0]
+    asset_control = html.split('id="pdf-source-asset"', 1)[1].split(">", 1)[0]
+    upload_panel = html.split('id="pdf-upload-panel"', 1)[1].split(">", 1)[0]
+    asset_panel = html.split('id="pdf-asset-panel"', 1)[1].split(">", 1)[0]
+
+    assert "checked" not in upload_control
+    assert "checked" in asset_control
+    assert "hidden" in upload_panel
+    assert "hidden" not in asset_panel
+
+
+def test_cleaned_pdf_asset_renderer_has_a_fresh_cache_revision():
+    """A normal refresh must not reuse the pre-cleaned-asset renderer."""
+    html = (
+        PROJECT_ROOT / "src/frontend/report-audio-workflow-test.html"
+    ).read_text(encoding="utf-8")
+
+    assert "report-audio-workflow-test.js?v=20260826-canonical-cleaned-assets-v2" in html
+
+
 def test_keyframe_confirmation_preserves_landscape_selection_and_busts_cache():
     javascript = (
         PROJECT_ROOT / "src/frontend/js/report-audio-workflow-detail.js"

@@ -292,6 +292,27 @@ def pgbouncer_server_source(line: str) -> str | None:
     return match.group("address") if match else None
 
 
+def pgbouncer_connection_churn(timestamps, *, since, until):
+    ordered = sorted(timestamps or ())
+    window_hours = max(0.001, (until - since).total_seconds() / 3600.0)
+    if len(ordered) >= 2:
+        active_hours = max(
+            0.001,
+            (ordered[-1] - ordered[0]).total_seconds() / 3600.0,
+        )
+    else:
+        active_hours = window_hours
+    return {
+        "connections": len(ordered),
+        "window_hours": round(window_hours, 3),
+        "active_span_hours": round(active_hours, 3),
+        "connections_per_window_hour": round(len(ordered) / window_hours, 3),
+        "connections_per_active_hour": round(len(ordered) / active_hours, 3),
+        "first_at": ordered[0].isoformat(sep=" ") if ordered else None,
+        "last_at": ordered[-1].isoformat(sep=" ") if ordered else None,
+    }
+
+
 def is_proxy_tun_source(address: str) -> bool:
     try:
         return ipaddress.ip_address(address) in ipaddress.ip_network("198.18.0.0/15")
@@ -808,6 +829,7 @@ def main() -> int:
     pgbouncer_counts: Counter[str] = Counter()
     pgbouncer_events: dict[str, set[datetime]] = defaultdict(set)
     pgbouncer_server_sources: Counter[str] = Counter()
+    pgbouncer_connection_timestamps: list[datetime] = []
     pgbouncer_proxy_tun_timestamps: list[datetime] = []
     pgbouncer_wait_ms: list[float] = []
     pgbouncer_query_ms: list[float] = []
@@ -834,6 +856,7 @@ def main() -> int:
                 server_source = pgbouncer_server_source(line)
                 if server_source:
                     pgbouncer_server_sources[server_source] += 1
+                    pgbouncer_connection_timestamps.append(timestamp)
                     if is_proxy_tun_source(server_source):
                         pgbouncer_proxy_tun_timestamps.append(timestamp)
                 stat_match = PGBOUNCER_STATS.search(line)
@@ -872,6 +895,20 @@ def main() -> int:
                 "cached_server_login_failure",
             )
         )
+    )
+    churn = pgbouncer_connection_churn(
+        pgbouncer_connection_timestamps,
+        since=since,
+        until=until,
+    )
+    print(
+        "pgbouncer_connection_churn "
+        f"connections={churn['connections']} "
+        f"window_hours={churn['window_hours']:.3f} "
+        f"connections_per_window_hour={churn['connections_per_window_hour']:.3f} "
+        f"active_span_hours={churn['active_span_hours']:.3f} "
+        f"connections_per_active_hour={churn['connections_per_active_hour']:.3f} "
+        f"first_at={churn['first_at'] or '-'} last_at={churn['last_at'] or '-'}"
     )
     for address, count in pgbouncer_server_sources.most_common():
         print(

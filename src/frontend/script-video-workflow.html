@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文案到成片 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="min-h-screen bg-slate-100 text-slate-900">
+    <div id="nav-container"></div>
+
+    <main class="mx-auto max-w-[1440px] px-4 py-6 sm:px-6">
+        <header class="mb-5 flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+            <div>
+                <div class="mb-2 inline-flex items-center gap-2 rounded-full border border-violet-200 bg-violet-50 px-3 py-1 text-xs font-black text-violet-700">
+                    <i class="fas fa-clapperboard"></i> 通用内容生产工作流
+                </div>
+                <h1 class="text-2xl font-black tracking-tight text-slate-900">文案到成片</h1>
+                <p class="mt-1 max-w-3xl text-sm leading-6 text-slate-500">粘贴整篇文案，可使用豆包语音或上传整段语音；试听、裁掉开头／结尾、调倍速并确认最终 WAV 后，再规划 Gemini 分镜、生成图片和合成 MP4。</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+                <span id="provider-status" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-500">正在检查浏览器配置</span>
+                <button id="refresh-status-btn" type="button" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"><i class="fas fa-rotate mr-1.5"></i>刷新状态</button>
+            </div>
+        </header>
+
+        <div id="notice" class="mb-5 hidden rounded-lg border px-4 py-3 text-sm" role="status"></div>
+
+        <div class="mb-5 grid grid-cols-2 gap-2 rounded-xl border border-slate-200 bg-white p-2 shadow-sm sm:grid-cols-5" aria-label="工作流步骤">
+            <button type="button" data-stage-indicator="script" data-workflow-step="1" class="rounded-lg px-3 py-2 text-center text-xs font-black text-slate-500" aria-label="第 1 步：文案"><span class="mr-1 text-slate-400">1</span>文案</button>
+            <button type="button" data-stage-indicator="audio" data-workflow-step="2" class="rounded-lg px-3 py-2 text-center text-xs font-black text-slate-500" aria-label="第 2 步：语音"><span class="mr-1 text-slate-400">2</span>语音</button>
+            <button type="button" data-stage-indicator="scenes" data-workflow-step="3" class="rounded-lg px-3 py-2 text-center text-xs font-black text-slate-500" aria-label="第 3 步：分镜"><span class="mr-1 text-slate-400">3</span>分镜</button>
+            <button type="button" data-stage-indicator="images" data-workflow-step="4" class="rounded-lg px-3 py-2 text-center text-xs font-black text-slate-500" aria-label="第 4 步：图片"><span class="mr-1 text-slate-400">4</span>图片</button>
+            <button type="button" data-stage-indicator="render" data-workflow-step="5" class="rounded-lg px-3 py-2 text-center text-xs font-black text-slate-500" aria-label="第 5 步：对齐与成片"><span class="mr-1 text-slate-400">5</span>对齐与成片</button>
+        </div>
+
+        <div class="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_300px]">
+            <section class="min-w-0 space-y-5">
+                <section id="script-stage" data-workflow-step="1" class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                            <h2 class="text-base font-black">1. 文案</h2>
+                            <p class="mt-1 text-xs leading-5 text-slate-500">创建任务后，语音分段和视觉分镜各自可编辑；它们都必须完整覆盖这篇文案。</p>
+                        </div>
+                        <span id="script-char-count" class="shrink-0 rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-500">0 字</span>
+                    </div>
+                    <div class="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_260px]">
+                        <label class="block">
+                            <span class="mb-1.5 block text-xs font-black text-slate-600">整篇文案</span>
+                            <textarea id="source-text" rows="13" maxlength="50000" class="w-full resize-y rounded-lg border border-slate-300 px-3 py-2.5 text-sm leading-6 text-slate-800 focus:border-violet-500 focus:outline-none" placeholder="粘贴可直接朗读的完整文案。创建后可继续编辑语音分段和分镜。"></textarea>
+                        </label>
+                        <div class="space-y-4 rounded-lg border border-violet-100 bg-violet-50/50 p-4">
+                            <label class="block">
+                                <span class="mb-1.5 block text-xs font-black text-slate-600">视觉方案（创建后固定）</span>
+                                <select id="visual-scheme" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 focus:border-violet-500 focus:outline-none"></select>
+                            </label>
+                            <p id="visual-scheme-description" class="text-xs leading-5 text-slate-500">正在读取视觉方案。</p>
+                            <button id="create-job-btn" type="button" class="w-full rounded-lg bg-violet-700 px-4 py-3 text-sm font-black text-white shadow-sm hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-50"><i class="fas fa-wand-magic-sparkles mr-1.5"></i>创建文案任务</button>
+                            <p class="text-[11px] leading-5 text-slate-500">默认语音按完整句子优先拆分；默认分镜更短，便于逐张图配画面。</p>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="audio-stage" data-workflow-step="2" hidden class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                            <h2 class="text-base font-black">2. 语音</h2>
+                            <p id="audio-summary" class="mt-1 text-xs leading-5 text-slate-500">先创建文案任务，再确认语音分段。</p>
+                        </div>
+                        <div class="flex flex-wrap gap-2">
+                            <input id="audio-upload-input" type="file" accept=".wav,.mp3,.m4a,.aac,.flac,.ogg,.opus,audio/*" class="hidden">
+                            <button id="upload-audio-btn" type="button" class="rounded-lg border border-indigo-300 bg-white px-3 py-2 text-xs font-bold text-indigo-700 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"><i class="fas fa-upload mr-1"></i>上传整段语音</button>
+                            <button id="save-audio-btn" type="button" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50">保存分段</button>
+                            <button id="start-audio-btn" type="button" class="rounded-lg bg-indigo-700 px-3 py-2 text-xs font-black text-white hover:bg-indigo-800 disabled:cursor-not-allowed disabled:opacity-50"><i class="fas fa-volume-high mr-1"></i>投递豆包语音</button>
+                        </div>
+                    </div>
+                    <p class="mt-2 text-[11px] leading-5 text-slate-400">支持 WAV、MP3、M4A、AAC、FLAC、OGG、OPUS，默认最大 512MB。上传或豆包合并后都需确认最终语音，才会解锁下一步。</p>
+                    <div id="audio-editor-panel" class="mt-3 hidden rounded-lg border border-indigo-200 bg-indigo-50/60 p-4">
+                        <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                            <div>
+                                <div class="text-xs font-black text-indigo-900">试听与编辑原始语音</div>
+                                <p id="audio-source-meta" class="mt-1 text-[11px] leading-5 text-indigo-700">正在读取音频信息。</p>
+                            </div>
+                            <span class="rounded-full border border-indigo-200 bg-white px-2.5 py-1 text-[10px] font-black text-indigo-700">原始音频保留</span>
+                        </div>
+                        <div id="audio-timeline" class="mt-3 rounded-lg border border-indigo-200 bg-white p-3 shadow-inner">
+                            <div class="mb-2 flex items-center justify-between gap-3 text-[11px] font-bold text-slate-500">
+                                <span id="audio-playhead-time">00:00</span>
+                                <span id="audio-selection-time" class="text-indigo-700">请选择开头和结尾</span>
+                            </div>
+                            <div id="audio-waveform" class="relative h-28 overflow-hidden rounded-md bg-slate-900/95">
+                                <canvas id="audio-waveform-canvas" class="absolute inset-0 h-full w-full"></canvas>
+                                <div id="audio-excluded-start" class="pointer-events-none absolute inset-y-0 left-0 bg-slate-950/75"></div>
+                                <div id="audio-selection-overlay" class="pointer-events-none absolute inset-y-0 border-x-2 border-indigo-300 bg-indigo-500/20"></div>
+                                <div id="audio-excluded-end" class="pointer-events-none absolute inset-y-0 right-0 bg-slate-950/75"></div>
+                                <div id="audio-playhead" class="pointer-events-none absolute inset-y-0 z-20 w-0.5 bg-amber-300 shadow-[0_0_0_1px_rgba(15,23,42,0.45)]" style="left:0%"></div>
+                                <input id="audio-trim-start-range" aria-label="裁掉开头" type="range" min="0" step="0.1" value="0" class="pointer-events-auto absolute inset-x-0 bottom-1 z-10 h-5 w-full appearance-none bg-transparent accent-indigo-300">
+                                <input id="audio-trim-end-range" aria-label="保留至结尾" type="range" min="0" step="0.1" value="0" class="pointer-events-auto absolute inset-x-0 top-1 z-10 h-5 w-full appearance-none bg-transparent accent-indigo-300">
+                                <div id="audio-waveform-empty" class="pointer-events-none absolute inset-0 flex items-center justify-center text-xs font-bold text-slate-400">正在绘制波形…</div>
+                            </div>
+                            <div class="mt-2 flex items-center justify-between text-[10px] text-slate-400"><span id="audio-time-start">00:00</span><span id="audio-time-end">00:00</span></div>
+                        </div>
+                        <div class="mt-3 flex flex-wrap items-center gap-2">
+                            <button id="audio-play-source-btn" type="button" class="rounded-md border border-indigo-300 bg-white px-3 py-2 text-xs font-bold text-indigo-700 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"><i class="fas fa-play mr-1"></i>播放原音</button>
+                            <span class="text-[11px] text-slate-500">拖动波形下方的两个滑块，或直接输入开头／结尾秒数。</span>
+                        </div>
+                        <audio id="audio-source-player" class="mt-2 w-full" controls preload="metadata"></audio>
+                        <div class="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-[1fr_1fr_1.4fr]">
+                            <label class="block rounded-md border border-slate-200 bg-white p-3">
+                                <span class="mb-1 block text-xs font-bold text-slate-600">开头（秒）</span>
+                                <input id="audio-trim-start" type="number" min="0" step="0.1" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 focus:border-indigo-500 focus:outline-none">
+                            </label>
+                            <label class="block rounded-md border border-slate-200 bg-white p-3">
+                                <span class="mb-1 block text-xs font-bold text-slate-600">结尾（秒）</span>
+                                <input id="audio-trim-end" type="number" min="0" step="0.1" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 focus:border-indigo-500 focus:outline-none">
+                            </label>
+                            <div class="rounded-md border border-slate-200 bg-white p-3">
+                                <div class="mb-2 flex items-center justify-between"><span class="text-xs font-bold text-slate-600">播放倍速</span><span class="text-[11px] text-slate-400">最终语音会写入</span></div>
+                                <div id="audio-speed-presets" class="grid grid-cols-6 gap-1">
+                                    <button type="button" data-audio-speed="0.5" class="rounded border border-slate-200 px-1 py-1.5 text-[11px] font-bold text-slate-600 hover:border-indigo-300 hover:bg-indigo-50">0.5x</button>
+                                    <button type="button" data-audio-speed="0.75" class="rounded border border-slate-200 px-1 py-1.5 text-[11px] font-bold text-slate-600 hover:border-indigo-300 hover:bg-indigo-50">0.75x</button>
+                                    <button type="button" data-audio-speed="1" class="rounded border border-slate-200 px-1 py-1.5 text-[11px] font-bold text-slate-600 hover:border-indigo-300 hover:bg-indigo-50">1x</button>
+                                    <button type="button" data-audio-speed="1.25" class="rounded border border-slate-200 px-1 py-1.5 text-[11px] font-bold text-slate-600 hover:border-indigo-300 hover:bg-indigo-50">1.25x</button>
+                                    <button type="button" data-audio-speed="1.5" class="rounded border border-slate-200 px-1 py-1.5 text-[11px] font-bold text-slate-600 hover:border-indigo-300 hover:bg-indigo-50">1.5x</button>
+                                    <button type="button" data-audio-speed="2" class="rounded border border-slate-200 px-1 py-1.5 text-[11px] font-bold text-slate-600 hover:border-indigo-300 hover:bg-indigo-50">2x</button>
+                                </div>
+                                <select id="audio-speed" aria-label="播放倍速" class="sr-only">
+                                    <option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1">1.0x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2">2.0x</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="mt-4 flex flex-wrap gap-2">
+                            <button id="preview-audio-edit-btn" type="button" class="rounded-md border border-indigo-300 bg-white px-3 py-2 text-xs font-bold text-indigo-700 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"><i class="fas fa-play mr-1"></i>预览编辑片段</button>
+                            <button id="reset-audio-edit-btn" type="button" class="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"><i class="fas fa-rotate-left mr-1"></i>恢复原始语音</button>
+                            <button id="finalize-audio-edit-btn" type="button" class="rounded-md bg-emerald-700 px-3 py-2 text-xs font-black text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"><i class="fas fa-check mr-1"></i>生成最终语音</button>
+                        </div>
+                    </div>
+                    <div id="audio-player-panel" class="mt-3 hidden rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                        <div class="flex flex-wrap items-center justify-between gap-2">
+                            <span class="text-xs font-black text-emerald-800">最终 WAV 已确认</span>
+                            <a id="audio-download-link" href="#" class="rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-100"><i class="fas fa-download mr-1"></i>下载 WAV</a>
+                        </div>
+                        <audio id="audio-player" class="mt-2 w-full" controls preload="metadata"></audio>
+                    </div>
+                    <div id="audio-chunks-editor" class="mt-4 space-y-3"></div>
+                </section>
+
+                <section id="scenes-stage" data-workflow-step="3" hidden class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                            <h2 class="text-base font-black">3. 分镜</h2>
+                            <p id="scenes-summary" class="mt-1 text-xs leading-5 text-slate-500">先由 Gemini 规划“覆盖文案 + 图片提示词”，再人工确认。</p>
+                            <div id="storyboard-run-status" class="mt-2 hidden rounded-md border px-3 py-2 text-[11px] leading-5" role="status"></div>
+                        </div>
+                        <div class="flex flex-wrap gap-2">
+                            <button id="start-storyboard-btn" type="button" class="rounded-lg bg-violet-700 px-3 py-2 text-xs font-black text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-50"><i class="fas fa-wand-magic-sparkles mr-1"></i>投递 Gemini 规划分镜</button>
+                            <button id="save-scenes-btn" type="button" class="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50">保存分镜</button>
+                        </div>
+                    </div>
+                    <div class="mt-4 overflow-x-auto rounded-lg border border-slate-200">
+                        <table class="min-w-[780px] w-full border-collapse text-left text-xs">
+                            <thead class="bg-slate-50 text-slate-500"><tr><th class="w-16 px-3 py-2 font-black">序号</th><th class="w-[38%] px-3 py-2 font-black">覆盖文案</th><th class="px-3 py-2 font-black">图片提示词</th></tr></thead>
+                            <tbody id="scenes-editor"></tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <section id="images-stage" data-workflow-step="4" hidden class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                            <h2 class="text-base font-black">4. 图片</h2>
+                            <p id="images-summary" class="mt-1 text-xs leading-5 text-slate-500">先完成整篇 WAV，再批量通过 Gemini 浏览器生成图片。失败图片可单独重试。</p>
+                        </div>
+                        <button id="start-images-btn" type="button" class="rounded-lg bg-fuchsia-700 px-3 py-2 text-xs font-black text-white hover:bg-fuchsia-800 disabled:cursor-not-allowed disabled:opacity-50"><i class="fas fa-images mr-1"></i>批量生成图片</button>
+                    </div>
+                    <div id="images-grid" class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3"></div>
+                </section>
+
+                <section id="render-stage" data-workflow-step="5" hidden class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                            <h2 class="text-base font-black">5. 对齐与成片</h2>
+                            <p id="render-summary" class="mt-1 text-xs leading-5 text-slate-500">全部图片完成后，系统用整篇 WAV 做 ASR 对齐，生成连续时间轴与 MP4。</p>
+                        </div>
+                        <button id="start-render-btn" type="button" class="rounded-lg bg-emerald-700 px-3 py-2 text-xs font-black text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"><i class="fas fa-film mr-1"></i>开始对齐并合成 MP4</button>
+                    </div>
+                    <div id="video-panel" class="mt-4 hidden rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                        <div class="flex flex-wrap items-center justify-between gap-2"><span class="text-xs font-black text-emerald-800">MP4 已完成</span><a id="video-download-link" href="#" class="rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-100"><i class="fas fa-download mr-1"></i>下载 MP4</a></div>
+                        <video id="video-player" class="mt-3 w-full rounded-md bg-black" controls preload="metadata"></video>
+                    </div>
+                    <div id="alignment-summary" class="mt-4 grid grid-cols-1 gap-2 text-xs text-slate-600 sm:grid-cols-3"></div>
+                </section>
+            </section>
+
+            <aside class="space-y-5 xl:sticky xl:top-24 xl:self-start">
+                <section class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                    <div class="flex items-start justify-between gap-2"><div><h2 class="text-sm font-black">当前任务</h2><p id="current-job-id" class="mt-1 break-all text-[11px] text-slate-400">尚未创建</p></div><button id="refresh-workflow-btn" type="button" class="rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-50">刷新</button></div>
+                    <div class="mt-4 h-2 overflow-hidden rounded-full bg-slate-100"><div id="workflow-progress" class="h-full w-0 bg-violet-600 transition-all"></div></div>
+                    <div class="mt-2 flex items-center justify-between text-xs"><span id="workflow-stage" class="font-bold text-slate-600">等待文案</span><span id="workflow-progress-label" class="font-black text-violet-700">0%</span></div>
+                    <div id="workflow-error" class="mt-3 hidden rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs leading-5 text-red-700"></div>
+                </section>
+                <section class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                    <div class="flex items-center justify-between gap-2"><h2 class="text-sm font-black">最近任务</h2><button id="load-jobs-btn" type="button" class="text-xs font-bold text-violet-700 hover:text-violet-900">刷新</button></div>
+                    <div id="recent-jobs" class="mt-3 space-y-2"></div>
+                </section>
+                <section class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                    <h2 class="text-sm font-black">工作日志</h2>
+                    <ol id="workflow-logs" class="mt-3 max-h-72 space-y-2 overflow-y-auto text-xs text-slate-500"></ol>
+                </section>
+            </aside>
+        </div>
+        <div id="workflow-step-nav" class="mt-5 flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3 shadow-sm" aria-label="工作流导航">
+            <button id="workflow-prev-btn" type="button" class="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-xs font-black text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">上一步</button>
+            <div class="text-center"><div id="workflow-step-label" class="text-xs font-black text-slate-700">第 1 步 · 文案</div><div id="workflow-step-hint" class="mt-0.5 text-[11px] text-slate-400">先输入整篇文案</div></div>
+            <button id="workflow-next-btn" type="button" class="rounded-lg bg-violet-700 px-4 py-2.5 text-xs font-black text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-40">下一步：语音</button>
+        </div>
+    </main>
+
+    <script src="js/env.js"></script>
+    <script src="js/shared-navigation.js?v=20260828-script-video-workflow"></script>
+    <script src="js/script-video-workflow.js?v=20260831-stepper-audio-v1"></script>
+</body>
+</html>

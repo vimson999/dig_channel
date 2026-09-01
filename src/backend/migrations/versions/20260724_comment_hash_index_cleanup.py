@@ -22,8 +22,6 @@ REDUNDANT_INDEXES = (
     "ix_publication_tasks_feature_created_at_desc",
     "ix_publication_tasks_publisher_created_at_desc",
     "ix_publication_tasks_publisher_pending_updated_at",
-    "ix_zsxq_topics_group_tab_type_create_desc",
-    "ix_zsxq_topics_group_type_create_desc",
     "ix_zsxq_attachments_publish_status",
     "ix_zsxq_topic_comments_tab_id",
     "ix_zsxq_topic_comments_parent_comment_id",

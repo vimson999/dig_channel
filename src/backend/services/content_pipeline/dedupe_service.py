@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from models import db
@@ -130,10 +131,21 @@ def mark_task_assets(task_id, *, status):
     if not normalized:
         return 0
     try:
+        query = ContentPipelineAsset.query.filter(
+            ContentPipelineAsset.canonical_task_id == str(task_id)
+        )
+        if normalized in {"cleaning", "failed"}:
+            # A retry/final-failure path may run after the output registration
+            # commit succeeded but its acknowledgement was lost.  Terminal
+            # cleaned ownership is monotonic and must never be downgraded.
+            query = query.filter(
+                or_(
+                    ContentPipelineAsset.status.is_(None),
+                    ContentPipelineAsset.status != "cleaned",
+                )
+            )
         updated = (
-            ContentPipelineAsset.query
-            .filter(ContentPipelineAsset.canonical_task_id == str(task_id))
-            .update(
+            query.update(
                 {
                     ContentPipelineAsset.status: normalized,
                     ContentPipelineAsset.updated_at: db.func.now(),

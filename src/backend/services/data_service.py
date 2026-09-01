@@ -19,7 +19,10 @@ class DataService:
                       end_date: Optional[date] = None,
                       active_only: bool = True,
                       user_id: Optional[int] = None,
-                      channel_ids: Optional[List[int]] = None) -> Dict[str, Any]:
+                      channel_ids: Optional[List[int]] = None,
+                      *,
+                      page: Optional[int] = None,
+                      per_page: Optional[int] = None) -> Dict[str, Any]:
         """获取表格显示数据
         
         Args:
@@ -28,6 +31,8 @@ class DataService:
             active_only: 是否只包含活跃频道
             user_id: 用户ID，用于数据过滤
             channel_ids: 指定的频道ID列表，可选
+            page: 日期页码；与 per_page 同时提供时在 SQL 层分页
+            per_page: 每页日期数；与 page 同时提供时在 SQL 层分页
             
         Returns:
             Dict: 表格数据
@@ -38,6 +43,15 @@ class DataService:
                 end_date = date.today()
             if not start_date:
                 start_date = end_date - timedelta(days=30)
+
+            paged = page is not None or per_page is not None
+            if paged:
+                if page is None or per_page is None:
+                    raise ValueError("page 和 per_page 必须同时提供")
+                page = int(page)
+                per_page = int(per_page)
+                if page < 1 or per_page < 1:
+                    raise ValueError("page 和 per_page 必须为正整数")
             
             # 获取频道（按用户过滤）
             channels_query = Channel.query
@@ -62,14 +76,62 @@ class DataService:
             if channel_ids:
                 data_query = data_query.filter(Channel.id.in_(channel_ids))
             
-            all_data = data_query.order_by(
-                desc(ChannelData.date),
-                asc(Channel.created_at)
-            ).all()
+            if paged:
+                # 日期是表格的行维度。先在数据库中选出当前日期页，再只物化这些
+                # 日期对应的频道数据；窗口计数与数据加载共用一次数据库往返。
+                filtered_dates = (
+                    data_query.with_entities(ChannelData.date.label("date"))
+                    .distinct()
+                    .cte("filtered_channel_data_dates")
+                )
+                paged_dates = (
+                    db.session.query(
+                        filtered_dates.c.date.label("date"),
+                        func.count().over().label("total_days"),
+                    )
+                    .order_by(desc(filtered_dates.c.date))
+                    .offset((page - 1) * per_page)
+                    .limit(per_page)
+                    .cte("paged_channel_data_dates")
+                )
+                rows_with_total = (
+                    data_query.join(
+                        paged_dates,
+                        ChannelData.date == paged_dates.c.date,
+                    )
+                    .add_columns(paged_dates.c.total_days)
+                    .order_by(
+                        desc(ChannelData.date),
+                        asc(Channel.created_at),
+                    )
+                    .all()
+                )
+                all_data = [row[0] for row in rows_with_total]
+                if rows_with_total:
+                    total_days = int(rows_with_total[0][1])
+                else:
+                    # 仅越界空页需要一次补充计数；正常页面仍保持两次总 SQL
+                    # （频道列 + 当前日期页数据）。
+                    total_days = int(
+                        db.session.query(func.count())
+                        .select_from(filtered_dates)
+                        .scalar()
+                        or 0
+                    )
+            else:
+                all_data = data_query.order_by(
+                    desc(ChannelData.date),
+                    asc(Channel.created_at)
+                ).all()
+                total_days = len({data.date for data in all_data})
             
             # 组织数据为表格格式
             # 获取日期列表
             dates = sorted(list(set([data.date for data in all_data])), reverse=True)
+            data_by_channel_date = {
+                (data.channel_id, data.date): data
+                for data in all_data
+            }
             
             # 组织频道数据
             channel_columns = []
@@ -91,11 +153,7 @@ class DataService:
                 }
                 
                 for channel in channels:
-                    # 查找该频道该日期的数据
-                    channel_data = next((
-                        data for data in all_data 
-                        if data.channel_id == channel.id and data.date == date_val
-                    ), None)
+                    channel_data = data_by_channel_date.get((channel.id, date_val))
                     
                     if channel_data:
                         row['channels_data'].append({
@@ -131,7 +189,7 @@ class DataService:
                     'channels': channel_columns,
                     'rows': table_rows,
                     'total_channels': len(channels),
-                    'total_days': len(dates)
+                    'total_days': total_days
                 }
             }
             

@@ -7,6 +7,7 @@ import mimetypes
 import os
 import re
 import subprocess
+import threading
 import time
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
@@ -39,8 +40,10 @@ from services.gemini_browser import (
 from services.publisher_queue_repair import maybe_requeue_stale_publisher_child
 from services.runtime_guard import (
     apply_async_after_db_release,
+    end_db_transaction_before_external_io,
     is_retryable_db_error,
     release_db_session_quietly,
+    revoke_celery_task_after_db_commit,
 )
 from services.workflow_notification_service import workflow_notification_service
 from tasks.publisher import run_publication_pipeline
@@ -78,6 +81,11 @@ CELERY_FAILURE_STATES = {"FAILURE", "REVOKED"}
 AUDIO_EXTENSIONS = {"mp3", "m4a", "wav", "aac", "flac", "ogg", "opus"}
 HOT_AUDIO_DOWNLOAD_THRESHOLD = 20
 AUDIO_TOPIC_CONTENT_PREVIEW_SOURCE_CHARS = 720
+AUDIO_ASSET_CATALOG_CACHE_TTL_ENV = "MP3_VIDEO_AUDIO_ASSET_CACHE_TTL_SECONDS"
+DEFAULT_AUDIO_ASSET_CATALOG_CACHE_TTL_SECONDS = 300
+AUDIO_ASSET_CATALOG_SCAN_LIMIT = 2500
+_audio_asset_catalog_cache_lock = threading.RLock()
+_audio_asset_catalog_cache: Optional[Dict[str, Any]] = None
 PLANNER_VERSION = "mp3_video_planner_20260719_v12"
 VISUAL_ARTIFACT_KEYS = (
     "finance_cover",
@@ -439,6 +447,220 @@ def _topic_content_preview_projection():
     ).label("topic_content")
 
 
+def _audio_asset_catalog_cache_ttl_seconds() -> int:
+    try:
+        value = int(os.environ.get(
+            AUDIO_ASSET_CATALOG_CACHE_TTL_ENV,
+            DEFAULT_AUDIO_ASSET_CATALOG_CACHE_TTL_SECONDS,
+        ))
+    except (TypeError, ValueError):
+        value = DEFAULT_AUDIO_ASSET_CATALOG_CACHE_TTL_SECONDS
+    return max(0, min(value, 3600))
+
+
+def clear_audio_asset_catalog_cache() -> None:
+    """Invalidate the process-local catalog after a user-requested refresh."""
+    global _audio_asset_catalog_cache
+    with _audio_asset_catalog_cache_lock:
+        _audio_asset_catalog_cache = None
+
+
+def _build_audio_asset_catalog_snapshot() -> Dict[str, Any]:
+    """Read the bounded canonical catalog once; filtering happens in memory."""
+    try:
+        pipeline_rows = (
+            db.session.query(ContentPipelineAsset)
+            .options(load_only(
+                ContentPipelineAsset.id,
+                ContentPipelineAsset.media_type,
+                ContentPipelineAsset.canonical_task_id,
+                ContentPipelineAsset.source_path,
+                ContentPipelineAsset.filename,
+                ContentPipelineAsset.source_mode,
+                ContentPipelineAsset.status,
+                ContentPipelineAsset.cleaned_path,
+                ContentPipelineAsset.updated_at,
+                ContentPipelineAsset.created_at,
+            ))
+            .filter(
+                ContentPipelineAsset.media_type == "audio",
+                ContentPipelineAsset.status == "cleaned",
+            )
+            .order_by(
+                ContentPipelineAsset.updated_at.desc(),
+                ContentPipelineAsset.created_at.desc(),
+            )
+            .limit(AUDIO_ASSET_CATALOG_SCAN_LIMIT)
+            .all()
+        )
+    except Exception:
+        release_db_session_quietly()
+        raise
+    end_db_transaction_before_external_io(
+        "MP3 audio catalog canonical file validation",
+        remove=True,
+    )
+
+    pipeline_scanned = len(pipeline_rows)
+    skipped_missing = 0
+    ready_assets: Dict[str, Tuple[ContentPipelineAsset, Dict[str, Any]]] = {}
+    for asset in pipeline_rows:
+        item = _content_pipeline_audio_asset_row_payload(asset)
+        source_path = _normalized_audio_source_path(asset.source_path)
+        if not item or not source_path:
+            skipped_missing += 1
+            continue
+        ready_assets.setdefault(source_path, (asset, item))
+
+    topic_join = (
+        (ZsxqTopic.group_id == ZsxqAttachment.group_id)
+        & (ZsxqTopic.tab_id == ZsxqAttachment.tab_id)
+        & (ZsxqTopic.topic_id == ZsxqAttachment.topic_id)
+    )
+    source_paths = [str(asset.source_path) for asset, _item in ready_assets.values()]
+    filenames = [
+        str(asset.filename)
+        for asset, _item in ready_assets.values()
+        if str(asset.filename or "").strip()
+    ]
+    candidate_filters = []
+    if source_paths:
+        candidate_filters.append(ZsxqAttachment.local_path.in_(source_paths))
+    if filenames:
+        # Canonical paths are normalized when admitted. Historical attachment
+        # rows can retain a symlink alias (/var -> /private/var), so filename
+        # only narrows candidates; the application still requires an identical
+        # normalized absolute path before merging metadata.
+        candidate_filters.append(ZsxqAttachment.name.in_(filenames))
+
+    rows = []
+    if candidate_filters:
+        sync_time_order = db.func.coalesce(
+            ZsxqTopic.last_synced_at,
+            ZsxqAttachment.updated_at,
+        )
+        try:
+            rows = (
+                db.session.query(
+                    ZsxqAttachment.id.label("attachment_id"),
+                    ZsxqAttachment.name.label("attachment_name"),
+                    ZsxqAttachment.download_count.label("download_count"),
+                    ZsxqAttachment.local_path.label("local_path"),
+                    ZsxqAttachment.file_ext.label("file_ext"),
+                    ZsxqAttachment.updated_at.label("attachment_updated_at"),
+                    ZsxqAttachment.created_at.label("attachment_created_at"),
+                    ZsxqAttachment.group_id.label("group_id"),
+                    ZsxqAttachment.tab_id.label("tab_id"),
+                    ZsxqAttachment.topic_id.label("topic_id"),
+                    ZsxqTopic.title.label("topic_title"),
+                    _topic_content_preview_projection(),
+                    ZsxqTopic.tab_label.label("tab_label"),
+                    ZsxqTopic.author_name.label("topic_author"),
+                    ZsxqTopic.create_time.label("topic_create_time"),
+                    ZsxqTopic.first_synced_at.label("topic_first_synced_at"),
+                    ZsxqTopic.last_synced_at.label("topic_last_synced_at"),
+                )
+                .outerjoin(ZsxqTopic, topic_join)
+                .filter(ZsxqAttachment.download_status == "downloaded")
+                .filter(ZsxqAttachment.local_path.isnot(None))
+                .filter(_audio_asset_filter())
+                .filter(or_(*candidate_filters))
+                .order_by(
+                    ZsxqTopic.create_time.desc().nullslast(),
+                    sync_time_order.desc(),
+                    ZsxqAttachment.updated_at.desc(),
+                    ZsxqAttachment.created_at.desc(),
+                )
+                .limit(AUDIO_ASSET_CATALOG_SCAN_LIMIT)
+                .all()
+            )
+        except Exception:
+            release_db_session_quietly()
+            raise
+        end_db_transaction_before_external_io(
+            "MP3 audio catalog metadata file validation",
+            remove=True,
+        )
+
+    valid_items: List[Dict[str, Any]] = []
+    synced_scanned = len(rows)
+    for row in rows:
+        source_path = _normalized_audio_source_path(row.local_path)
+        canonical = ready_assets.get(source_path or "")
+        if canonical is None:
+            continue
+        item = _audio_asset_row_payload(
+            row,
+            canonical_asset=canonical[0],
+            canonical_lookup_complete=True,
+        )
+        if item:
+            valid_items.append(item)
+        else:
+            skipped_missing += 1
+
+    combined_items = _merge_audio_asset_items(
+        valid_items,
+        [item for _asset, item in ready_assets.values()],
+    )
+    return {
+        "items": combined_items,
+        "scanned": pipeline_scanned + synced_scanned,
+        "pipeline_scanned": pipeline_scanned,
+        "synced_scanned": synced_scanned,
+        "skipped_missing": skipped_missing,
+        "truncated": (
+            pipeline_scanned >= AUDIO_ASSET_CATALOG_SCAN_LIMIT
+            or synced_scanned >= AUDIO_ASSET_CATALOG_SCAN_LIMIT
+        ),
+        "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def _get_audio_asset_catalog_snapshot(*, force_refresh: bool = False):
+    global _audio_asset_catalog_cache
+    ttl_seconds = _audio_asset_catalog_cache_ttl_seconds()
+    now = time.monotonic()
+    with _audio_asset_catalog_cache_lock:
+        cached = _audio_asset_catalog_cache
+        if (
+            not force_refresh
+            and cached
+            and cached["expires_at"] > now
+        ):
+            return cached["snapshot"], True, max(
+                0,
+                int((now - cached["built_monotonic"]) * 1000),
+            ), ttl_seconds
+
+        snapshot = _build_audio_asset_catalog_snapshot()
+        built_monotonic = time.monotonic()
+        if ttl_seconds > 0:
+            _audio_asset_catalog_cache = {
+                "snapshot": snapshot,
+                "built_monotonic": built_monotonic,
+                "expires_at": built_monotonic + ttl_seconds,
+            }
+        else:
+            _audio_asset_catalog_cache = None
+        return snapshot, False, 0, ttl_seconds
+
+
+def _audio_asset_matches_query(item: Dict[str, Any], query_text: str) -> bool:
+    if not query_text:
+        return True
+    searchable = "\n".join(str(item.get(key) or "") for key in (
+        "filename",
+        "path",
+        "source_mode",
+        "topic_title",
+        "topic_content_excerpt",
+        "topic_author",
+        "tab_label",
+    )).casefold()
+    return query_text in searchable
+
+
 def list_audio_assets(
     *,
     page: int = 1,
@@ -447,146 +669,56 @@ def list_audio_assets(
     group_id: str = "",
     tab_id: str = "",
     scope: str = "all",
+    force_refresh: bool = False,
 ) -> Dict[str, Any]:
     page = max(1, int(page or 1))
     per_page = max(1, min(int(per_page or 30), 100))
-    q = (q or "").strip()
+    query_text = (q or "").strip().casefold()
     group_id = (group_id or "").strip()
     tab_id = (tab_id or "").strip()
     scope = (scope or "all").strip().lower()
 
-    topic_join = (
-        (ZsxqTopic.group_id == ZsxqAttachment.group_id)
-        & (ZsxqTopic.tab_id == ZsxqAttachment.tab_id)
-        & (ZsxqTopic.topic_id == ZsxqAttachment.topic_id)
+    snapshot, cache_hit, cache_age_ms, cache_ttl_seconds = (
+        _get_audio_asset_catalog_snapshot(force_refresh=force_refresh)
     )
-    query = (
-        db.session.query(
-            ZsxqAttachment.id.label("attachment_id"),
-            ZsxqAttachment.name.label("attachment_name"),
-            ZsxqAttachment.download_count.label("download_count"),
-            ZsxqAttachment.local_path.label("local_path"),
-            ZsxqAttachment.file_ext.label("file_ext"),
-            ZsxqAttachment.updated_at.label("attachment_updated_at"),
-            ZsxqAttachment.created_at.label("attachment_created_at"),
-            ZsxqAttachment.group_id.label("group_id"),
-            ZsxqAttachment.tab_id.label("tab_id"),
-            ZsxqAttachment.topic_id.label("topic_id"),
-            ZsxqTopic.title.label("topic_title"),
-            _topic_content_preview_projection(),
-            ZsxqTopic.tab_label.label("tab_label"),
-            ZsxqTopic.author_name.label("topic_author"),
-            ZsxqTopic.create_time.label("topic_create_time"),
-            ZsxqTopic.first_synced_at.label("topic_first_synced_at"),
-            ZsxqTopic.last_synced_at.label("topic_last_synced_at"),
-        )
-        .outerjoin(ZsxqTopic, topic_join)
-        .filter(ZsxqAttachment.download_status == "downloaded")
-        .filter(ZsxqAttachment.local_path.isnot(None))
-        .filter(_audio_asset_filter())
+    end_db_transaction_before_external_io(
+        "MP3 audio catalog response file validation",
+        remove=True,
     )
-    if scope in {"hot", "popular"}:
-        query = query.filter(ZsxqAttachment.download_count >= HOT_AUDIO_DOWNLOAD_THRESHOLD)
-    if group_id:
-        query = query.filter(ZsxqAttachment.group_id == group_id)
-    if tab_id:
-        query = query.filter(ZsxqAttachment.tab_id == tab_id)
-    if q:
-        pattern = f"%{q}%"
-        query = query.filter(or_(
-            ZsxqAttachment.name.ilike(pattern),
-            ZsxqAttachment.local_path.ilike(pattern),
-            ZsxqTopic.title.ilike(pattern),
-            ZsxqTopic.content.ilike(pattern),
-        ))
-
-    target_count = page * per_page + 1
-    chunk_size = min(max(per_page * 4, 40), 120)
-    scan_limit = min(max(target_count * 5, 120), 2500)
-    sync_time_order = db.func.coalesce(
-        ZsxqTopic.last_synced_at,
-        ZsxqAttachment.updated_at,
-    )
-    ordered = query.order_by(
-        ZsxqTopic.create_time.desc().nullslast(),
-        sync_time_order.desc(),
-        ZsxqAttachment.updated_at.desc(),
-        ZsxqAttachment.created_at.desc(),
-    )
-    valid_items: List[Dict[str, Any]] = []
-    skipped_missing = 0
-    scanned = 0
-    while len(valid_items) < target_count and scanned < scan_limit:
-        batch_limit = min(chunk_size, scan_limit - scanned)
-        rows = ordered.offset(scanned).limit(batch_limit).all()
-        if not rows:
-            break
-        scanned += len(rows)
-        canonical_assets = _canonical_audio_assets_by_source_paths(
-            getattr(row, "local_path", None) for row in rows
-        )
-        for row in rows:
-            item = _audio_asset_row_payload(
-                row,
-                canonical_asset=canonical_assets.get(
-                    _normalized_audio_source_path(getattr(row, "local_path", None))
-                ),
-            )
-            if item:
-                valid_items.append(item)
-            else:
-                skipped_missing += 1
-        if len(rows) < batch_limit:
-            break
-
-    pipeline_items: List[Dict[str, Any]] = []
-    pipeline_scanned = 0
-    if scope not in {"hot", "popular"} and not group_id and not tab_id:
-        pipeline_query = db.session.query(ContentPipelineAsset).filter(
-            ContentPipelineAsset.media_type == "audio",
-            ContentPipelineAsset.status == "cleaned",
-        )
-        if q:
-            pipeline_pattern = f"%{q}%"
-            pipeline_query = pipeline_query.filter(or_(
-                ContentPipelineAsset.filename.ilike(pipeline_pattern),
-                ContentPipelineAsset.source_path.ilike(pipeline_pattern),
-                ContentPipelineAsset.source_mode.ilike(pipeline_pattern),
-            ))
-        pipeline_rows = (
-            pipeline_query
-            .order_by(
-                ContentPipelineAsset.updated_at.desc(),
-                ContentPipelineAsset.created_at.desc(),
-            )
-            .limit(scan_limit)
-            .all()
-        )
-        pipeline_scanned = len(pipeline_rows)
-        for row in pipeline_rows:
-            item = _content_pipeline_audio_asset_row_payload(row)
-            if item:
-                pipeline_items.append(item)
-            else:
-                skipped_missing += 1
-
-    combined_items = _merge_audio_asset_items(valid_items, pipeline_items)
+    filtered_items: List[Dict[str, Any]] = []
+    runtime_missing = 0
+    hot_only = scope in {"hot", "popular"}
+    for item in snapshot["items"]:
+        path = str(item.get("path") or "").strip()
+        if not path or not os.path.isfile(path):
+            runtime_missing += 1
+            continue
+        if hot_only and int(item.get("download_count") or 0) < HOT_AUDIO_DOWNLOAD_THRESHOLD:
+            continue
+        if group_id and str(item.get("group_id") or "") != group_id:
+            continue
+        if tab_id and str(item.get("tab_id") or "") != tab_id:
+            continue
+        if not _audio_asset_matches_query(item, query_text):
+            continue
+        filtered_items.append(item)
 
     start = (page - 1) * per_page
     end = start + per_page
     return {
-        "items": combined_items[start:end],
+        "items": copy.deepcopy(filtered_items[start:end]),
         "pagination": {
             "page": page,
             "per_page": per_page,
-            "has_more": (
-                len(combined_items) > end
-                or scanned >= scan_limit
-                or pipeline_scanned >= scan_limit
-            ),
-            "skipped_missing": skipped_missing,
-            "scanned": scanned + pipeline_scanned,
-            "scope": "hot" if scope in {"hot", "popular"} else "all",
+            "has_more": len(filtered_items) > end or snapshot["truncated"],
+            "skipped_missing": snapshot["skipped_missing"] + runtime_missing,
+            "scanned": snapshot["scanned"],
+            "catalog_size": len(snapshot["items"]),
+            "catalog_built_at": snapshot["built_at"],
+            "catalog_cache_hit": cache_hit,
+            "catalog_cache_age_ms": cache_age_ms,
+            "catalog_cache_ttl_seconds": cache_ttl_seconds,
+            "scope": "hot" if hot_only else "all",
             "hot_download_threshold": HOT_AUDIO_DOWNLOAD_THRESHOLD,
             "order": "published_desc_with_pipeline_assets",
         },
@@ -1990,11 +2122,36 @@ def _direct_ds_numbered_sections(text: str) -> Dict[str, str]:
             r"|(?:\*\*)\s*([1-7])\s*[.．、:：]\s*"
         )
         matches = list(marker_re.finditer(source))
-    sections: Dict[str, str] = {}
-    for index, match in enumerate(matches):
+    markers = []
+    for match in matches:
         number = next((group for group in match.groups() if group), "")
-        start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
+        if number:
+            markers.append((number, match.start(), match.end()))
+    if not markers:
+        # Some accepted IMA/DS responses preserve the seven requested
+        # sections but omit their numeric prefixes. Map their descriptive
+        # headings before falling back to generic title extraction so labels
+        # such as "格式）" cannot become production cover copy.
+        descriptive_marker_re = re.compile(
+            r"^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?[ \t]*(?:"
+            r"(?P<section_7>标题优化另(?:一|一个)版本[^\n]*)|"
+            r"(?P<section_6>标题优化[^\n]*)|"
+            r"(?P<section_2>不同角度标题版本[^\n]*)|"
+            r"(?P<section_3>精简短标题[^\n]*)|"
+            r"(?P<section_4>黄金片段[^\n]*)|"
+            r"(?P<section_5>金句[^\n]*)|"
+            r"(?P<section_1>标题(?:[ \t]*[（(][^\n]*[）)])?)"
+            r")[ \t]*(?:\*\*)?[ \t]*$",
+            flags=re.M | re.I,
+        )
+        for match in descriptive_marker_re.finditer(source):
+            group_name = match.lastgroup or ""
+            number = group_name.removeprefix("section_")
+            if number:
+                markers.append((number, match.start(), match.end()))
+    sections: Dict[str, str] = {}
+    for index, (number, marker_start, start) in enumerate(markers):
+        end = markers[index + 1][1] if index + 1 < len(markers) else len(source)
         content = source[start:end].strip()
         if number and content:
             sections[number] = content
@@ -2039,7 +2196,10 @@ def _is_direct_ds_section_heading(value: Any) -> bool:
     if not text:
         return True
     return bool(re.fullmatch(
-        r"(?:标题版本[一二三四五六七八九十A-Za-z\d]*(?:（[^）]*）|\([^)]*\))?|"
+        r"(?:不同角度标题版本(?:（[^）]*）|\([^)]*\))?|"
+        r"标题(?:（[^）]*）|\([^)]*\))?|"
+        r"标题优化(?:另(?:一|一个)版本)?(?:（[^）]*）|\([^)]*\))?|"
+        r"标题版本[一二三四五六七八九十A-Za-z\d]*(?:（[^）]*）|\([^)]*\))?|"
         r"短标题版本|精简短标题|优化标题格式\s*(?:（[^）]*）|\([^)]*\))?|"
         r"优化标题(?:（[^）]*）|\([^)]*\))?|闭门会格式标题(?:（[^）]*）|\([^)]*\))?|"
         r"最精华(?:音频)?片段(?:（[^）]*）|\([^)]*\))?|音频金句|金句|说明)",
@@ -3615,10 +3775,10 @@ def _publisher_child_matches_audio_signature(task: PublicationTask, expected: Op
 
 def _cancel_duplicate_publisher_tasks(tasks: List[PublicationTask], *, keep_id: str) -> None:
     changed = False
+    revoke_snapshots = []
     for task in tasks:
         if not task or task.id == keep_id or task.status in TERMINAL_STATUSES:
             continue
-        _revoke_celery_task(task)
         error = f"重复视频子任务已取消，保留 {keep_id}"
         updated = db.session.execute(
             text("""
@@ -3639,19 +3799,29 @@ def _cancel_duplicate_publisher_tasks(tasks: List[PublicationTask], *, keep_id: 
                 "error_json": json.dumps(error, ensure_ascii=False),
             },
         )
-        changed = bool(updated.rowcount) or changed
+        if updated.rowcount:
+            revoke_snapshots.append(SimpleNamespace(
+                id=str(task.id),
+                celery_task_id=str(task.celery_task_id or ""),
+            ))
+            changed = True
     if changed:
         db.session.commit()
+        for snapshot in revoke_snapshots:
+            _revoke_celery_task(snapshot)
 
 
 def _revoke_celery_task(task: PublicationTask) -> None:
-    celery_task_id = getattr(task, "celery_task_id", None)
+    task_id = str(getattr(task, "id", None) or "-")
+    celery_task_id = str(getattr(task, "celery_task_id", None) or "").strip()
     if not celery_task_id:
         return
-    try:
-        celery_app.control.revoke(celery_task_id, terminate=False)
-    except Exception as exc:
-        logger.warning("撤销重复 Celery 子任务失败: task=%s celery=%s error=%s", task.id, celery_task_id, exc)
+    revoke_celery_task_after_db_commit(
+        celery_task_id,
+        operation=f"mp3 duplicate publisher revoke task={task_id}",
+        business_task_id=task_id,
+        log=logger,
+    )
 
 
 def audio_segment_from_plan(audio: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -3973,6 +4143,15 @@ def _clean_closed_door_video_title(value: Any, *, expected_separator: str) -> st
     if _is_cover_process_text(text):
         return ""
     expected = "|" if expected_separator in {"|", "｜"} else "/"
+    if expected == "|":
+        # DS occasionally uses a slash only before the trailing date while the
+        # requested vertical title otherwise uses pipes. Normalize that date
+        # delimiter without accepting arbitrary mixed-format copy.
+        text = re.sub(
+            r"\s*/\s*(?=(?:[12]\d{3})[./-]\d{1,2}[./-]\d{1,2}\b)",
+            " | ",
+            text,
+        )
     split_re = r"\s*[|｜]\s*" if expected == "|" else r"\s*/\s*"
     if expected == "|" and "｜" in text:
         text = text.replace("｜", "|")
@@ -4149,8 +4328,8 @@ def extract_audio_range(text: str) -> Optional[Tuple[float, float]]:
     # Explicit start/end fields are authoritative. Check them before generic
     # inline ranges so a later "关键钩子 10:51-11:27" cannot override the
     # recommended clip's "开始时间 05:43 / 结束时间 20:35".
-    start_re = re.compile(rf"(?:开始|起始)(?:时间戳|时间)?[*_\s]*:\s*[\[【(（]?\s*(?P<start>{token})")
-    end_re = re.compile(rf"(?:结束|截止|终止)(?:时间戳|时间)?[*_\s]*:\s*[\[【(（]?\s*(?P<end>{token})")
+    start_re = re.compile(rf"(?:开始|起始|起点)(?:时间戳|时间)?[*_\s]*:\s*[\[【(（]?\s*(?P<start>{token})")
+    end_re = re.compile(rf"(?:结束|截止|终止|终点)(?:时间戳|时间)?[*_\s]*:\s*[\[【(（]?\s*(?P<end>{token})")
     start_match = start_re.search(normalized)
     end_match = end_re.search(normalized)
     if start_match and end_match:
@@ -5749,6 +5928,7 @@ def _content_pipeline_source_label(source_mode: Any) -> str:
         "sidebar": "侧边栏下载",
         "browser_sidebar": "侧边栏下载",
         "manual_download": "手动投递",
+        "web_upload": "网页投递",
     }
     return labels.get(str(source_mode or "").strip().lower(), "内容流水线")
 
@@ -5839,12 +6019,19 @@ def _merge_audio_asset_items(
     return merged
 
 
-def _audio_asset_row_payload(row, *, canonical_asset=None) -> Optional[Dict[str, Any]]:
+def _audio_asset_row_payload(
+    row,
+    *,
+    canonical_asset=None,
+    canonical_lookup_complete: bool = False,
+) -> Optional[Dict[str, Any]]:
     if not row:
         return None
-    asset = canonical_asset or _canonical_audio_asset_by_source_path(
-        getattr(row, "local_path", None)
-    )
+    asset = canonical_asset
+    if asset is None and not canonical_lookup_complete:
+        asset = _canonical_audio_asset_by_source_path(
+            getattr(row, "local_path", None)
+        )
     resolution = resolve_cleaned_asset(asset, media_type="audio")
     path = resolution.path
     if resolution.state != "ready" or not path:

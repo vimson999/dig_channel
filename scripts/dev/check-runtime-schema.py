@@ -5,6 +5,7 @@ Administrative cleanup is reported separately so redundant indexes or a delayed
 Alembic stamp cannot keep an otherwise compatible application release offline.
 """
 
+import ast
 import os
 import signal
 import socket
@@ -14,14 +15,9 @@ from urllib.parse import urlparse
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MIGRATIONS_DIR = PROJECT_ROOT / "src" / "backend" / "migrations" / "versions"
 MIGRATION_ID = "20260724_comment_hash_indexes"
 MIGRATION_SCRIPT = "docs/sql/comment_hash_index_cleanup_dbeaver_20260724.sql"
-MIGRATION_SUCCESSOR_IDS = {
-    "20260727_bilibili_charging",
-    "20260727_bili_charging_daily",
-    "20260728_youtube_channel_sync",
-    "20260728_youtube_video_sync",
-}
 
 REQUIRED_COLUMNS = {
     "publication_tasks": {
@@ -107,12 +103,50 @@ REQUIRED_COLUMNS = {
         "created_at",
         "updated_at",
     },
+    "workflow_notification_deliveries": {
+        "id",
+        "dedupe_key",
+        "provider",
+        "event_type",
+        "workflow_id",
+        "payload",
+        "payload_hash",
+        "status",
+        "attempt_count",
+        "available_at",
+        "lease_owner",
+        "lease_expires_at",
+        "celery_task_id",
+        "last_error_type",
+        "last_error_message",
+        "first_attempt_at",
+        "last_attempt_at",
+        "sent_at",
+        "created_at",
+        "updated_at",
+    },
+    "workflow_notification_provider_states": {
+        "provider",
+        "state",
+        "consecutive_failures",
+        "open_until",
+        "lease_owner",
+        "lease_expires_at",
+        "last_error_type",
+        "last_error_message",
+        "last_success_at",
+        "last_failure_at",
+        "created_at",
+        "updated_at",
+    },
 }
 
 REQUIRED_PRIVILEGES = {
     "zsxq_sync_run_downloads": "SELECT, INSERT, UPDATE, DELETE",
     "publication_task_bilibili_uploads": "SELECT, INSERT, UPDATE, DELETE",
     "bilibili_charging_snapshots": "SELECT, INSERT, UPDATE, DELETE",
+    "workflow_notification_deliveries": "SELECT, INSERT, UPDATE",
+    "workflow_notification_provider_states": "SELECT, INSERT, UPDATE",
 }
 
 REQUIRED_INDEXES = {
@@ -123,9 +157,18 @@ REQUIRED_INDEXES = {
     "ix_zsxq_sync_run_downloads_attachment",
     "ix_publication_task_bili_uploads_parent_source_created",
     "ix_bilibili_charging_snapshots_date_competitor",
+    "ix_workflow_notification_deliveries_provider_due",
+    "ix_workflow_notification_deliveries_lease",
+    "ix_workflow_notification_deliveries_workflow",
+}
+
+REQUIRED_UNIQUE_CONSTRAINTS = {
+    "uq_workflow_notification_deliveries_dedupe_key",
 }
 
 FORBIDDEN_DUPLICATE_INDEXES = {
+    "ix_bilibili_competitor_videos_bvid",
+    "ix_bilibili_competitors_uid",
     "ix_external_documents_url_hash",
     "ix_publication_tasks_feature_status_updated",
     "ix_publication_tasks_feature_created_at_desc",
@@ -140,8 +183,6 @@ FORBIDDEN_DUPLICATE_INDEXES = {
     "ix_zsxq_topic_comments_parent_comment_id",
     "ix_zsxq_topic_comments_tab_id",
     "ix_zsxq_topics_group_tab_create_synced_desc",
-    "ix_zsxq_topics_group_tab_type_create_desc",
-    "ix_zsxq_topics_group_type_create_desc",
 }
 
 
@@ -239,13 +280,80 @@ def evaluate_schema_snapshot(snapshot):
     missing_indexes = sorted(REQUIRED_INDEXES - indexes)
     if missing_indexes:
         errors.append(f"missing required indexes: {', '.join(missing_indexes)}")
+    unique_constraints = set(snapshot.get("unique_constraints") or ())
+    missing_unique_constraints = sorted(
+        REQUIRED_UNIQUE_CONSTRAINTS - unique_constraints
+    )
+    if missing_unique_constraints:
+        errors.append(
+            "missing required unique constraints: "
+            + ", ".join(missing_unique_constraints)
+        )
     return errors
+
+
+def _migration_parent_map():
+    """Read Alembic lineage without importing migration side effects."""
+
+    parents = {}
+    for path in sorted(MIGRATIONS_DIR.glob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (OSError, SyntaxError, UnicodeError):
+            continue
+        values = {}
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in {
+                    "revision",
+                    "down_revision",
+                }:
+                    try:
+                        values[target.id] = ast.literal_eval(node.value)
+                    except (ValueError, TypeError, SyntaxError):
+                        pass
+        revision = values.get("revision")
+        if not isinstance(revision, str) or not revision:
+            continue
+        down_revision = values.get("down_revision")
+        if down_revision is None:
+            revision_parents = ()
+        elif isinstance(down_revision, str):
+            revision_parents = (down_revision,)
+        elif isinstance(down_revision, (tuple, list, set)):
+            revision_parents = tuple(
+                str(item) for item in down_revision if item
+            )
+        else:
+            revision_parents = ()
+        parents[revision] = revision_parents
+    return parents
+
+
+def migration_is_applied(applied_revisions, target_revision):
+    """Return true when target is a recorded head or any of its ancestors."""
+
+    target_revision = str(target_revision or "")
+    pending = [str(item) for item in (applied_revisions or ()) if item]
+    parents = _migration_parent_map()
+    visited = set()
+    while pending:
+        revision = pending.pop()
+        if revision == target_revision:
+            return True
+        if revision in visited:
+            continue
+        visited.add(revision)
+        pending.extend(parents.get(revision, ()))
+    return False
 
 
 def evaluate_maintenance_warnings(snapshot):
     warnings = []
     alembic_versions = set(snapshot.get("alembic_versions") or ())
-    if not ({MIGRATION_ID} | MIGRATION_SUCCESSOR_IDS) & alembic_versions:
+    if not migration_is_applied(alembic_versions, MIGRATION_ID):
         warnings.append(
             f"alembic migration {MIGRATION_ID} is not recorded as applied"
         )
@@ -453,6 +561,15 @@ def read_schema_snapshot():
                 """
             )
             indexes = {row[0] for row in cursor.fetchall()}
+            cursor.execute(
+                """
+                SELECT constraint_name
+                FROM information_schema.table_constraints
+                WHERE constraint_schema = 'public'
+                  AND constraint_type = 'UNIQUE'
+                """
+            )
+            unique_constraints = {row[0] for row in cursor.fetchall()}
         connection.rollback()
         return {
             "alembic_versions": alembic_versions,
@@ -467,6 +584,7 @@ def read_schema_snapshot():
             "projected_bilibili_tasks": projected_bilibili_tasks,
             "executable_bilibili_tasks": executable_bilibili_tasks,
             "indexes": indexes,
+            "unique_constraints": unique_constraints,
         }
     finally:
         connection.close()

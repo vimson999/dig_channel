@@ -9,6 +9,8 @@ from typing import Callable, Iterable, Optional
 
 import requests
 
+from services.content_pipeline.clean_checkpoint import load_completed_clean_result
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
@@ -144,27 +146,41 @@ class PdfCleanerAdapter:
         reset_workspace: bool = True,
     ) -> dict:
         options = options or PdfCleanOptions()
+        safe_batch_id = _safe_batch_id(batch_id)
+        input_files = _resolve_pdf_files(files)
+        if not input_files:
+            raise PdfCleanerError("没有可清洗的 PDF 文件")
+        local_batch_dir = self.output_root / safe_batch_id
+        local_output_dir = local_batch_dir / "pdf_cleaned"
+        if not reset_workspace:
+            resumed = load_completed_clean_result(
+                local_batch_dir / "manifest.json",
+                batch_id=safe_batch_id,
+                input_files=input_files,
+                output_dir=local_output_dir,
+                allowed_suffixes={".pdf"},
+            )
+            if resumed is not None:
+                if progress_callback:
+                    progress_callback({
+                        "phase": "resume_completed",
+                        "progress": 90,
+                        "message": "复用已验证的 PDF 清洗 checkpoint",
+                    })
+                return resumed
         if str(options.engine or "").strip().lower() == "local":
             return self._run_local_batch(
                 batch_id=batch_id,
-                files=files,
+                files=input_files,
                 source_root=source_root,
                 options=options,
                 progress_callback=progress_callback,
                 reset_workspace=reset_workspace,
             )
 
-        safe_batch_id = _safe_batch_id(batch_id)
-        input_files = _resolve_pdf_files(files)
-        if not input_files:
-            raise PdfCleanerError("没有可清洗的 PDF 文件")
-
         pytest_batch_dir = self._pytest_batch_dir(safe_batch_id)
         pytest_input_dir = pytest_batch_dir / "input"
         pytest_output_dir = pytest_batch_dir / "output"
-        local_batch_dir = self.output_root / safe_batch_id
-        local_output_dir = local_batch_dir / "pdf_cleaned"
-
         if reset_workspace and pytest_batch_dir.exists():
             _assert_inside(pytest_batch_dir, self.cleaner_project_dir)
             shutil.rmtree(pytest_batch_dir)

@@ -65,11 +65,19 @@ class MyHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         except ValueError:
             self._send_bridge_error(400, "invalid_content_length")
             return
-        if content_length < 1 or content_length > MAX_FORM_BODY_BYTES:
+        if content_length > MAX_FORM_BODY_BYTES:
+            # Drain only the bounded rejection prefix that a conforming client
+            # may already be sending.  Closing a socket with that data unread
+            # turns the intended HTTP 413 into ECONNRESET on macOS.  The cap
+            # keeps a hostile Content-Length from making rejection unbounded.
+            self.rfile.read(min(content_length, MAX_FORM_BODY_BYTES + 1))
             self._send_bridge_error(
-                413 if content_length > MAX_FORM_BODY_BYTES else 400,
-                "request_body_too_large" if content_length > MAX_FORM_BODY_BYTES else "empty_request_body",
+                413,
+                "request_body_too_large",
             )
+            return
+        if content_length < 1:
+            self._send_bridge_error(400, "empty_request_body")
             return
         try:
             decoded_body = self.rfile.read(content_length).decode("utf-8")

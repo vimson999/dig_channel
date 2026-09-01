@@ -52,13 +52,14 @@ def _start_web_background_threads(app):
     command = " ".join(str(item) for item in sys.argv).lower()
     return not any(marker in command for marker in ("celery", "scheduler", "watchdog", "pytest", "unittest"))
 
-def create_app(config_class=Config):
+def create_app(config_class=Config, *, register_apis=True):
     """应用工厂函数
     
     创建和配置Flask应用实例
     
     Args:
         config_class: 配置类，默认为Config
+        register_apis: worker 等仅需数据库上下文时可关闭 Web API 导入
         
     Returns:
         Flask: 配置好的Flask应用实例
@@ -130,8 +131,9 @@ def create_app(config_class=Config):
     performance_monitor.init_app(app, start_system_monitor=start_background_threads)
     
     # 注册API蓝图
-    from apis import register_all_apis
-    register_all_apis(app)
+    if register_apis:
+        from apis import register_all_apis
+        register_all_apis(app)
     
     # 初始化错误处理器
     error_handler.init_app(app)

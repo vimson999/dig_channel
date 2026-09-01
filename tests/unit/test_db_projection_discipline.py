@@ -1656,6 +1656,20 @@ class DbProjectionDisciplineTest(unittest.TestCase):
         self.assertIn("finally", body)
         self.assertIn("this.pollInFlight = false", body)
 
+    def test_mp3_history_polling_pauses_hidden_and_is_single_flight(self):
+        text = (PROJECT_ROOT / "src" / "frontend" / "js" / "mp3-video-workflow.js").read_text(
+            encoding="utf-8"
+        )
+        constructor = text.split("constructor() {", 1)[1].split("\n    defaults() {", 1)[0]
+        reset = text.split("resetPollTimer() {", 1)[1].split("\n    render() {", 1)[0]
+
+        self.assertIn("this.pollInFlight = false", constructor)
+        self.assertIn("if (document.hidden || this.pollInFlight) return", reset)
+        self.assertIn("this.pollInFlight = true", reset)
+        self.assertIn("await this.loadHistory({ page: this.jobPage, silent: true })", reset)
+        self.assertIn("finally", reset)
+        self.assertIn("this.pollInFlight = false", reset)
+
     def test_material_history_polling_uses_visibility_controller_and_skips_terminal_history(self):
         text = (PROJECT_ROOT / "src" / "frontend" / "js" / "report-script-material-workflow-test.js").read_text(
             encoding="utf-8"

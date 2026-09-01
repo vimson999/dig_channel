@@ -3,8 +3,7 @@ class PdfMergeWorkflowWorkbench {
         this.items = [];
         this.assets = [];
         this.jobs = [];
-        this.assetSearchTimer = null;
-        this.pollTimer = null;
+        this.jobsLoadPromise = null;
         this.busy = false;
         this.els = {
             notice: document.getElementById('pdf-merge-notice'),
@@ -20,11 +19,17 @@ class PdfMergeWorkflowWorkbench {
             jobsRefresh: document.getElementById('pdf-merge-jobs-refresh'),
             jobList: document.getElementById('pdf-merge-job-list'),
         };
+        this.polling = window.VisibilityPolling.create({
+            documentRef: document,
+            windowRef: window,
+            intervalMs: 12000,
+            poll: () => this.loadJobs({ silent: true }),
+            setIntervalFn: window.setInterval.bind(window),
+            clearIntervalFn: window.clearInterval.bind(window),
+        });
         this.bind();
         this.renderQueue();
-        this.loadAssets();
-        this.loadJobs();
-        this.startPolling();
+        if (!document.hidden) void this.loadJobs();
     }
 
     bind() {
@@ -33,7 +38,6 @@ class PdfMergeWorkflowWorkbench {
             event.target.value = '';
         });
         this.els.assetRefresh?.addEventListener('click', () => this.loadAssets());
-        this.els.assetSearch?.addEventListener('input', () => this.scheduleAssetSearch());
         this.els.assetSearch?.addEventListener('keydown', (event) => {
             if (event.key === 'Enter') {
                 event.preventDefault();
@@ -43,26 +47,21 @@ class PdfMergeWorkflowWorkbench {
         this.els.submit?.addEventListener('click', () => this.submit());
         this.els.jobsRefresh?.addEventListener('click', () => this.loadJobs());
         document.addEventListener('visibilitychange', () => {
-            if (!document.hidden) this.loadJobs({ silent: true });
+            if (document.hidden) {
+                this.stopPolling();
+                return;
+            }
+            void this.loadJobs({ silent: true });
         });
         window.addEventListener('beforeunload', () => this.stopPolling());
     }
 
     startPolling() {
-        this.stopPolling();
-        this.pollTimer = window.setInterval(() => {
-            if (!document.hidden) this.loadJobs({ silent: true });
-        }, 12000);
+        this.polling.start();
     }
 
     stopPolling() {
-        if (this.pollTimer) window.clearInterval(this.pollTimer);
-        this.pollTimer = null;
-    }
-
-    scheduleAssetSearch() {
-        if (this.assetSearchTimer) window.clearTimeout(this.assetSearchTimer);
-        this.assetSearchTimer = window.setTimeout(() => this.loadAssets({ silent: true }), 320);
+        this.polling.stop();
     }
 
     async request(path, options = {}) {
@@ -248,15 +247,36 @@ class PdfMergeWorkflowWorkbench {
         }
     }
 
-    async loadJobs({ silent = false } = {}) {
+    loadJobs({ silent = false } = {}) {
+        if (this.jobsLoadPromise) return this.jobsLoadPromise;
+        const request = this._loadJobs({ silent });
+        const settled = request.finally(() => {
+            if (this.jobsLoadPromise === settled) {
+                this.jobsLoadPromise = null;
+            }
+        });
+        this.jobsLoadPromise = settled;
+        return settled;
+    }
+
+    async _loadJobs({ silent = false } = {}) {
         try {
             const payload = await this.request('/api/pdf-merge-workflows/jobs?page=1&per_page=30');
             this.jobs = Array.isArray(payload.data?.items) ? payload.data.items : (payload.items || []);
             this.renderJobs();
+            this.syncPollingState();
+            return this.jobs;
         } catch (error) {
             if (!silent) this.notice(`任务历史加载失败：${error.message}`, 'error');
             if (!this.jobs.length) this.renderJobs();
+            return this.jobs;
         }
+    }
+
+    syncPollingState() {
+        const hasActiveJob = this.jobs.some((job) => ['pending', 'processing'].includes(job.status));
+        if (hasActiveJob && !document.hidden) this.startPolling();
+        else this.stopPolling();
     }
 
     renderJobs() {

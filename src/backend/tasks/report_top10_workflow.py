@@ -38,6 +38,7 @@ from services.report_top10_workflow import (
 from services.runtime_guard import (
     apply_async_after_db_release,
     guard_publication_task_start,
+    revoke_celery_task_after_db_commit,
     retry_exception_types,
 )
 from tasks.gemini_browser import process_report_pdf_gemini_job
@@ -961,13 +962,16 @@ def _mark_child_failed(child: PublicationTask, message: str) -> None:
 
 
 def _revoke_child_task(child: PublicationTask) -> None:
-    celery_task_id = getattr(child, "celery_task_id", None)
+    child_id = str(getattr(child, "id", None) or "-")
+    celery_task_id = str(getattr(child, "celery_task_id", None) or "").strip()
     if not celery_task_id:
         return
-    try:
-        celery_app.control.revoke(celery_task_id, terminate=False)
-    except Exception as exc:
-        logger.warning("撤销 Top10 子任务失败: child=%s celery=%s error=%s", child.id, celery_task_id, exc)
+    revoke_celery_task_after_db_commit(
+        celery_task_id,
+        operation=f"report top10 child revoke child={child_id}",
+        business_task_id=child_id,
+        log=logger,
+    )
 
 
 def _raise_if_canceled(parent_id: str) -> None:

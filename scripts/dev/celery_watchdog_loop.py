@@ -19,10 +19,36 @@ def _poll_seconds():
         return 60
 
 
+def _reconcile_notifications_safely(reconciler):
+    """Keep outbox repair from suppressing the worker-healing watchdog pass."""
+
+    try:
+        result = reconciler()
+    except Exception as exc:
+        logging.getLogger(__name__).exception(
+            "Workflow notification recovery failed; continuing service watchdog"
+        )
+        return {
+            "scheduled": 0,
+            "due_count": 0,
+            "items": [],
+            "error": str(exc),
+        }
+    if result.get("scheduled"):
+        print(
+            "watchdog notification recovery: "
+            f"providers={result['scheduled']} "
+            f"deliveries={result['due_count']}",
+            flush=True,
+        )
+    return result
+
+
 def main():
     from app import create_app
     from apis.v1.celery_monitor import run_watchdog_once
     from models import db
+    from tasks.workflow_notify import reconcile_workflow_notifications_once
 
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
     app = create_app()
@@ -33,6 +59,9 @@ def main():
         try:
             with app.app_context():
                 try:
+                    _reconcile_notifications_safely(
+                        reconcile_workflow_notifications_once
+                    )
                     result = run_watchdog_once()
                     actions = [
                         f"{item.get('service_id')}:{item.get('action')}"

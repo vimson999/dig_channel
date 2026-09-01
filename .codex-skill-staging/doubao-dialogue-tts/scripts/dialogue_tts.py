@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -17,6 +18,13 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = "doubao-dialogue-v1"
+DEFAULT_MODEL = "seed-tts-2.0-standard"
+DEFAULT_RESOURCE_ID = "seed-tts-2.0"
+PROJECT_CONFIG_NAME = ".doubao-dialogue-tts.json"
+PROJECT_CONFIG_SCHEMA = "doubao-dialogue-project-v1"
+PROFILE_SCHEMA = "doubao-dialogue-channel-profile-v1"
+PROFILE_DIR = Path(__file__).resolve().parent.parent / "references" / "channel-profiles"
+GENERIC_PROFILE_IDS = {"generic", "none", "off"}
 PRODUCTION_LABELS = (
     "【插入点",
     "原文播放范围",
@@ -30,6 +38,168 @@ PRODUCTION_LABELS = (
 
 class ManifestError(RuntimeError):
     pass
+
+
+def read_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ManifestError(f"Cannot read {label} {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ManifestError(f"{label} root must be an object: {path}")
+    return data
+
+
+def find_project_config(start: Path) -> Path | None:
+    current = start.resolve()
+    if current.is_file() or current.suffix:
+        current = current.parent
+    for directory in (current, *current.parents):
+        candidate = directory / PROJECT_CONFIG_NAME
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def load_channel_profile(profile_id: str) -> dict[str, Any]:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", profile_id):
+        raise ManifestError(f"invalid profile_id: {profile_id!r}")
+    path = PROFILE_DIR / f"{profile_id}.json"
+    profile = read_json_object(path, "channel profile")
+    if profile.get("schema_version") != PROFILE_SCHEMA:
+        raise ManifestError(
+            f"channel profile schema_version must be {PROFILE_SCHEMA}: {path}"
+        )
+    if profile.get("profile_id") != profile_id:
+        raise ManifestError(
+            f"channel profile id mismatch: expected {profile_id!r}, "
+            f"got {profile.get('profile_id')!r}"
+        )
+    return profile
+
+
+def resolve_profile(
+    manifest: dict[str, Any], manifest_path: Path
+) -> tuple[dict[str, Any] | None, dict[str, str]]:
+    editorial = manifest.get("editorial")
+    if editorial is not None and not isinstance(editorial, dict):
+        raise ManifestError("editorial must be an object")
+    editorial = editorial or {}
+    if "profile_id" in editorial:
+        profile_id = str(editorial.get("profile_id") or "").strip()
+        if not profile_id:
+            raise ManifestError("editorial.profile_id cannot be empty")
+        if profile_id in GENERIC_PROFILE_IDS:
+            return None, {"id": "generic", "source": "manifest_override"}
+        return load_channel_profile(profile_id), {
+            "id": profile_id,
+            "source": "manifest_override",
+        }
+
+    config_path = find_project_config(manifest_path)
+    if config_path is None:
+        config_path = find_project_config(Path.cwd())
+    if config_path is None:
+        return None, {"id": "generic", "source": "generic_default"}
+
+    config = read_json_object(config_path, "project profile config")
+    if config.get("schema_version") != PROJECT_CONFIG_SCHEMA:
+        raise ManifestError(
+            f"project profile schema_version must be {PROJECT_CONFIG_SCHEMA}: "
+            f"{config_path}"
+        )
+    profile_id = str(config.get("default_profile") or "").strip()
+    if not profile_id:
+        raise ManifestError(f"default_profile is required: {config_path}")
+    if profile_id in GENERIC_PROFILE_IDS:
+        return None, {"id": "generic", "source": "project_default"}
+    return load_channel_profile(profile_id), {
+        "id": profile_id,
+        "source": "project_default",
+    }
+
+
+def apply_profile_defaults(
+    manifest: dict[str, Any], profile: dict[str, Any] | None
+) -> tuple[dict[str, Any], dict[str, str]]:
+    effective = copy.deepcopy(manifest)
+    supplied_voices = manifest.get("voices")
+    supplied_voices = supplied_voices if isinstance(supplied_voices, dict) else {}
+    profile_voices = profile.get("voices") if profile else {}
+    profile_voices = profile_voices if isinstance(profile_voices, dict) else {}
+    effective_voices: dict[str, dict[str, Any]] = {}
+    speed_sources: dict[str, str] = {}
+    for role in dict.fromkeys((*profile_voices.keys(), *supplied_voices.keys())):
+        profile_voice = profile_voices.get(role)
+        supplied_voice = supplied_voices.get(role)
+        profile_voice = profile_voice if isinstance(profile_voice, dict) else {}
+        supplied_voice = supplied_voice if isinstance(supplied_voice, dict) else {}
+        effective_voices[role] = {**profile_voice, **supplied_voice}
+        if "speed" in supplied_voice:
+            speed_sources[role] = "manifest_override"
+        elif "speed" in profile_voice:
+            speed_sources[role] = "profile_default"
+        else:
+            speed_sources[role] = "generic_default"
+    effective["voices"] = effective_voices
+    return effective, speed_sources
+
+
+def validate_profile_speech(
+    profile: dict[str, Any] | None, segments: list[dict[str, Any]]
+) -> None:
+    if profile is None:
+        return
+    channel = profile.get("channel")
+    editorial = profile.get("editorial")
+    channel = channel if isinstance(channel, dict) else {}
+    editorial = editorial if isinstance(editorial, dict) else {}
+    fixed_opening = str(channel.get("fixed_opening") or "").strip()
+    opening = next(
+        (
+            item
+            for item in segments
+            if item.get("role") == "host" and item.get("kind") == "opening"
+        ),
+        None,
+    )
+    if fixed_opening and (
+        opening is None or not str(opening.get("text") or "").startswith(fixed_opening)
+    ):
+        raise ManifestError(
+            f"profile {profile['profile_id']} requires fixed opening: {fixed_opening}"
+        )
+
+    aliases = editorial.get("spoken_author_aliases")
+    aliases = aliases if isinstance(aliases, dict) else {}
+    forbidden = editorial.get("forbidden_host_phrases")
+    forbidden = forbidden if isinstance(forbidden, list) else []
+    for segment in segments:
+        if segment.get("role") != "host":
+            continue
+        text = str(segment.get("text") or "")
+        for full_name, spoken_alias in aliases.items():
+            if str(full_name) in text:
+                raise ManifestError(
+                    f"host segment {segment['id']} uses {full_name!r}; "
+                    f"profile requires spoken alias {spoken_alias!r}"
+                )
+        for phrase in forbidden:
+            if str(phrase) and str(phrase) in text:
+                raise ManifestError(
+                    f"host segment {segment['id']} contains backstage process "
+                    f"language: {phrase}"
+                )
+
+
+def request_model(data: dict[str, Any]) -> str:
+    model = str(data.get("model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    if model == DEFAULT_RESOURCE_ID:
+        raise ManifestError(
+            f"model {model!r} is the Resource ID, not the request model; "
+            f"use {DEFAULT_MODEL!r} in the manifest"
+        )
+    return model
 
 
 def load_env_file(path: Path | None) -> None:
@@ -60,11 +230,14 @@ def read_manifest(path: Path) -> dict[str, Any]:
     return data
 
 
-def validate_manifest(data: dict[str, Any]) -> list[dict[str, Any]]:
+def validate_manifest(
+    data: dict[str, Any], profile: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
     if data.get("schema_version") != SCHEMA_VERSION:
         raise ManifestError(f"schema_version must be {SCHEMA_VERSION}")
     if not str(data.get("title") or "").strip():
         raise ManifestError("title is required")
+    request_model(data)
     voices = data.get("voices")
     segments = data.get("segments")
     if not isinstance(voices, dict) or not voices:
@@ -115,7 +288,28 @@ def validate_manifest(data: dict[str, Any]) -> list[dict[str, Any]]:
                 "pause_after_ms": pause,
             }
         )
+    validate_profile_speech(profile, normalized)
     return normalized
+
+
+def prepare_manifest(
+    manifest: dict[str, Any], manifest_path: Path
+) -> tuple[
+    dict[str, Any],
+    list[dict[str, Any]],
+    dict[str, str],
+    dict[str, str],
+]:
+    profile, profile_context = resolve_profile(manifest, manifest_path)
+    effective, speed_sources = apply_profile_defaults(manifest, profile)
+    editorial = effective.get("editorial")
+    editorial = editorial if isinstance(editorial, dict) else {}
+    editorial["profile_id"] = profile_context["id"]
+    effective["editorial"] = editorial
+    effective["model"] = request_model(effective)
+    segments = validate_manifest(effective, profile)
+    effective["segments"] = segments
+    return effective, segments, profile_context, speed_sources
 
 
 def split_text(text: str, limit: int) -> list[str]:
@@ -156,7 +350,7 @@ def settings_for(
     return {
         "voice_id": str(voice["voice_id"]),
         "voice_label": str(voice.get("label") or segment["role"]),
-        "model": str(manifest.get("model") or "seed-tts-2.0-standard"),
+        "model": request_model(manifest),
         "sample_rate": int(audio.get("sample_rate") or 24000),
         "bit_rate": int(audio.get("bit_rate") or 128000),
         "chunk_chars": max(200, min(int(audio.get("chunk_chars") or 450), 1000)),
@@ -444,16 +638,43 @@ def main() -> int:
     args = parser.parse_args()
 
     manifest = read_manifest(args.manifest)
-    segments = validate_manifest(manifest)
+    effective, segments, profile_context, speed_sources = prepare_manifest(
+        manifest, args.manifest
+    )
     total_chars = sum(len(item["text"]) for item in segments)
     counts: dict[str, int] = {}
     for item in segments:
         counts[item["role"]] = counts.get(item["role"], 0) + 1
     summary = {
-        "title": manifest["title"],
+        "title": effective["title"],
+        "model": request_model(effective),
         "segments": len(segments),
         "characters": total_chars,
         "roles": counts,
+        "voices": {
+            role: str(config.get("voice_id") or "")
+            for role, config in effective["voices"].items()
+            if isinstance(config, dict)
+        },
+        "voice_settings": {
+            role: {
+                "label": str(config.get("label") or role),
+                "voice_id": str(config.get("voice_id") or ""),
+                "speed": float(
+                    config["speed"] if config.get("speed") is not None else 1.0
+                ),
+                "speed_source": speed_sources.get(role, "generic_default"),
+            }
+            for role, config in effective["voices"].items()
+            if isinstance(config, dict)
+        },
+        "profile": profile_context,
+        "api_billing_boundary": "first_external_tts_request",
+        "external_data_transfer": (
+            "not_started_dry_run"
+            if args.dry_run
+            else "starts_with_first_external_tts_request"
+        ),
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if args.dry_run:
@@ -464,7 +685,6 @@ def main() -> int:
     load_env_file(args.env_file)
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    effective = {**manifest, "segments": segments}
     (output_dir / "effective-manifest.json").write_text(
         json.dumps(effective, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",

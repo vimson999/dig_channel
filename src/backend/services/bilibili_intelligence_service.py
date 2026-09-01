@@ -11,8 +11,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import requests
 from bilibili_api import Credential, user
-from sqlalchemy import and_, or_
-from sqlalchemy.orm import load_only
+from sqlalchemy import and_, bindparam, cast, column, or_, update, values
+from sqlalchemy.dialects.postgresql import JSONB
 
 from models import db
 from models.bilibili_intelligence import BilibiliCompetitor, BilibiliCompetitorVideo
@@ -68,22 +68,20 @@ _DATE_RE = re.compile(r"(?<!\d)(20\d{2})[./_-]?(0?[1-9]|1[0-2])[./_-]?(0?[1-9]|[
 _CANDIDATE_CACHE: Dict[str, Dict[str, Any]] = {}
 _CANDIDATE_CACHE_LOCK = threading.RLock()
 
-_VIDEO_SYNC_COLUMNS = (
-    BilibiliCompetitorVideo.competitor_id,
-    BilibiliCompetitorVideo.content_type,
-    BilibiliCompetitorVideo.bvid,
-    BilibiliCompetitorVideo.aid,
-    BilibiliCompetitorVideo.title,
-    BilibiliCompetitorVideo.description,
-    BilibiliCompetitorVideo.cover_url,
-    BilibiliCompetitorVideo.duration_seconds,
-    BilibiliCompetitorVideo.published_at,
-    BilibiliCompetitorVideo.play_count,
-    BilibiliCompetitorVideo.comment_count,
-    BilibiliCompetitorVideo.danmaku_count,
-    BilibiliCompetitorVideo.is_charging,
-    BilibiliCompetitorVideo.raw_payload,
-    BilibiliCompetitorVideo.last_seen_at,
+_VIDEO_SCALAR_UPDATE_FIELDS = (
+    "competitor_id",
+    "content_type",
+    "aid",
+    "title",
+    "description",
+    "cover_url",
+    "duration_seconds",
+    "published_at",
+    "play_count",
+    "comment_count",
+    "danmaku_count",
+    "is_charging",
+    "last_seen_at",
 )
 
 
@@ -172,6 +170,88 @@ def _video_values(item: Dict[str, Any], *, competitor_id: str, content_type: str
     }
 
 
+def _postgres_video_projection_update(table, fields, mappings):
+    incoming = values(
+        column("id", table.c.id.type),
+        *(column(field, table.c[field].type) for field in fields),
+        name="incoming_bilibili_videos",
+    ).data([
+        (
+            str(mapping["id"]),
+            *(mapping.get(field) for field in fields),
+        )
+        for mapping in mappings
+    ])
+    incoming_id = cast(incoming.c.id, table.c.id.type)
+    incoming_values = {
+        field: cast(
+            incoming.c[field],
+            JSONB if field == "raw_payload" else table.c[field].type,
+        )
+        for field in fields
+    }
+    return (
+        update(table)
+        .where(table.c.id == incoming_id)
+        .where(or_(*(
+            table.c[field].is_distinct_from(incoming_values[field])
+            for field in fields
+        )))
+        .values(incoming_values)
+        .execution_options(synchronize_session=False)
+    )
+
+
+def _portable_video_projection_update(table, fields, mappings):
+    bound_id = bindparam("_bilibili_video_id", type_=table.c.id.type)
+    bound = {
+        field: bindparam(
+            f"_bilibili_video_{field}",
+            type_=table.c[field].type,
+        )
+        for field in fields
+    }
+    statement = (
+        update(table)
+        .where(table.c.id == bound_id)
+        .where(or_(*(
+            table.c[field].is_distinct_from(bound[field])
+            for field in fields
+        )))
+        .values(bound)
+        .execution_options(synchronize_session=False)
+    )
+    parameters = [
+        {
+            "_bilibili_video_id": str(mapping["id"]),
+            **{
+                f"_bilibili_video_{field}": mapping.get(field)
+                for field in fields
+            },
+        }
+        for mapping in mappings
+    ]
+    db.session.execute(statement, parameters)
+
+
+def _update_existing_video_rows(mappings: Sequence[Dict[str, Any]]) -> None:
+    if not mappings:
+        return
+    table = BilibiliCompetitorVideo.__table__
+    field_groups = (
+        _VIDEO_SCALAR_UPDATE_FIELDS,
+        ("raw_payload",),
+    )
+    if db.session.get_bind().dialect.name == "postgresql":
+        for fields in field_groups:
+            db.session.execute(
+                _postgres_video_projection_update(table, fields, mappings)
+            )
+        return
+    for fields in field_groups:
+        _portable_video_projection_update(table, fields, mappings)
+
+
 def sync_competitor(competitor_id: str, *, page_size: int = 30) -> Dict[str, Any]:
     page_size = max(1, min(50, int(page_size or 30)))
     competitor = BilibiliCompetitor.query.filter(BilibiliCompetitor.id == str(competitor_id)).one_or_none()
@@ -220,26 +300,27 @@ def sync_competitor(competitor_id: str, *, page_size: int = 30) -> Dict[str, Any
 
     bvids = [item["bvid"] for item in values]
     existing = {
-        item.bvid: item
-        for item in BilibiliCompetitorVideo.query.options(load_only(
+        row.bvid: row.id
+        for row in db.session.query(
             BilibiliCompetitorVideo.id,
-            *_VIDEO_SYNC_COLUMNS,
-        )).filter(BilibiliCompetitorVideo.bvid.in_(bvids)).all()
+            BilibiliCompetitorVideo.bvid,
+        ).filter(BilibiliCompetitorVideo.bvid.in_(bvids)).all()
     } if bvids else {}
     created = 0
     created_titles = []
     updated = 0
+    existing_mappings = []
     for item in values:
-        video = existing.get(item["bvid"])
-        if video is None:
+        video_id = existing.get(item["bvid"])
+        if video_id is None:
             video = BilibiliCompetitorVideo(**item)
             db.session.add(video)
             created += 1
             created_titles.append(item["title"])
         else:
-            for key, value in item.items():
-                setattr(video, key, value)
+            existing_mappings.append({"id": video_id, **item})
             updated += 1
+    _update_existing_video_rows(existing_mappings)
 
     competitor = BilibiliCompetitor.query.filter(BilibiliCompetitor.id == competitor_snapshot["id"]).one()
     competitor.last_synced_at = datetime.utcnow()

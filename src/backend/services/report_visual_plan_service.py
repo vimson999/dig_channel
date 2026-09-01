@@ -120,6 +120,7 @@ def normalize_storyboard_response(material: Dict[str, Any], gemini_text: str) ->
         raise ValueError("分镜 Gem 未返回内容")
     deterministic = _parse_labeled_gemini_storyboard(str(gemini_text))
     if deterministic:
+        deterministic = _select_complete_storyboard_window(script, deterministic)
         deterministic = _repair_labeled_gemini_script_gaps(script, deterministic)
         try:
             return _build_normalized_storyboard(
@@ -314,7 +315,12 @@ def _parse_labeled_gemini_storyboard(gemini_text: str) -> Optional[Dict[str, Any
         item = {
             "scene_title": header,
             "script_text": match.group("script").strip(),
-            "visual_prompt": match.group("prompt").strip(),
+            "visual_prompt": re.sub(
+                r"\s*【全文分镜完成】.*$",
+                "",
+                match.group("prompt"),
+                flags=re.DOTALL,
+            ).strip(),
         }
         if header == "标题镜头" or "标题镜头" in header or re.fullmatch(r"分镜\s*0", header):
             title_scene = item
@@ -323,6 +329,56 @@ def _parse_labeled_gemini_storyboard(gemini_text: str) -> Optional[Dict[str, Any
     if not title_scene or not segments:
         return None
     return {"title_scene": title_scene, "segments": segments}
+
+
+def _select_complete_storyboard_window(
+    script: str,
+    deterministic: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Drop a repeated prefix when Gem appends a complete continuation.
+
+    Long Gemini replies can contain the visible prefix twice: once from the
+    first turn and again in the completed continuation.  The parser quite
+    correctly returns every labeled block, but that combined list cannot be
+    aligned to the source script.  Prefer the latest contiguous block window
+    whose narration (ignoring whitespace) exactly covers the authoritative
+    script; prompts remain untouched and are still validated against Gem's raw
+    response by ``_build_normalized_storyboard``.
+    """
+    raw_segments = deterministic.get("segments")
+    if not isinstance(raw_segments, list) or not raw_segments:
+        return deterministic
+    compact_source, _ = _compact_with_positions(script)
+    if not compact_source:
+        return deterministic
+    compact_parts = []
+    for item in raw_segments:
+        if not isinstance(item, dict):
+            return deterministic
+        compact_part, _ = _compact_with_positions(item.get("script_text") or "")
+        if not compact_part:
+            return deterministic
+        compact_parts.append(compact_part)
+
+    windows = []
+    for start in range(len(compact_parts)):
+        combined = ""
+        for end in range(start, len(compact_parts)):
+            combined += compact_parts[end]
+            if combined == compact_source:
+                windows.append((start, end + 1))
+                break
+            if len(combined) > len(compact_source):
+                break
+    if not windows:
+        return deterministic
+    start, end = max(windows, key=lambda window: (window[0], window[1] - window[0]))
+    if start == 0 and end == len(raw_segments):
+        return deterministic
+    return {
+        **deterministic,
+        "segments": raw_segments[start:end],
+    }
 
 
 def _repair_labeled_gemini_script_gaps(

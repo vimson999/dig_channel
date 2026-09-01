@@ -181,6 +181,7 @@ def _content_pipeline_source_label(source_mode):
         "sidebar": "侧边栏下载",
         "browser_sidebar": "侧边栏下载",
         "manual_download": "手动投递",
+        "web_upload": "网页投递",
     }.get(str(source_mode or "").strip().lower(), "内容流水线")
 
 

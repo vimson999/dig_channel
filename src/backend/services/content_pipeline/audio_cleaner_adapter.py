@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 from xml.sax.saxutils import escape
 
+from services.content_pipeline.clean_checkpoint import load_completed_clean_result
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_GAP_AUDIO = Path("/Users/v9/Downloads/room/音频/00-头尾/间隔.MP3")
@@ -63,6 +65,25 @@ class AudioCleanerAdapter:
         if not input_files:
             raise AudioCleanerError("没有可清洗的音频文件")
 
+        local_batch_dir = self.output_root / safe_batch_id
+        local_output_dir = local_batch_dir / "audio_cleaned"
+        if not reset_workspace:
+            resumed = load_completed_clean_result(
+                local_batch_dir / "manifest.json",
+                batch_id=safe_batch_id,
+                input_files=input_files,
+                output_dir=local_output_dir,
+                allowed_suffixes=AUDIO_SUFFIXES,
+            )
+            if resumed is not None:
+                if progress_callback:
+                    progress_callback({
+                        "phase": "resume_completed",
+                        "progress": 90,
+                        "message": "复用已验证的音频清洗 checkpoint",
+                    })
+                return resumed
+
         gap_audio = Path(
             options.gap_audio_path
             or os.getenv("AUDIO_CLEAN_GAP_PATH")
@@ -71,8 +92,6 @@ class AudioCleanerAdapter:
         if not gap_audio.exists() or not gap_audio.is_file():
             raise AudioCleanerError(f"头尾间隔音频不存在: {gap_audio}")
 
-        local_batch_dir = self.output_root / safe_batch_id
-        local_output_dir = local_batch_dir / "audio_cleaned"
         temp_dir = local_batch_dir / "_audio_tmp"
         if reset_workspace and local_output_dir.exists():
             shutil.rmtree(local_output_dir)

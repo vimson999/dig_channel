@@ -58,11 +58,13 @@ class RetentionCleanupError(RuntimeError):
 class ContentRetentionPolicy:
     sync_raw_days: int = 3
     content_pipeline_batch_days: int = 3
+    web_upload_days: int = 3
     manual_publish_days: int = 3
     pytest_batch_days: int = 3
     processed_video_days: int = 3
     include_sync_raw: bool = True
     include_content_pipeline_batches: bool = True
+    include_web_uploads: bool = True
     include_manual_publish: bool = True
     include_pytest_batches: bool = True
     include_processed_videos: bool = True
@@ -75,11 +77,13 @@ class ContentRetentionPolicy:
         return cls(
             sync_raw_days=_positive_int(payload.get("sync_raw_days"), 3),
             content_pipeline_batch_days=_positive_int(payload.get("content_pipeline_batch_days"), 3),
+            web_upload_days=_positive_int(payload.get("web_upload_days"), 3),
             manual_publish_days=_positive_int(payload.get("manual_publish_days"), 3),
             pytest_batch_days=_positive_int(payload.get("pytest_batch_days"), 3),
             processed_video_days=_positive_int(payload.get("processed_video_days"), 3),
             include_sync_raw=_truthy(payload.get("include_sync_raw", True)),
             include_content_pipeline_batches=_truthy(payload.get("include_content_pipeline_batches", True)),
+            include_web_uploads=_truthy(payload.get("include_web_uploads", True)),
             include_manual_publish=_truthy(payload.get("include_manual_publish", True)),
             include_pytest_batches=_truthy(payload.get("include_pytest_batches", True)),
             include_processed_videos=_truthy(payload.get("include_processed_videos", True)),
@@ -91,11 +95,13 @@ class ContentRetentionPolicy:
         return {
             "sync_raw_days": self.sync_raw_days,
             "content_pipeline_batch_days": self.content_pipeline_batch_days,
+            "web_upload_days": self.web_upload_days,
             "manual_publish_days": self.manual_publish_days,
             "pytest_batch_days": self.pytest_batch_days,
             "processed_video_days": self.processed_video_days,
             "include_sync_raw": self.include_sync_raw,
             "include_content_pipeline_batches": self.include_content_pipeline_batches,
+            "include_web_uploads": self.include_web_uploads,
             "include_manual_publish": self.include_manual_publish,
             "include_pytest_batches": self.include_pytest_batches,
             "include_processed_videos": self.include_processed_videos,
@@ -172,8 +178,9 @@ class ContentPipelineRetentionCleanupService:
             "dry_run": bool(dry_run),
             "policy": policy.to_dict(),
             "roots": {
-                "content_pipeline_root": str(self.content_pipeline_root),
-                "zsxq_data_dir": str(self.zsxq_data_dir),
+            "content_pipeline_root": str(self.content_pipeline_root),
+            "web_uploads_dir": str(self.content_pipeline_root / "web_uploads"),
+            "zsxq_data_dir": str(self.zsxq_data_dir),
                 "processed_data_dir": str(self.processed_data_dir),
                 "pytest_project_dir": str(self.pytest_project_dir),
                 "pytest_batch_root": self.pytest_batch_root,
@@ -197,6 +204,18 @@ class ContentPipelineRetentionCleanupService:
                     days=policy.content_pipeline_batch_days,
                     now=now,
                     protected_paths=protected_paths,
+                )
+            )
+        if policy.include_web_uploads:
+            candidates.extend(
+                self._collect_old_directories(
+                    root=self.content_pipeline_root / "web_uploads",
+                    category="web_upload",
+                    days=policy.web_upload_days,
+                    now=now,
+                    protected_paths=protected_paths,
+                    reason="网页投递原件暂存目录超过保留期，清洗产物和数据库记录不受影响",
+                    allowed_root=self.content_pipeline_root,
                 )
             )
         if policy.include_manual_publish:
@@ -468,7 +487,7 @@ class ContentPipelineRetentionCleanupService:
     def _delete_candidate(self, item: dict):
         path = Path(item["path"]).expanduser().resolve()
         category = item.get("category")
-        if category in {"content_pipeline_batch_file", "manual_publish"}:
+        if category in {"content_pipeline_batch_file", "web_upload", "manual_publish"}:
             _assert_inside(path, self.content_pipeline_root)
         elif category == "pytest_batch":
             _assert_inside(path, self.pytest_project_dir)

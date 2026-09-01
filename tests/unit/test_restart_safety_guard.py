@@ -334,6 +334,30 @@ class RestartSafetyGuardTest(unittest.TestCase):
             "raw_payload_hash",
             guard.REQUIRED_COLUMNS["zsxq_topic_comments"],
         )
+        self.assertIn(
+            "dedupe_key",
+            guard.REQUIRED_COLUMNS["workflow_notification_deliveries"],
+        )
+        self.assertIn(
+            "open_until",
+            guard.REQUIRED_COLUMNS["workflow_notification_provider_states"],
+        )
+        self.assertIn(
+            "ix_workflow_notification_deliveries_provider_due",
+            guard.REQUIRED_INDEXES,
+        )
+        self.assertIn(
+            "uq_workflow_notification_deliveries_dedupe_key",
+            guard.REQUIRED_UNIQUE_CONSTRAINTS,
+        )
+        self.assertIn(
+            "ix_bilibili_competitor_videos_bvid",
+            guard.FORBIDDEN_DUPLICATE_INDEXES,
+        )
+        self.assertIn(
+            "ix_bilibili_competitors_uid",
+            guard.FORBIDDEN_DUPLICATE_INDEXES,
+        )
         snapshot = {
             "alembic_versions": {guard.MIGRATION_ID},
             "tables": {
@@ -352,18 +376,67 @@ class RestartSafetyGuardTest(unittest.TestCase):
             "projected_bilibili_tasks": 12,
             "executable_bilibili_tasks": 12,
             "indexes": set(guard.REQUIRED_INDEXES),
+            "unique_constraints": set(guard.REQUIRED_UNIQUE_CONSTRAINTS),
         }
 
         self.assertEqual(guard.evaluate_schema_snapshot(snapshot), [])
         self.assertEqual(guard.evaluate_maintenance_warnings(snapshot), [])
 
+    def test_runtime_schema_guard_rejects_missing_outbox_dedupe_constraint(self):
+        guard = load_schema_guard_module()
+        snapshot = {
+            "tables": {
+                name: set(columns)
+                for name, columns in guard.REQUIRED_COLUMNS.items()
+            },
+            "privileges": {
+                name: True for name in guard.REQUIRED_PRIVILEGES
+            },
+            "clean_tasks": 386,
+            "projected_clean_tasks": 386,
+            "media_projection_mismatches": 0,
+            "topic_payload_hash_mismatches": 0,
+            "comment_payload_hash_missing": 0,
+            "bilibili_tasks": 12,
+            "projected_bilibili_tasks": 12,
+            "executable_bilibili_tasks": 12,
+            "indexes": set(guard.REQUIRED_INDEXES),
+            "unique_constraints": set(),
+        }
+
+        errors = guard.evaluate_schema_snapshot(snapshot)
+
+        self.assertTrue(
+            any(
+                "uq_workflow_notification_deliveries_dedupe_key" in item
+                for item in errors
+            )
+        )
+
     def test_runtime_schema_guard_recognizes_downstream_migration_as_applied(self):
         guard = load_schema_guard_module()
         snapshot = {
-            "alembic_versions": {"20260727_bilibili_charging"},
+            "alembic_versions": {"20260829_workflow_notification_outbox"},
             "indexes": set(guard.REQUIRED_INDEXES),
         }
         self.assertEqual(guard.evaluate_maintenance_warnings(snapshot), [])
+
+    def test_runtime_schema_guard_resolves_migration_ancestry_without_successor_allowlist(self):
+        guard = load_schema_guard_module()
+
+        self.assertFalse(hasattr(guard, "MIGRATION_SUCCESSOR_IDS"))
+        self.assertTrue(
+            guard.migration_is_applied(
+                {"20260829_workflow_notification_outbox"},
+                "20260724_comment_hash_indexes",
+            )
+        )
+        self.assertFalse(
+            guard.migration_is_applied(
+                {"20260722_zsxq_topic_payload_hash"},
+                "20260724_comment_hash_indexes",
+            )
+        )
 
     def test_runtime_schema_guard_allows_admin_cleanup_to_finish_later(self):
         guard = load_schema_guard_module()
@@ -386,6 +459,7 @@ class RestartSafetyGuardTest(unittest.TestCase):
             "executable_bilibili_tasks": 12,
             "indexes": set(guard.REQUIRED_INDEXES)
             | {"ix_zsxq_attachments_publish_status"},
+            "unique_constraints": set(guard.REQUIRED_UNIQUE_CONSTRAINTS),
         }
 
         self.assertEqual(guard.evaluate_schema_snapshot(snapshot), [])

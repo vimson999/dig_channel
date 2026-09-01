@@ -77,6 +77,42 @@ class LocalPdfCleanerAdapterTest(unittest.TestCase):
             self.assertEqual(result["files"][0]["output_path"], str(cleaned_path))
             self.assertTrue((root / "batches" / "local-clean" / "manifest.json").exists())
 
+    def test_retry_reuses_completed_manifest_without_cleaning_again(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.pdf"
+            source.write_bytes(b"%PDF-1.4\nsample")
+            adapter = PdfCleanerAdapter(output_root=root / "batches")
+
+            def fake_remove_watermark(_input_path, output_path, *args, **kwargs):
+                Path(output_path).write_bytes(b"%PDF-1.4\ncleaned")
+                return True, "Success"
+
+            with patch(
+                "services.watermark.pdf_processor.PDFProcessor.remove_watermark",
+                side_effect=fake_remove_watermark,
+            ):
+                adapter.run_batch(
+                    batch_id="retry-checkpoint",
+                    files=[source],
+                    options=PdfCleanOptions(engine="local"),
+                )
+
+            with patch(
+                "services.watermark.pdf_processor.PDFProcessor.remove_watermark",
+                side_effect=AssertionError("durable output must not be cleaned twice"),
+            ) as cleaner:
+                resumed = adapter.run_batch(
+                    batch_id="retry-checkpoint",
+                    files=[source],
+                    options=PdfCleanOptions(engine="local"),
+                    reset_workspace=False,
+                )
+
+            cleaner.assert_not_called()
+            self.assertTrue(resumed["resumed_from_checkpoint"])
+            self.assertEqual(resumed["success_count"], 1)
+
     def test_external_output_copy_keeps_source_binding_for_success_and_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

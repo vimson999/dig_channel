@@ -90,3 +90,24 @@
   `ix_zsxq_attachments_publish_status_updated_at` 和
   `ix_zsxq_topics_group_tab_create_time_desc`，并新增契约测试禁止旧索引名复发。
 - 在下一轮真实自动同步后再次核对评论 UPDATE 数和哈希缺失数，并持续观察 30-60 分钟 PgBouncer 超时是否归零。
+
+## 2026-08-29 索引清理防线复核
+
+现场重新核对后，`ix_zsxq_topics_group_tab_type_create_desc` 已累计 2,990 次扫描、约
+5.07MB，是明确热索引，永久从清理 allowlist 和 runtime duplicate warning 中移除；
+`ix_zsxq_topics_group_type_create_desc` 仅 1 次扫描、约 3.81MB，但生产未安装
+`pg_stat_statements`，缺真实 SQL origin 和带/不带候选的同参数
+`EXPLAIN (ANALYZE, BUFFERS)`，因此也不执行 DDL。scan 低不是删除证据。
+
+历史维护工具原本无参数运行即会回填 hash、批量删除 13 个索引并直接改
+`alembic_version`，存在把一次兼容性修复重新变成无人值守 DDL 的风险。现在默认只读 audit；
+变更必须同时给出单一精确 `--index`、显式 `--apply` 和 evidence JSON，后者强制包含真实 SQL、
+统计重置时间与扫描数、with/without-target EXPLAIN 和有效替代索引。owner、约束归属、
+valid/ready、等待锁、行数与非目标索引都 fail-closed；post-drop 失败会并发重建目标，并再次核对
+重建索引 valid/ready。
+
+代码复核还修正了 post-drop 快照：目标消失后不能再靠目标索引反推表名，现显式继承 pre-drop
+表集合，才能真实比较行数和替代索引，而不是每次误判后回滚。6 项工具回归通过。历史 migration
+不再在新安装中删除这两个 topic-type 索引；DBeaver 文档改为只读证据采集说明。本轮没有对
+ZSXQ 表执行 CREATE/DROP INDEX、ALTER、回填或版本号改写，两个索引分别为 `KEEP` 与
+`OPEN / EVIDENCE_MISSING`。

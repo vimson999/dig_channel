@@ -249,7 +249,7 @@ def _run_pdf_clean_task_impl_guarded(task_id, celery_task=None):
                 source_root=source_root,
                 options=options,
                 progress_callback=update_progress,
-                reset_workspace=True,
+                reset_workspace=not _is_retry_delivery(celery_task),
             )
 
             merged_result = dict(progress_result)
@@ -320,13 +320,13 @@ def _run_pdf_clean_task_impl_guarded(task_id, celery_task=None):
             return True
         except Exception as exc:
             db.session.rollback()
+            if _is_retryable_db_error(exc):
+                db.session.remove()
+                raise
             try:
                 mark_task_assets(task_key, status="failed")
             except Exception:
                 logger.exception("PDF clean asset status update failed: %s", task_key)
-            if _is_retryable_db_error(exc):
-                db.session.remove()
-                raise
             failure_result = dict(progress_result)
             failure_result["error"] = str(exc)
             _update_task_fields(
@@ -438,7 +438,7 @@ def _run_audio_clean_task_impl_guarded(task_id, celery_task=None):
                 source_root=source_root,
                 options=options,
                 progress_callback=update_progress,
-                reset_workspace=True,
+                reset_workspace=not _is_retry_delivery(celery_task),
             )
 
             merged_result = dict(progress_result)
@@ -504,13 +504,13 @@ def _run_audio_clean_task_impl_guarded(task_id, celery_task=None):
             return True
         except Exception as exc:
             db.session.rollback()
+            if _is_retryable_db_error(exc):
+                db.session.remove()
+                raise
             try:
                 mark_task_assets(task_key, status="failed")
             except Exception:
                 logger.exception("Audio clean asset status update failed: %s", task_key)
-            if _is_retryable_db_error(exc):
-                db.session.remove()
-                raise
             failure_result = dict(progress_result)
             failure_result["error"] = str(exc)
             _update_task_fields(
@@ -812,13 +812,19 @@ def _enqueue_auto_publish_task(
                 "source_refs": list(source_refs or []),
             },
         )
+        child_result = (
+            publish_task.get("result")
+            if isinstance(publish_task.get("result"), dict)
+            else {}
+        )
         publish_result = {
             "enabled": True,
-            "queued": True,
+            "queued": bool(child_result.get("queued", True)),
             "task_id": publish_task.get("id"),
             "celery_task_id": publish_task.get("celery_task_id"),
             "status": publish_task.get("status"),
-            "message": "独立发布任务已提交。",
+            "reused_existing": bool(child_result.get("reused_existing")),
+            "message": child_result.get("message") or "独立发布任务已提交。",
         }
     except Exception as exc:
         logger.exception("Clean output publish enqueue failed: task=%s type=%s", task_id, file_type)
@@ -1027,6 +1033,14 @@ def _normalized_path(value, source_root=None):
 
 def _is_retryable_db_error(exc):
     return is_retryable_db_error(exc)
+
+
+def _is_retry_delivery(celery_task):
+    request = getattr(celery_task, "request", None)
+    try:
+        return int(getattr(request, "retries", 0) or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _db_retry_count():

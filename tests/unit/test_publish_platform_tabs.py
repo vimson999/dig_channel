@@ -87,7 +87,7 @@ class PublishPlatformTabsTest(unittest.TestCase):
         self.assertIn("label.includes('此刻此声')", frontend)
         self.assertIn("{ videoKey: 'vertical', coverKey: 'finance_cover' }", frontend)
         self.assertIn(
-            "mp3-video-workflow-detail.js?v=20260825-publish-panel-lazy-mount-v1",
+            "mp3-video-workflow-detail.js?v=20260826-publish-credential-single-owner-v2",
             html,
         )
 

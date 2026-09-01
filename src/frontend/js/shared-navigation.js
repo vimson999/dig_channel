@@ -184,6 +184,8 @@ class SharedNavigation {
             return 'report-script-material-workflow-test';
         } else if (filename === 'report-stick-figure-video-workflow.html' || filename === 'report-stick-figure-video-workflow-detail.html') {
             return 'report-stick-figure-video-workflow';
+        } else if (filename === 'script-video-workflow.html') {
+            return 'script-video-workflow';
         } else if (filename === 'report-visual-plan-test.html') {
             return 'report-visual-plan-test';
         } else if (filename === 'report-top10-workflow-test.html') {
@@ -216,6 +218,8 @@ class SharedNavigation {
             return 'downloads';
         } else if (filename === 'content-retention-cleanup.html') {
             return 'content-retention-cleanup';
+        } else if (filename === 'content-pipeline-submit.html') {
+            return 'content-pipeline-submit';
         } else if (filename === 'platform-credentials.html') {
             return 'platform-credentials';
         } else if (filename === 'zsxq-history-api-clients.html') {
@@ -256,6 +260,7 @@ class SharedNavigation {
             'report-audio-workflow-test': '研报转语音编排台',
             'report-script-material-workflow-test': '研报基础文案物料台',
             'report-stick-figure-video-workflow': '研报 PDF 转火柴人视频',
+            'script-video-workflow': '文案到成片',
             'report-visual-plan-test': '研报视觉编排测试台',
             'report-top10-workflow-test': '今日研报 Top10 编排台',
             'mp3-video-workflow': 'MP3 视频编排台',
@@ -273,6 +278,7 @@ class SharedNavigation {
             'batch-transcription': '批量音频转文案',
             'downloads': '素材下载中心',
             'content-retention-cleanup': '历史文件清理',
+            'content-pipeline-submit': '网页内容投递',
             'platform-credentials': '平台凭据管理',
             'zsxq-history-api-clients': '知识星球 API 调用方'
         };
@@ -566,6 +572,12 @@ class SharedNavigation {
                         href: 'report-stick-figure-video-workflow.html'
                     },
                     {
+                        id: 'script-video-workflow',
+                        name: '文案到成片',
+                        icon: 'fas fa-clapperboard',
+                        href: 'script-video-workflow.html'
+                    },
+                    {
                         id: 'report-visual-plan-test',
                         name: '研报视觉编排',
                         icon: 'fas fa-wand-magic-sparkles',
@@ -644,6 +656,12 @@ class SharedNavigation {
                         name: '历史文件清理',
                         icon: 'fas fa-broom',
                         href: 'content-retention-cleanup.html'
+                    },
+                    {
+                        id: 'content-pipeline-submit',
+                        name: '网页内容投递',
+                        icon: 'fas fa-cloud-arrow-up',
+                        href: 'content-pipeline-submit.html'
                     },
                     {
                         id: 'platform-credentials',

@@ -2,14 +2,14 @@
 
 ## 基本信息
 
-- 状态：再次打开；代码已修复，待安全重启与运行验收
+- 状态：`RUNTIME_REPLACED / OBSERVING`；第 5 次轮询复发已加载，待 24 小时与后续窗口复核
 - 严重级别：P1
-- 影响模块：publisher watchdog / PostgreSQL / Celery / Redis
+- 影响模块：publisher watchdog / report-video 展示统计 / PostgreSQL / Celery / Redis
 - 首次发现：2026-07-21
 - 修复提交：待提交
-- 根因分类：数据库事务跨外部 I/O
-- 复发键：`DB-SESSION-LIFECYCLE`
-- 是否复发：第 4 次
+- 根因分类：数据库事务跨外部 I/O / 自愈循环误加载展示统计
+- 复发键：`DB-SESSION-LIFECYCLE` / `HOT-PATH-PAYLOAD-POLLING`
+- 是否复发：第 5 次
 - 防线层级：local_patch / contract_test / observability
 
 ## 现象
@@ -107,3 +107,32 @@
   terminal-parent revoke 回调内断言 `db.session().in_transaction()` 为 `False`。
 - 当前验收阶段再次回退到 `code_changed`；必须通过重启门禁替换 Watchdog 运行时，
   再跨真实 processing/terminal cleanup 扫描窗口验证后才能进入 `runtime_accepted`。
+
+## 2026-08-31 第五次复发：自愈决策误拉仪表盘展示统计
+
+- 新 PID `99802` 的后窗中，watchdog 每轮完成修复和 Celery inspect 后仍以
+  `force_refresh=True` 调用通用 `_service_status()`。当服务为 `report_video` 时，该 helper 会再执行
+  `report_video_tasks.status`、`report_video_reports.parse_status` 和 `ai_status` 三条全表聚合；这些字段
+  只供完整控制面展示，不参与 worker 是否卡死、告警或重启的任何判断。
+- `2026-08-31 13:56:44–14:38:18` 的 28 轮真实 watchdog 共执行 84 条展示聚合：task 聚合 28 条，
+  累计 `7,431.62ms`、P50/P95/max `227.28/508.42/1,083.89ms`；report 聚合 56 条，累计
+  `2,631.91ms`、P50/P95/max `31.32/109.13/430.97ms`。三条合计 `10,063.53ms`，其中
+  task 聚合产生本后窗唯一该来源慢 SQL。
+- 生产只读统计显示 `report_video_tasks` 345 行却已有 `86,112` 次 seq scan，
+  `report_video_reports` 4,752 行已有 `167,541` 次 seq scan。定向
+  `EXPLAIN (ANALYZE, BUFFERS)` 的 executor 仅 `0.302/4.205/2.429ms`，均为 shared hit、0 read、
+  无临时 I/O；全量状态聚合采用 seq scan 是正确计划，新增状态索引不能解决调用频率或网络 RTT。
+- TDD 先要求 `run_watchdog_once()` 显式传入 `include_dashboard_stats=False` 并得到红灯，随后给
+  `_service_status()` 增加默认开启的展示开关。watchdog 的首次检查和业务心跳复核都关闭展示统计；完整
+  `/api/v1/celery/status` 保持默认开启，公开响应字段与数值不变。
+- 新契约 3/3、watchdog 模块 40/40 通过；完整确定性回归为
+  `1565 passed, 5 skipped, 314 subtests passed`，compileall、TypeScript、109 项 DB/重启专项、
+  Alembic 单 head 和 diff check 均通过。
+- 14:37 双安全门各读取 47 条近期任务、0 条活动 sync 并放行，标准脚本未使用 FORCE，加载到 backend
+  PID `4274` / watchdog PID `4810`；health healthy、bootstrap 17/17、`errors=[]`。新 watchdog 在
+  `14:38:21`、`14:39:44`、`14:41:09` 三轮真实周期执行正常修复查询，但展示聚合为 `0` 条。
+  完整 status 探针 `e6314206` 仍以 200/`1,670.44ms` 返回 report-video 三组统计；runtime-only 探针
+  `29781f07` 为 200/`533.38ms`。
+- 高频采样在旧进程查询阶段只捕获最长 `28.3ms` 的短 idle 空隙，随后外部 I/O 阶段连续 25 秒为 0；
+  新运行态 5 秒采样及只读快照均为 `idle in transaction=0`。这排除了长事务复发，但短窗口与三轮周期
+  不能替代 24 小时和后续窗口，因此状态为 `RUNTIME_REPLACED / OBSERVING`，不得写成 CLOSED。

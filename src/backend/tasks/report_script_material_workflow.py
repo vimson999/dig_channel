@@ -33,6 +33,7 @@ from services.runtime_guard import (
     guard_publication_task_start,
     maybe_guarded_apply_async,
     release_db_session_quietly,
+    revoke_celery_task_after_db_commit,
     retry_exception_types,
 )
 from tasks.gemini_browser import process_report_pdf_gemini_job
@@ -1508,13 +1509,16 @@ def _mark_child_failed(child: PublicationTask, message: str) -> None:
 
 
 def _revoke_child_task(child: PublicationTask) -> None:
-    celery_task_id = getattr(child, "celery_task_id", None)
+    child_id = str(getattr(child, "id", None) or "-")
+    celery_task_id = str(getattr(child, "celery_task_id", None) or "").strip()
     if not celery_task_id:
         return
-    try:
-        celery_app.control.revoke(celery_task_id, terminate=False)
-    except Exception as exc:
-        logger.warning("撤销基础文案物料子任务失败: child=%s celery=%s error=%s", child.id, celery_task_id, exc)
+    revoke_celery_task_after_db_commit(
+        celery_task_id,
+        operation=f"report script material child revoke child={child_id}",
+        business_task_id=child_id,
+        log=logger,
+    )
 
 
 def _celery_child_failure_message(child: PublicationTask) -> Optional[str]:

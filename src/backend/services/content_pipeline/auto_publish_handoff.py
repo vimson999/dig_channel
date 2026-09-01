@@ -1,8 +1,11 @@
+import hashlib
 import logging
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
+
+from sqlalchemy import case, text
 
 from models import db
 from models.task import PublicationTask
@@ -54,6 +57,15 @@ def submit_publish_clean_output_task(
         source_dir=source_dir,
         file_type=normalized_type,
     )
+
+    existing = _existing_publish_child(source_task_id)
+    if existing is not None:
+        # The caller may be a clean-task redelivery after the child insert or
+        # broker dispatch committed but the parent acknowledgement was lost.
+        # Reusing the durable child is the only safe automatic action; an
+        # explicit/manual retry remains a separate user operation.
+        db.session.commit()
+        return existing
 
     broker_task_id = str(uuid4())
     task = PublicationTask(
@@ -176,6 +188,80 @@ def submit_publish_clean_output_task(
     except Exception:
         logger.exception("知识星球发布启动通知失败: %s", task_id)
     return task_snapshot
+
+
+def _existing_publish_child(source_task_id):
+    source_key = str(source_task_id or "").strip()
+    if not source_key:
+        return None
+
+    bind = db.session.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        # No production DDL is required: serialize the check+insert boundary
+        # for one clean task with a transaction-scoped advisory lock.  The
+        # function commits before any broker/provider I/O, so the lock never
+        # crosses an external wait.
+        digest = hashlib.sha256(
+            f"content-clean-publish:{source_key}".encode("utf-8")
+        ).digest()
+        lock_key = int.from_bytes(digest[:8], byteorder="big", signed=True)
+        db.session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": lock_key},
+        )
+
+    row = (
+        db.session.query(
+            PublicationTask.id,
+            PublicationTask.celery_task_id,
+            PublicationTask.status,
+            PublicationTask.current_step,
+            PublicationTask.progress,
+            PublicationTask.error_message,
+            PublicationTask.created_at,
+            PublicationTask.completed_at,
+        )
+        .filter(
+            PublicationTask.feature == "zsxq_clean_output_publish",
+            PublicationTask.source_task_id == source_key,
+        )
+        .order_by(
+            case(
+                (
+                    PublicationTask.status.in_(("pending", "processing", "completed")),
+                    0,
+                ),
+                else_=1,
+            ),
+            PublicationTask.created_at.asc(),
+            PublicationTask.id.asc(),
+        )
+        .first()
+    )
+    if row is None:
+        return None
+
+    status = str(row.status or "pending")
+    queued = status not in {"failed", "canceled", "cancelled"}
+    return {
+        "id": str(row.id),
+        "celery_task_id": row.celery_task_id,
+        "status": status,
+        "current_step": row.current_step,
+        "progress": row.progress,
+        "error_message": row.error_message,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        "result": {
+            "enabled": True,
+            "queued": queued,
+            "reused_existing": True,
+            "source_task_id": source_key,
+            "task_id": str(row.id),
+            "celery_task_id": row.celery_task_id,
+            "message": "已复用该清洗任务的既有发布子任务。",
+        },
+    }
 
 
 def publish_clean_output(

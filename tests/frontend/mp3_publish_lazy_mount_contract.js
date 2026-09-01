@@ -90,4 +90,16 @@ page.mountBilibiliPanel(job);
 assert.equal(duplicateCredentialLoads, 0, 'the Bilibili panel must reuse credentials already loaded by the detail page');
 assert.deepEqual(page.biliPanel.credentials, page.biliCredentials);
 
+page.biliPanel.credentialsLoaded = false;
+page.biliCredentials = [];
+page.biliCredentialsError = '请求超时（15s）';
+page.mountBilibiliPanel(job);
+assert.equal(
+    duplicateCredentialLoads,
+    0,
+    'a timed-out detail-page credential request must not trigger an automatic second owner request',
+);
+assert.equal(page.biliPanel.credentialsLoaded, true);
+assert.equal(page.biliPanel.credentialsError, page.biliCredentialsError);
+
 console.log('mp3 publish lazy mount contract: ok');

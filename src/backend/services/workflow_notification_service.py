@@ -12,7 +12,10 @@ from email.utils import formataddr
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from services.runtime_guard import apply_async_after_db_release
+from services.runtime_guard import (
+    apply_async_after_db_release,
+    end_db_transaction_before_external_io,
+)
 
 try:
     import fcntl
@@ -134,28 +137,93 @@ class WorkflowNotificationService:
         settings = self.email_settings()
         missing = self.missing_email_settings(settings)
         if missing:
-            logger.warning("[WORKFLOW_NOTIFY] email config missing: %s", ", ".join(missing))
-            return {"queued": False, "reason": "missing_config", "missing": missing}
+            logger.warning(
+                "[WORKFLOW_NOTIFY] email config missing; event will be audited "
+                "in durable outbox: %s",
+                ", ".join(missing),
+            )
 
         try:
+            # The delivery record must never outlive a business transaction that
+            # can still roll back.  End the caller transaction before the
+            # independent outbox session commits anything.  The boundary helper
+            # refuses pending ORM writes and surfaces commit failures, while also
+            # covering Core writes that are not visible through session.dirty.
+            end_db_transaction_before_external_io(
+                "workflow notification outbox enqueue"
+            )
+            from services.workflow_notification_outbox import (
+                enqueue_delivery,
+                mark_dispatch_result,
+            )
             from tasks.workflow_notify import send_workflow_notification
 
+            provider = self.provider()
             payload = {
-                "provider": self.provider(),
+                "provider": provider,
                 "event_type": event_type,
                 "workflow": workflow_payload or {},
                 "queued_at": self._now_iso(),
             }
-            result = apply_async_after_db_release(
-                send_workflow_notification,
-                args=[payload],
-                queue="workflow_notify",
-                retry=False,
+            delivery = enqueue_delivery(
+                provider=provider,
+                event_type=event_type,
+                workflow=workflow_payload or {},
+                payload=payload,
             )
-            return {"queued": True, "celery_task_id": result.id}
+            if delivery.get("payload_conflict"):
+                logger.warning(
+                    "[WORKFLOW_NOTIFY] dedupe payload conflict; preserving first payload | "
+                    "delivery=%s event=%s workflow=%s",
+                    delivery.get("id"),
+                    event_type,
+                    delivery.get("workflow_id"),
+                )
+            if delivery.get("status") == "sent":
+                return {
+                    "queued": True,
+                    "deduplicated": True,
+                    "sent": True,
+                    "delivery_id": delivery.get("id"),
+                    "celery_task_id": delivery.get("celery_task_id"),
+                }
+            try:
+                result = apply_async_after_db_release(
+                    send_workflow_notification,
+                    args=[provider],
+                    queue="workflow_notify",
+                    retry=False,
+                )
+                mark_dispatch_result(
+                    delivery["id"],
+                    celery_task_id=result.id,
+                )
+                return {
+                    "queued": True,
+                    "durable": True,
+                    "deduplicated": not delivery.get("created"),
+                    "delivery_id": delivery.get("id"),
+                    "celery_task_id": result.id,
+                }
+            except Exception as dispatch_exc:
+                mark_dispatch_result(delivery["id"], error=dispatch_exc)
+                logger.exception(
+                    "[WORKFLOW_NOTIFY] broker dispatch failed; delivery remains pending | "
+                    "delivery=%s event=%s",
+                    delivery.get("id"),
+                    event_type,
+                )
+                return {
+                    "queued": True,
+                    "durable": True,
+                    "dispatch_scheduled": False,
+                    "delivery_id": delivery.get("id"),
+                    "reason": "broker_dispatch_pending",
+                    "error": str(dispatch_exc),
+                }
         except Exception as exc:
-            logger.exception("[WORKFLOW_NOTIFY] queue failed | event=%s", event_type)
-            return {"queued": False, "reason": "queue_failed", "error": str(exc)}
+            logger.exception("[WORKFLOW_NOTIFY] durable queue failed | event=%s", event_type)
+            return {"queued": False, "reason": "outbox_failed", "error": str(exc)}
 
     def send(self, payload):
         payload = payload if isinstance(payload, dict) else {}
@@ -174,7 +242,17 @@ class WorkflowNotificationService:
             return {"sent": False, "reason": "missing_config", "missing": missing}
 
         subject, body = self.build_email_content(payload)
-        self._send_email_with_retry(settings, subject, body)
+        # The durable provider breaker owns retry/backoff for workflow events.
+        # Clamp the legacy in-process retry knob so one leased delivery can
+        # never multiply connections before opening the shared circuit.
+        settings = dict(settings)
+        settings["retry_attempts"] = 1
+        self._send_email_with_retry(
+            settings,
+            subject,
+            body,
+            event_id=payload.get("delivery_id") or payload.get("event_id"),
+        )
         logger.info("[WORKFLOW_NOTIFY] email sent | event=%s to=%s", event_type, settings["to"])
         workflow = payload.get("workflow") if isinstance(payload.get("workflow"), dict) else {}
         if workflow.get("stage_results"):
@@ -416,13 +494,13 @@ class WorkflowNotificationService:
         lines.append(f"发送时间：{self._local_time_text(datetime.utcnow().isoformat() + 'Z')}")
         return subject, "\n".join(lines)
 
-    def _send_email_with_retry(self, settings, subject, body):
+    def _send_email_with_retry(self, settings, subject, body, event_id=None):
         attempts = max(1, int(settings.get("retry_attempts") or 1))
         delay = max(0.0, float(settings.get("retry_delay_seconds") or 0))
         errors = []
         for attempt in range(1, attempts + 1):
             try:
-                self._send_email(settings, subject, body)
+                self._send_email(settings, subject, body, event_id=event_id)
                 return
             except Exception as exc:
                 errors.append(exc)
@@ -436,26 +514,32 @@ class WorkflowNotificationService:
                 )
                 time.sleep(delay)
 
-        if settings.get("fallback_starttls") and int(settings.get("port") or 0) == 465:
+        if (
+            settings.get("fallback_starttls")
+            and int(settings.get("port") or 0) == 465
+            and self._is_protocol_fallback_error(errors[-1])
+        ):
             fallback = dict(settings)
             fallback["port"] = 587
             fallback["use_ssl"] = False
             fallback["use_tls"] = True
             try:
                 logger.warning("[WORKFLOW_NOTIFY] SMTP SSL failed, trying STARTTLS fallback on port 587")
-                self._send_email(fallback, subject, body)
+                self._send_email(fallback, subject, body, event_id=event_id)
                 return
             except Exception as exc:
                 errors.append(exc)
 
         raise errors[-1]
 
-    def _send_email(self, settings, subject, body):
+    def _send_email(self, settings, subject, body, event_id=None):
         from_addr = settings["from_addr"] or settings["user"]
         message = EmailMessage()
         message["Subject"] = subject
         message["From"] = formataddr((settings["from_name"], from_addr))
         message["To"] = settings["to"]
+        if event_id:
+            message["X-Workflow-Event-ID"] = str(event_id)[:200]
         message.set_content(body)
 
         if settings["use_ssl"]:
@@ -472,6 +556,29 @@ class WorkflowNotificationService:
             smtp.send_message(message)
 
     def _is_transient_email_error(self, exc):
+        # ``SMTPException`` inherits ``OSError`` in the standard library, so
+        # SMTP response failures must be classified before generic network I/O.
+        if isinstance(exc, smtplib.SMTPAuthenticationError):
+            return False
+        if isinstance(exc, smtplib.SMTPRecipientsRefused):
+            codes = []
+            for response in (exc.recipients or {}).values():
+                try:
+                    codes.append(int(response[0]))
+                except (TypeError, ValueError, IndexError):
+                    return False
+            return bool(codes) and all(400 <= code < 500 for code in codes)
+        if isinstance(exc, smtplib.SMTPResponseException):
+            try:
+                return 400 <= int(exc.smtp_code) < 500
+            except (TypeError, ValueError):
+                return False
+        if isinstance(exc, smtplib.SMTPServerDisconnected):
+            return True
+        if isinstance(exc, smtplib.SMTPException):
+            return False
+        if isinstance(exc, ssl.SSLCertVerificationError):
+            return False
         return isinstance(
             exc,
             (
@@ -480,10 +587,21 @@ class WorkflowNotificationService:
                 ConnectionResetError,
                 socket.timeout,
                 OSError,
-                smtplib.SMTPServerDisconnected,
-                smtplib.SMTPConnectError,
                 ssl.SSLError,
             ),
+        )
+
+    def _is_protocol_fallback_error(self, exc):
+        if not isinstance(exc, ssl.SSLError):
+            return False
+        message = str(exc or "").upper()
+        return any(
+            marker in message
+            for marker in (
+                "WRONG_VERSION_NUMBER",
+                "UNKNOWN_PROTOCOL",
+                "UNSUPPORTED_PROTOCOL",
+            )
         )
 
     def _stage_lines(self, workflow):

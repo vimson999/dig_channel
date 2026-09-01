@@ -13,13 +13,14 @@ from types import SimpleNamespace
 from flask import Blueprint, has_request_context, jsonify, request, send_file
 from sqlalchemy import and_, func, inspect as sqlalchemy_inspect, or_, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import load_only
+from sqlalchemy.orm import aliased, load_only
 from sqlalchemy.orm.attributes import flag_modified
 from werkzeug.utils import secure_filename
 
 from celery_config import celery_app
 from models import db
 from models.content_pipeline_asset import ContentPipelineAsset
+from models.platform_credential import PlatformCredentialAccount
 from models.report_stick_figure_asset import ReportStickFigureSceneAsset
 from models.report_visual_plan import ReportVisualPlanSegment
 from models.task import PublicationTask
@@ -58,10 +59,13 @@ from services.runtime_guard import (
     apply_async_after_db_release,
     is_retryable_db_error,
     maybe_guarded_apply_async,
+    release_db_session_quietly,
+    revoke_celery_task_after_db_commit,
 )
 from services.bilibili_publish import (
     BilibiliUploadRetryConflict,
     BilibiliUploadRetryEnqueueError,
+    bilibili_upload_action_row,
     bilibili_upload_child_payload,
     bilibili_upload_children,
     cancel_bilibili_upload_child,
@@ -1299,33 +1303,537 @@ def _keyframe_media_accessors(safe_key):
     return _get_owned_keyframe_task, resolve_legacy_keyframe
 
 
+def _report_upload_json_text(column, *path):
+    expression = column
+    for key in path:
+        expression = expression[key]
+    return expression.as_string()
+
+
+def _compact_report_upload_paths(*values):
+    output = []
+    seen = set()
+    for value in values:
+        path = str(value or "").strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        output.append(path)
+    return tuple(output)
+
+
+def _first_ready_report_upload_path(paths):
+    return next(
+        (path for path in paths or () if _path_exists(path)),
+        None,
+    )
+
+
+def _report_bilibili_upload_parent_snapshot(current_user, job_id, *, credential_id):
+    """Freeze the report upload command without opening parent audit JSON."""
+    params = PublicationTask.params
+    result = PublicationTask.result
+    effective_feature = func.coalesce(
+        func.nullif(PublicationTask.feature, ""),
+        _report_upload_json_text(params, "feature"),
+    )
+    effective_user_id = func.coalesce(
+        func.nullif(PublicationTask.user_id, ""),
+        _report_upload_json_text(params, "user_id"),
+    )
+    credential_name = func.coalesce(
+        PlatformCredentialAccount.owner_label,
+        PlatformCredentialAccount.name,
+        PlatformCredentialAccount.masked_summary,
+        PlatformCredentialAccount.id,
+    )
+    allowed_user_ids = _visible_user_ids(current_user)
+
+    def build_query(*, legacy_projection):
+        projected_user_id = (
+            effective_user_id if legacy_projection else PublicationTask.user_id
+        )
+        query = (
+            db.session.query(
+                PublicationTask.id.label("id"),
+                projected_user_id.label("user_id"),
+                PublicationTask.created_at.label("created_at"),
+                PublicationTask.task_title.label("task_title"),
+                PublicationTask.report_audio_pdf_attachment_id.label(
+                    "pdf_attachment_id"
+                ),
+                PublicationTask.report_audio_pdf_filename.label("pdf_filename"),
+                PublicationTask.report_audio_pdf_bytes.label("pdf_bytes"),
+                PublicationTask.report_audio_video_path.label(
+                    "projected_landscape_video_path"
+                ),
+                PublicationTask.report_audio_cover_path.label(
+                    "projected_cover_path"
+                ),
+                PublicationTask.report_audio_vertical_cover_path.label(
+                    "projected_vertical_cover_path"
+                ),
+                PublicationTask.report_audio_podcast_cover_path.label(
+                    "projected_podcast_cover_path"
+                ),
+                PublicationTask.report_audio_bilibili_cover_path.label(
+                    "projected_bilibili_cover_path"
+                ),
+                PublicationTask.report_audio_metadata_title.label(
+                    "metadata_title"
+                ),
+                PublicationTask.report_audio_video_title.label("video_title"),
+                PublicationTask.report_audio_cover_title.label("cover_title"),
+                PublicationTask.report_audio_cover_subtitle.label(
+                    "cover_subtitle"
+                ),
+                PublicationTask.report_audio_structured_title.label(
+                    "structured_title"
+                ),
+                PublicationTask.report_audio_pdf_topic_title.label(
+                    "request_pdf_topic_title"
+                ),
+                PublicationTask.report_audio_result_pdf_filename.label(
+                    "result_pdf_filename"
+                ),
+                PublicationTask.report_audio_result_pdf_topic_title.label(
+                    "result_pdf_topic_title"
+                ),
+                _report_upload_json_text(
+                    params,
+                    "report_audio_workflow",
+                    "video",
+                    "bilibili_title_6",
+                ).label("bilibili_title_6"),
+                _report_upload_json_text(
+                    params,
+                    "report_audio_workflow",
+                    "video",
+                    "bilibili_title_7",
+                ).label("bilibili_title_7"),
+                _report_upload_json_text(
+                    params,
+                    "report_audio_workflow",
+                    "pdf",
+                    "filename",
+                ).label("request_pdf_filename_json"),
+                _report_upload_json_text(
+                    params,
+                    "report_audio_workflow",
+                    "pdf",
+                    "topic_title",
+                ).label("request_pdf_topic_title_json"),
+                _report_upload_json_text(
+                    result,
+                    "structured_result",
+                    "landscape_title",
+                ).label("landscape_title"),
+                _report_upload_json_text(
+                    result,
+                    "structured_result",
+                    "vertical_title",
+                ).label("vertical_title"),
+                _report_upload_json_text(
+                    result,
+                    "structured_result",
+                    "landscape_subtitle",
+                ).label("landscape_subtitle"),
+                _report_upload_json_text(
+                    result,
+                    "structured_result",
+                    "vertical_subtitle",
+                ).label("vertical_subtitle"),
+                _report_upload_json_text(result, "video", "video_path").label(
+                    "result_landscape_video_path"
+                ),
+                _report_upload_json_text(
+                    result,
+                    "video",
+                    "vertical_video_path",
+                ).label("result_vertical_video_path"),
+                _report_upload_json_text(result, "video", "cover_path").label(
+                    "result_cover_path"
+                ),
+                _report_upload_json_text(
+                    result,
+                    "video",
+                    "vertical_cover_path",
+                ).label("result_vertical_cover_path"),
+                _report_upload_json_text(
+                    result,
+                    "video",
+                    "podcast_cover_path",
+                ).label("result_podcast_cover_path"),
+                _report_upload_json_text(
+                    result,
+                    "video",
+                    "bilibili_cover_path",
+                ).label("result_bilibili_cover_path"),
+                _report_upload_json_text(
+                    result,
+                    "video",
+                    "keyframes",
+                    "vertical_cover",
+                    "path",
+                ).label("vertical_keyframe_path"),
+                _report_upload_json_text(
+                    result,
+                    "video",
+                    "keyframes",
+                    "podcast_cover",
+                    "path",
+                ).label("podcast_keyframe_path"),
+                _report_upload_json_text(
+                    result,
+                    "video",
+                    "keyframes",
+                    "bilibili_cover",
+                    "path",
+                ).label("bilibili_keyframe_path"),
+                _report_upload_json_text(
+                    result,
+                    "video",
+                    "pdf_first_page_image",
+                    "path",
+                ).label("pdf_first_page_path"),
+                credential_name.label("credential_name"),
+            )
+            .outerjoin(
+                PlatformCredentialAccount,
+                PlatformCredentialAccount.id == str(credential_id or ""),
+            )
+            .filter(PublicationTask.id == str(job_id))
+        )
+        if legacy_projection:
+            return query.filter(effective_feature == FEATURE_NAME).filter(
+                effective_user_id.in_(allowed_user_ids)
+            )
+        return query.filter(PublicationTask.feature == FEATURE_NAME).filter(
+            PublicationTask.user_id.in_(allowed_user_ids)
+        )
+
+    row = build_query(legacy_projection=False).first()
+    if row is None:
+        row = build_query(legacy_projection=True).first()
+    if row is None:
+        return None
+
+    request_pdf_filename = row.pdf_filename or row.request_pdf_filename_json
+    request_pdf_topic_title = (
+        row.request_pdf_topic_title or row.request_pdf_topic_title_json
+    )
+    result_pdf_filename = row.result_pdf_filename or request_pdf_filename
+    result_pdf_topic_title = (
+        row.result_pdf_topic_title or request_pdf_topic_title
+    )
+    request_pdf_payload = {
+        key: value
+        for key, value in {
+            "filename": request_pdf_filename,
+            "topic_title": request_pdf_topic_title,
+        }.items()
+        if value
+    }
+    result_payload = {
+        "structured_result": {
+            "landscape_title": row.landscape_title,
+            "vertical_title": row.vertical_title,
+            "landscape_subtitle": row.landscape_subtitle,
+            "vertical_subtitle": row.vertical_subtitle,
+            "cover_title": row.cover_title,
+            "cover_subtitle": row.cover_subtitle,
+            "title": row.structured_title,
+        },
+        "pdf": {
+            "filename": result_pdf_filename,
+            "topic_title": result_pdf_topic_title,
+        },
+        "video": {
+            "cover_title": row.cover_title,
+        },
+    }
+    params_payload = {
+        "report_audio_workflow": {
+            "video": {
+                "bilibili_title_6": row.bilibili_title_6,
+                "bilibili_title_7": row.bilibili_title_7,
+                "title": row.video_title,
+            },
+            "metadata": {"title": row.metadata_title},
+            "pdf": request_pdf_payload,
+        }
+    }
+    return SimpleNamespace(
+        id=str(row.id),
+        user_id=str(row.user_id or ""),
+        created_at=row.created_at,
+        task_title=row.task_title,
+        report_audio_pdf_attachment_id=row.pdf_attachment_id,
+        report_audio_pdf_filename=row.pdf_filename,
+        report_audio_pdf_bytes=row.pdf_bytes,
+        credential_name=row.credential_name,
+        params=params_payload,
+        result=result_payload,
+        video_candidates={
+            "landscape": _compact_report_upload_paths(
+                row.projected_landscape_video_path,
+                row.result_landscape_video_path,
+            ),
+            "vertical": _compact_report_upload_paths(
+                row.result_vertical_video_path,
+            ),
+        },
+        cover_candidates={
+            "cover": _compact_report_upload_paths(
+                row.projected_cover_path,
+                row.result_cover_path,
+            ),
+            "landscape_cover": _compact_report_upload_paths(
+                row.projected_cover_path,
+                row.result_cover_path,
+            ),
+            "vertical_cover": _compact_report_upload_paths(
+                row.projected_vertical_cover_path,
+                row.result_vertical_cover_path,
+                row.vertical_keyframe_path,
+            ),
+            "podcast_cover": _compact_report_upload_paths(
+                row.projected_podcast_cover_path,
+                row.result_podcast_cover_path,
+                row.podcast_keyframe_path,
+            ),
+            "bilibili_cover": _compact_report_upload_paths(
+                row.projected_bilibili_cover_path,
+                row.result_bilibili_cover_path,
+                row.bilibili_keyframe_path,
+            ),
+            "pdf_first_page": _compact_report_upload_paths(
+                row.pdf_first_page_path,
+            ),
+        },
+    )
+
+
+def _report_bilibili_upload_child_candidates(parent_id):
+    """Load projected publisher fallbacks without probing the filesystem."""
+    result = PublicationTask.result
+    rows = (
+        db.session.query(
+            PublicationTask.status.label("status"),
+            PublicationTask.publisher_landscape_enabled.label(
+                "landscape_enabled"
+            ),
+            PublicationTask.publisher_vertical_enabled.label("vertical_enabled"),
+            PublicationTask.publisher_preview_seconds.label("preview_seconds"),
+            PublicationTask.task_video_path.label("landscape_video_path"),
+            PublicationTask.publisher_vertical_video_path.label(
+                "vertical_video_path"
+            ),
+            PublicationTask.publisher_vertical_cover_path.label(
+                "vertical_cover_path"
+            ),
+            PublicationTask.publisher_podcast_cover_path.label(
+                "podcast_cover_path"
+            ),
+            PublicationTask.publisher_bilibili_cover_path.label(
+                "bilibili_cover_path"
+            ),
+            _report_upload_json_text(result, "video_path").label(
+                "legacy_video_path"
+            ),
+            _report_upload_json_text(result, "vertical_video_path").label(
+                "legacy_vertical_video_path"
+            ),
+            _report_upload_json_text(result, "vertical_cover_path").label(
+                "legacy_vertical_cover_path"
+            ),
+            _report_upload_json_text(result, "podcast_cover_path").label(
+                "legacy_podcast_cover_path"
+            ),
+            _report_upload_json_text(result, "bilibili_cover_path").label(
+                "legacy_bilibili_cover_path"
+            ),
+            _report_upload_json_text(result, "metadata", "source").label(
+                "metadata_source"
+            ),
+            PublicationTask.created_at.label("created_at"),
+        )
+        .filter(PublicationTask.feature == "publisher")
+        .filter(PublicationTask.source_task_id == str(parent_id))
+        .filter(PublicationTask.status == "completed")
+        .filter(or_(
+            PublicationTask.publisher_landscape_enabled.is_(True),
+            PublicationTask.publisher_vertical_enabled.is_(True),
+        ))
+        .order_by(PublicationTask.created_at.desc())
+        .limit(60)
+        .all()
+    )
+    landscape_video = []
+    vertical_video = []
+    preview_covers = {
+        "vertical_cover": [],
+        "podcast_cover": [],
+        "bilibili_cover": [],
+    }
+    final_covers = {
+        "vertical_cover": [],
+        "podcast_cover": [],
+        "bilibili_cover": [],
+    }
+    for row in rows:
+        if row.landscape_enabled:
+            landscape_video.extend(_compact_report_upload_paths(
+                row.landscape_video_path,
+                row.legacy_video_path,
+            ))
+        if not row.vertical_enabled:
+            continue
+        is_preview = int(row.preview_seconds or 0) > 0
+        if not is_preview:
+            vertical_video.extend(_compact_report_upload_paths(
+                row.vertical_video_path,
+                row.legacy_vertical_video_path,
+                (
+                    row.legacy_video_path
+                    if row.metadata_source == VERTICAL_BACKFILL_SOURCE
+                    else None
+                ),
+            ))
+        target = preview_covers if is_preview else final_covers
+        target["vertical_cover"].extend(_compact_report_upload_paths(
+            row.vertical_cover_path,
+            row.legacy_vertical_cover_path,
+        ))
+        target["podcast_cover"].extend(_compact_report_upload_paths(
+            row.podcast_cover_path,
+            row.legacy_podcast_cover_path,
+        ))
+        target["bilibili_cover"].extend(_compact_report_upload_paths(
+            row.bilibili_cover_path,
+            row.legacy_bilibili_cover_path,
+        ))
+    covers = {
+        key: _compact_report_upload_paths(
+            *preview_covers[key],
+            *final_covers[key],
+        )
+        for key in preview_covers
+    }
+    return {
+        "video": {
+            "landscape": _compact_report_upload_paths(*landscape_video),
+            "vertical": _compact_report_upload_paths(*vertical_video),
+        },
+        "covers": covers,
+    }
+
+
+def _report_bilibili_cover_from_candidates(
+    parent_snapshot,
+    requested_key="",
+    child_candidates=None,
+):
+    child_covers = (child_candidates or {}).get("covers") or {}
+
+    def paths_for(key):
+        return _compact_report_upload_paths(
+            *(parent_snapshot.cover_candidates.get(key) or ()),
+            *(child_covers.get(key) or ()),
+        )
+
+    requested_key = str(requested_key or "").strip()
+    if requested_key:
+        return _first_ready_report_upload_path(paths_for(requested_key)), requested_key
+    for key in ("bilibili_cover", "cover", "vertical_cover", "podcast_cover"):
+        path = _first_ready_report_upload_path(paths_for(key))
+        if path:
+            return path, key
+    return None, ""
+
+
 @report_audio_workflow_bp.route("/jobs/<job_id>/bilibili-upload", methods=["POST"])
 @require_login
 def submit_bilibili_upload(current_user, job_id):
-    task = _get_owned_task(current_user, job_id)
+    data = _request_payload()
+    credential_id = clean_bilibili_upload_text(
+        data.get("credential_id") or data.get("platform_credential_id"),
+        max_length=80,
+    )
+    task = _report_bilibili_upload_parent_snapshot(
+        current_user,
+        job_id,
+        credential_id=credential_id,
+    )
+    release_db_session_quietly()
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
 
     current_user_id = getattr(current_user, "id", None)
-    data = _request_payload()
     video_key = str(data.get("video_key") or data.get("video") or "landscape").strip().lower()
     visual_workflow_id = str(data.get("visual_workflow_id") or "").strip()
+    child_candidates = None
+
+    def load_child_candidates():
+        nonlocal child_candidates
+        if child_candidates is None:
+            child_candidates = _report_bilibili_upload_child_candidates(task.id)
+            release_db_session_quietly()
+        return child_candidates
+
     if video_key.startswith("visual:"):
         if not visual_workflow_id:
             return jsonify({"success": False, "message": "视觉方案视频缺少工作流 ID"}), 400
-        video_path = _linked_visual_video_path(current_user, task, visual_workflow_id)
+        visual_candidates = _linked_visual_video_candidates(
+            current_user,
+            task,
+            visual_workflow_id,
+        )
+        release_db_session_quietly()
+        video_path = _first_ready_report_upload_path(visual_candidates)
         if not video_path:
             return jsonify({"success": False, "message": "视觉方案视频不存在、尚未完成或不属于同一 PDF"}), 400
     elif video_key in {"landscape", "vertical"}:
-        video_path = _report_bilibili_video_path(task, video_key)
+        video_path = _first_ready_report_upload_path(
+            task.video_candidates.get(video_key)
+        )
+        if not video_path:
+            video_path = _first_ready_report_upload_path(
+                load_child_candidates()["video"].get(video_key)
+            )
     else:
         return jsonify({"success": False, "message": "video_key 只能是 landscape、vertical 或已归集的视觉方案视频"}), 400
 
-    if not _path_exists(video_path):
+    if not video_path:
         return jsonify({"success": False, "message": "当前任务还没有可上传的视频文件"}), 400
 
     cover_key = str(data.get("cover_key") or "").strip()
-    cover_path, resolved_cover_key = _report_bilibili_cover_path(task, video_key, cover_key)
+    if cover_key:
+        cover_path, resolved_cover_key = _report_bilibili_cover_from_candidates(
+            task,
+            cover_key,
+        )
+        if not cover_path and cover_key in {
+            "vertical_cover",
+            "podcast_cover",
+            "bilibili_cover",
+        }:
+            cover_path, resolved_cover_key = _report_bilibili_cover_from_candidates(
+                task,
+                cover_key,
+                load_child_candidates(),
+            )
+    else:
+        cover_path = _first_ready_report_upload_path(
+            task.cover_candidates.get("bilibili_cover")
+        )
+        resolved_cover_key = "bilibili_cover" if cover_path else ""
+    if not cover_key and not cover_path:
+        cover_path, resolved_cover_key = _report_bilibili_cover_from_candidates(
+            task,
+            "",
+            load_child_candidates(),
+        )
     if cover_key and not cover_path:
         return jsonify({"success": False, "message": f"封面产物不存在：{cover_key}"}), 400
 
@@ -1348,6 +1856,7 @@ def submit_bilibili_upload(current_user, job_id):
                 "title_source": "manual" if manual_title else "report_audio_default",
                 "visual_workflow_id": visual_workflow_id or None,
             },
+            credential_name=task.credential_name,
         )
         child_id = child.id
         enqueue_bilibili_upload_task(child)
@@ -1382,24 +1891,29 @@ def submit_bilibili_upload(current_user, job_id):
 @report_audio_workflow_bp.route("/jobs/<job_id>/bilibili-upload/<upload_task_id>/cancel", methods=["POST"])
 @require_login
 def cancel_bilibili_upload(current_user, job_id, upload_task_id):
-    task = _get_owned_task(current_user, job_id)
+    task = _get_owned_task_reference(current_user, job_id)
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
 
-    child = (
-        PublicationTask.query
-        .filter(PublicationTask.id == upload_task_id)
-        .filter(PublicationTask.feature == "publisher")
-        .filter(PublicationTask.parent_task_id == task.id)
-        .filter(PublicationTask.parent_feature == FEATURE_NAME)
-        .first()
+    row = bilibili_upload_action_row(
+        upload_task_id,
+        parent_task_id=task.id,
+        parent_feature=FEATURE_NAME,
+        source_label=BILIBILI_UPLOAD_SOURCE,
+        for_update=True,
     )
-    if not child or not bilibili_upload_child_payload(child, source_label=BILIBILI_UPLOAD_SOURCE):
+    if row is None:
         return jsonify({"success": False, "message": "B站上传任务不存在"}), 404
+    child, upload = row
+    item = bilibili_upload_child_payload(
+        child,
+        source_label=BILIBILI_UPLOAD_SOURCE,
+        upload=upload,
+    )
 
-    ok, message = cancel_bilibili_upload_child(child)
+    ok, message = cancel_bilibili_upload_child(child, upload=upload)
     _clear_jobs_summary_cache(getattr(current_user, "id", None))
-    item = bilibili_upload_child_payload(child, source_label=BILIBILI_UPLOAD_SOURCE)
+    item = getattr(child, "_bilibili_cancel_response_payload", None) or item
     return jsonify({
         "success": ok,
         "message": message,
@@ -1411,7 +1925,7 @@ def cancel_bilibili_upload(current_user, job_id, upload_task_id):
 @report_audio_workflow_bp.route("/jobs/<job_id>/bilibili-upload/<upload_task_id>/retry", methods=["POST"])
 @require_login
 def retry_bilibili_upload(current_user, job_id, upload_task_id):
-    parent = _get_owned_task(current_user, job_id)
+    parent = _get_owned_task_reference(current_user, job_id)
     if not parent:
         return jsonify({"success": False, "message": "任务不存在"}), 404
 
@@ -1436,7 +1950,12 @@ def retry_bilibili_upload(current_user, job_id, upload_task_id):
         return jsonify({"success": False, "message": f"B站上传重投失败: {exc}"}), 502
 
     _clear_jobs_summary_cache(getattr(current_user, "id", None))
-    item = bilibili_upload_child_payload(child, source_label=BILIBILI_UPLOAD_SOURCE)
+    item = getattr(child, "_bilibili_retry_response_payload", None)
+    if item is None:
+        item = bilibili_upload_child_payload(
+            child,
+            source_label=BILIBILI_UPLOAD_SOURCE,
+        )
     return jsonify({
         "success": True,
         "message": "B站上传任务已重新投递",
@@ -1518,7 +2037,9 @@ def cancel_douyin_upload(current_user, job_id, upload_task_id):
     if not child:
         return jsonify({"success": False, "message": "抖音上传任务不存在"}), 404
     ok, message = cancel_douyin_publish_task(child)
-    item = douyin_publish_payload(child)
+    item = getattr(child, "_browser_publish_cancel_response_payload", None)
+    if item is None:
+        item = douyin_publish_payload(child)
     return jsonify({"success": ok, "message": message, "data": {"upload_task": item}, "upload_task": item}), (200 if ok else 409)
 
 
@@ -1584,7 +2105,9 @@ def cancel_wechat_channels_upload(current_user, job_id, upload_task_id):
     if not child:
         return jsonify({"success": False, "message": "视频号上传任务不存在"}), 404
     ok, message = cancel_wechat_channels_publish_task(child)
-    item = wechat_channels_publish_payload(child)
+    item = getattr(child, "_browser_publish_cancel_response_payload", None)
+    if item is None:
+        item = wechat_channels_publish_payload(child)
     return jsonify({"success": ok, "message": message, "data": {"upload_task": item}, "upload_task": item}), (200 if ok else 409)
 
 
@@ -2029,9 +2552,7 @@ def cancel_job(current_user, job_id):
         payload = _job_payload(task)
         return jsonify({"success": True, "message": "任务已结束", **payload, "data": payload})
 
-    if task.celery_task_id:
-        celery_app.control.revoke(task.celery_task_id, terminate=False)
-
+    celery_task_id = str(task.celery_task_id or "").strip()
     result = dict(task.result or {})
     result["canceled_at"] = datetime.utcnow().isoformat() + "Z"
     task.status = "canceled"
@@ -2039,11 +2560,18 @@ def cancel_job(current_user, job_id):
     task.completed_at = datetime.utcnow()
     task.result = result
     flag_modified(task, "result")
+    payload = _job_payload(task)
     db.session.commit()
     _clear_jobs_summary_cache(getattr(current_user, "id", None))
-
-    payload = _job_payload(task)
-    return jsonify({"success": True, "message": "任务已取消", **payload, "data": payload})
+    revoked = revoke_celery_task_after_db_commit(
+        celery_task_id,
+        operation=f"report audio workflow cancel revoke task={task.id}",
+        business_task_id=str(task.id),
+    )
+    message = "任务已取消"
+    if celery_task_id and not revoked:
+        message += "；broker 撤回失败，终态门禁将拦截旧消息"
+    return jsonify({"success": True, "message": message, **payload, "data": payload})
 
 
 @report_audio_workflow_bp.route("/jobs/<job_id>/retry", methods=["POST"])
@@ -4843,23 +5371,35 @@ def _linked_visual_scene_timeline(current_user, audio_task, workflow_id, *, audi
     return _build_scheme3_scene_timeline(rows, audio_seconds)
 
 
-def _linked_visual_video_path(current_user, audio_task, workflow_id):
-    """Resolve one same-PDF visual video without trusting a client file path."""
+def _linked_visual_video_candidates(current_user, audio_task, workflow_id):
+    """Return same-PDF visual paths without doing filesystem I/O in the query."""
     workflow_id = str(workflow_id or "").strip()
     if not workflow_id:
-        return None
+        return ()
     attachment_id = str(
         getattr(audio_task, "report_audio_pdf_attachment_id", None) or ""
     ).strip()
     filename = str(getattr(audio_task, "report_audio_pdf_filename", None) or "").strip()
     pdf_bytes = _linked_pdf_bytes_identity(audio_task)
     if not attachment_id and (not filename or not pdf_bytes):
-        return None
+        return ()
 
+    render_task = aliased(PublicationTask)
+    render_path = (
+        db.session.query(render_task.task_video_path)
+        .filter(
+            render_task.feature == VISUAL_VIDEO_RENDER_FEATURE,
+            render_task.parent_task_id == workflow_id,
+            render_task.status == "completed",
+        )
+        .order_by(render_task.created_at.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
     query = (
         db.session.query(
-            PublicationTask.id,
-            PublicationTask.task_video_path,
+            PublicationTask.task_video_path.label("parent_path"),
+            render_path.label("child_path"),
         )
         .filter(
             PublicationTask.id == workflow_id,
@@ -4874,25 +5414,17 @@ def _linked_visual_video_path(current_user, audio_task, workflow_id):
             PublicationTask.report_audio_pdf_filename == filename,
             PublicationTask.report_audio_pdf_bytes == pdf_bytes,
         )
-    parent = query.one_or_none()
-    if not parent:
-        return None
-    parent_path = str(parent.task_video_path or "").strip()
-    if _path_exists(parent_path):
-        return parent_path
+    row = query.one_or_none()
+    if not row:
+        return ()
+    return _compact_report_upload_paths(row.parent_path, row.child_path)
 
-    child = (
-        db.session.query(PublicationTask.task_video_path)
-        .filter(
-            PublicationTask.feature == VISUAL_VIDEO_RENDER_FEATURE,
-            PublicationTask.parent_task_id == workflow_id,
-            PublicationTask.status == "completed",
-        )
-        .order_by(PublicationTask.created_at.desc())
-        .first()
+
+def _linked_visual_video_path(current_user, audio_task, workflow_id):
+    """Resolve one same-PDF visual video without trusting a client file path."""
+    return _first_ready_report_upload_path(
+        _linked_visual_video_candidates(current_user, audio_task, workflow_id)
     )
-    child_path = str(getattr(child, "task_video_path", None) or "").strip()
-    return child_path if _path_exists(child_path) else None
 
 
 def _linked_visual_video_payloads(current_user, audio_task):
@@ -6277,10 +6809,17 @@ def _pdf_asset_payload(attachment, topic=None):
     }
 
 
-def _pdf_asset_row_payload(row, *, canonical_asset=None):
-    asset = canonical_asset or _canonical_pdf_asset_by_source_path(
-        getattr(row, "local_path", None)
-    )
+_UNRESOLVED_CANONICAL_PDF_ASSET = object()
+
+
+def _pdf_asset_row_payload(
+    row,
+    *,
+    canonical_asset=_UNRESOLVED_CANONICAL_PDF_ASSET,
+):
+    asset = canonical_asset
+    if asset is _UNRESOLVED_CANONICAL_PDF_ASSET:
+        asset = _canonical_pdf_asset_by_source_path(getattr(row, "local_path", None))
     resolution = resolve_cleaned_asset(asset, media_type="pdf")
     path = resolution.path
     if resolution.state != "ready" or not path:
@@ -6322,6 +6861,7 @@ def _content_pipeline_source_label(source_mode):
         "browser_sidebar": "侧边栏下载",
         "manual_download": "手动投递",
         "pdf_merge": "PDF 合并",
+        "web_upload": "网页投递",
     }.get(str(source_mode or "").strip().lower(), "内容流水线")
 
 

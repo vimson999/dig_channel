@@ -340,19 +340,51 @@ def _run_publish_clean_output_task_impl(task_id, celery_task=None):
 
 def _update_attachment_publish_status(task_or_snapshot):
     task_id = getattr(task_or_snapshot, "id", task_or_snapshot)
-    try:
-        from services.zsxq_sync_service import zsxq_sync_service
+    from services.zsxq_sync_service import zsxq_sync_service
 
-        result = zsxq_sync_service.update_attachment_publish_status_from_publish_task(task_or_snapshot)
-        logger.info(
-            "[ZSXQ_PUBLISH_TASK] attachment publish status updated | task=%s matched=%s updated=%s reason=%s",
-            task_id,
-            result.get("matched"),
-            result.get("updated"),
-            result.get("reason") or "",
-        )
-    except Exception:
-        logger.exception("[ZSXQ_PUBLISH_TASK] attachment publish status update failed | task=%s", task_id)
+    for attempt in range(1, 3):
+        try:
+            result = zsxq_sync_service.update_attachment_publish_status_from_publish_task(task_or_snapshot)
+            logger.info(
+                "[ZSXQ_PUBLISH_TASK] attachment publish status updated | task=%s matched=%s updated=%s reason=%s attempt=%s",
+                task_id,
+                result.get("matched"),
+                result.get("updated"),
+                result.get("reason") or "",
+                attempt,
+            )
+            return True
+        except Exception as exc:
+            retryable = _is_retryable_db_error(exc)
+            try:
+                db.session.rollback()
+            except Exception:
+                logger.exception(
+                    "[ZSXQ_PUBLISH_TASK] attachment status rollback failed | task=%s attempt=%s/2",
+                    task_id,
+                    attempt,
+                )
+            if retryable and attempt < 2:
+                logger.warning(
+                    "[ZSXQ_PUBLISH_TASK] retry attachment publish status after transient db error | task=%s attempt=%s/2 error=%s",
+                    task_id,
+                    attempt,
+                    exc,
+                )
+                continue
+            logger.exception(
+                "[ZSXQ_PUBLISH_TASK] attachment publish status update failed | task=%s attempt=%s/2",
+                task_id,
+                attempt,
+            )
+            return False
+        finally:
+            # The next operation publishes a workflow/notification task.  Never
+            # let this best-effort status sync leak a failed or idle transaction
+            # into that external I/O boundary.
+            db.session.remove()
+
+    return False
 
 
 def _notify_workflow_from_publish_task(task):

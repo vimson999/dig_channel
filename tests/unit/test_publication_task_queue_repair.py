@@ -958,6 +958,44 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertIsNotNone(projection.canceled_at)
         self.assertNotIn("bilibili_upload_cancel_reason", child.result)
 
+    def test_cancel_bilibili_upload_child_keeps_terminal_guard_when_revoke_fails(self):
+        _, child = self._parent_with_publisher_child(parent_status="completed")
+        projection = PublicationTaskBilibiliUpload(
+            task_id=child.id,
+            parent_task_id=child.parent_task_id,
+            parent_feature="mp3_video_workflow",
+            source_label="mp3_video_workflow:bilibili_upload",
+            video_key="landscape",
+            title="broker 不可用时仍持久取消",
+            video_path="/tmp/cancel-before-revoke.mp4",
+            tags=["财经"],
+        )
+        db.session.add(projection)
+        db.session.commit()
+        child_id = str(child.id)
+
+        with patch(
+            "api.mp3_video_workflow.celery_app.control.revoke",
+            side_effect=RuntimeError("broker control unavailable"),
+        ):
+            try:
+                ok, message = _cancel_bilibili_upload_child(child)
+            except RuntimeError as exc:
+                self.fail(f"持久化取消不能被 broker revoke 失败回滚: {exc}")
+
+        self.assertTrue(ok)
+        self.assertIn("已取消", message)
+        persisted = db.session.get(PublicationTask, child_id)
+        self.assertEqual(persisted.status, "canceled")
+        self.assertEqual(persisted.current_step, "canceled")
+        persisted_projection = PublicationTaskBilibiliUpload.query.filter_by(
+            task_id=child_id,
+        ).one()
+        self.assertEqual(
+            persisted_projection.cancel_reason,
+            "user_canceled_queued_upload",
+        )
+
     def test_cancel_bilibili_upload_child_rejects_processing_task(self):
         _, child = self._parent_with_publisher_child(parent_status="completed")
         child.status = "processing"
@@ -1080,6 +1118,35 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertTrue(repaired)
         self.assertEqual(action, "closed")
         self.assertEqual(transaction_states, [False])
+
+    def test_processing_orphan_marker_persists_before_direct_revoke(self):
+        task = self._processing_publisher_task(step="upload_bilibili")
+        task_id = str(task.id)
+        transaction_states = []
+        durable_statuses = []
+
+        def capture_revoke(*_args, **_kwargs):
+            transaction_states.append(db.session().in_transaction())
+            durable_statuses.append(
+                db.session.get(PublicationTask, task_id).status
+            )
+
+        with patch.object(
+            publisher_queue_repair.celery_app.control,
+            "revoke",
+            side_effect=capture_revoke,
+        ):
+            publisher_queue_repair._mark_processing_publisher_orphan_failed(
+                task,
+                queue="platform_upload",
+                reason="direct_marker_test",
+            )
+
+        self.assertEqual(transaction_states, [False])
+        self.assertEqual(durable_statuses, ["failed"])
+        persisted = db.session.get(PublicationTask, task_id)
+        self.assertEqual(persisted.status, "failed")
+        self.assertEqual(persisted.current_step, "orphaned_processing")
 
     def test_requeues_stale_processing_local_clean_task_when_celery_message_is_missing(self):
         cases = (

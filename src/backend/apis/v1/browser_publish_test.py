@@ -155,7 +155,9 @@ def create_browser_publish_test_blueprint(spec: BrowserPublishTestSpec):
         if not task:
             return jsonify({"success": False, "message": "任务不存在"}), 404
         ok, message = spec.cancel_task(task)
-        payload = spec.task_payload(task)
+        payload = getattr(task, "_browser_publish_cancel_response_payload", None)
+        if payload is None:
+            payload = spec.task_payload(task)
         release_db_session_quietly()
         return jsonify({"success": ok, "message": message, "data": payload}), (200 if ok else 409)
 

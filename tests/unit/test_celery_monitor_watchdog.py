@@ -105,6 +105,72 @@ class CeleryMonitorWatchdogTest(unittest.TestCase):
 
         self.assertTrue(payload["success"])
 
+    def test_runtime_status_payload_skips_business_database_snapshots(self):
+        events = []
+        processes = [
+            {
+                "pid": 101,
+                "etime": "00:10",
+                "command": "celery worker -Q mp3_video_workflow",
+            },
+            {
+                "pid": 102,
+                "etime": "00:10",
+                "command": "celery worker -Q render",
+            },
+        ]
+
+        with patch.object(
+            celery_monitor,
+            "_release_db_session_quietly",
+            side_effect=lambda: events.append("db_session_released"),
+        ), patch.object(
+            celery_monitor,
+            "_ensure_dirs",
+        ), patch.object(
+            celery_monitor,
+            "_list_processes",
+            side_effect=lambda: events.append("processes") or processes,
+        ), patch.object(
+            celery_monitor,
+            "_queue_lengths_for",
+            side_effect=lambda queues: events.append(("queues", tuple(queues)))
+            or {
+                "mp3_video_workflow": (2, None),
+                "render": (1, None),
+            },
+        ), patch.object(
+            celery_monitor,
+            "_load_paused_services",
+            return_value={},
+        ), patch.object(
+            celery_monitor,
+            "_business_tasks_snapshot",
+        ) as business_snapshot, patch.object(
+            celery_monitor,
+            "_broker_ping",
+        ) as broker_ping:
+            payload = celery_monitor._runtime_status_payload(
+                ("mp3_video_workflow", "render")
+            )
+
+        self.assertEqual(events[0], "db_session_released")
+        self.assertEqual(
+            events[1:],
+            ["processes", ("queues", ("mp3_video_workflow", "render"))],
+        )
+        self.assertEqual(
+            [item["id"] for item in payload["data"]["services"]],
+            ["mp3_video_workflow", "render"],
+        )
+        self.assertEqual(
+            [item["queue_length"] for item in payload["data"]["services"]],
+            [2, 1],
+        )
+        self.assertTrue(all(item["running"] for item in payload["data"]["services"]))
+        business_snapshot.assert_not_called()
+        broker_ping.assert_not_called()
+
     def test_concurrent_forced_status_refreshes_share_the_inflight_result(self):
         app = Flask(__name__)
         refresh_started = threading.Event()
@@ -882,6 +948,9 @@ class CeleryMonitorWatchdogTest(unittest.TestCase):
             captured["service_id"] = service_id
             captured["business_tasks"] = kwargs.get("business_tasks")
             captured["business_task_error"] = kwargs.get("business_task_error")
+            captured["include_dashboard_stats"] = kwargs.get(
+                "include_dashboard_stats"
+            )
             return {
                 "consumer_warning": None,
                 "queue_length": 1,
@@ -909,7 +978,78 @@ class CeleryMonitorWatchdogTest(unittest.TestCase):
         self.assertEqual(captured["service_id"], "render")
         self.assertEqual(captured["business_tasks"], [])
         self.assertIsNone(captured["business_task_error"])
+        self.assertIs(captured["include_dashboard_stats"], False)
         snapshot.assert_not_called()
+
+    def test_report_video_service_status_can_skip_dashboard_only_stats(self):
+        service = celery_monitor.SERVICES["report_video"]
+        with patch.object(
+            celery_monitor,
+            "_list_processes",
+            return_value=[],
+        ), patch.object(
+            celery_monitor,
+            "_load_paused_services",
+            return_value={},
+        ), patch.object(
+            celery_monitor,
+            "_queue_length",
+            return_value=(0, None),
+        ), patch.object(
+            celery_monitor,
+            "_read_pid_file",
+            return_value=None,
+        ), patch.object(
+            celery_monitor,
+            "_report_video_stage_stats",
+        ) as stage_stats:
+            status = celery_monitor._service_status(
+                "report_video",
+                service,
+                inspect_data={},
+                inspect_error=None,
+                include_dashboard_stats=False,
+            )
+
+        stage_stats.assert_not_called()
+        self.assertNotIn("report_video_stats", status)
+        self.assertNotIn("report_video_stats_error", status)
+
+    def test_report_video_service_status_keeps_dashboard_stats_by_default(self):
+        service = celery_monitor.SERVICES["report_video"]
+        dashboard_stats = {"totals": {"tasks": 345, "reports": 11}}
+        with patch.object(
+            celery_monitor,
+            "_list_processes",
+            return_value=[],
+        ), patch.object(
+            celery_monitor,
+            "_load_paused_services",
+            return_value={},
+        ), patch.object(
+            celery_monitor,
+            "_queue_length",
+            return_value=(0, None),
+        ), patch.object(
+            celery_monitor,
+            "_read_pid_file",
+            return_value=None,
+        ), patch.object(
+            celery_monitor,
+            "_report_video_stage_stats",
+            return_value=(dashboard_stats, None),
+        ) as stage_stats:
+            status = celery_monitor._service_status(
+                "report_video",
+                service,
+                inspect_data={},
+                inspect_error=None,
+                force_refresh=True,
+            )
+
+        stage_stats.assert_called_once_with(force_refresh=True)
+        self.assertEqual(status["report_video_stats"], dashboard_stats)
+        self.assertIsNone(status["report_video_stats_error"])
 
     def test_watchdog_probes_recent_business_heartbeat_before_warning(self):
         calls = []

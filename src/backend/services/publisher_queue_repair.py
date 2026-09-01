@@ -16,7 +16,11 @@ from models import db
 from models.bilibili_publish import PublicationTaskBilibiliUpload
 from models.task import PublicationTask
 from services.platform_publish_dispatch import task_for_unique_feature
-from services.runtime_guard import apply_async_after_db_release, maybe_guarded_apply_async
+from services.runtime_guard import (
+    apply_async_after_db_release,
+    maybe_guarded_apply_async,
+    revoke_celery_task_after_db_commit,
+)
 from tasks.publisher import PLATFORM_UPLOAD_QUEUE, run_publication_pipeline
 
 
@@ -408,15 +412,12 @@ def _revoke_published_repair_message(async_result, *, task_id, log):
     celery_id = getattr(async_result, "id", None)
     if not celery_id:
         return
-    try:
-        celery_app.control.revoke(celery_id, terminate=False)
-    except Exception as exc:
-        log.warning(
-            "Failed to revoke superseded repair message: task=%s celery=%s error=%s",
-            task_id,
-            celery_id,
-            exc,
-        )
+    revoke_celery_task_after_db_commit(
+        celery_id,
+        operation=f"publisher superseded repair revoke task={task_id}",
+        business_task_id=str(task_id),
+        log=log,
+    )
 
 
 def _release_then_revoke_published_repair_message(
@@ -2019,8 +2020,10 @@ def _mark_processing_publisher_orphan_failed(
     reason: str,
     revoke: bool = True,
 ) -> None:
-    if revoke:
-        _revoke_celery_task(task)
+    revoke_snapshot = SimpleNamespace(
+        id=str(task.id),
+        celery_task_id=str(task.celery_task_id or ""),
+    )
     now = datetime.utcnow()
     previous_result = dict(task.result or {})
     repair_state = {
@@ -2046,21 +2049,21 @@ def _mark_processing_publisher_orphan_failed(
     task.completed_at = now
     flag_modified(task, "result")
     db.session.commit()
+    if revoke:
+        _revoke_celery_task(revoke_snapshot)
 
 
 def _revoke_celery_task(task: PublicationTask) -> None:
-    celery_task_id = getattr(task, "celery_task_id", None)
+    task_id = str(getattr(task, "id", None) or "-")
+    celery_task_id = str(getattr(task, "celery_task_id", None) or "").strip()
     if not celery_task_id:
         return
-    try:
-        celery_app.control.revoke(celery_task_id, terminate=False)
-    except Exception as exc:
-        logger.warning(
-            "Publisher child cleanup revoke failed: task=%s celery=%s error=%s",
-            getattr(task, "id", "-"),
-            celery_task_id,
-            exc,
-        )
+    revoke_celery_task_after_db_commit(
+        celery_task_id,
+        operation=f"publisher child cleanup revoke task={task_id}",
+        business_task_id=task_id,
+        log=logger,
+    )
 
 
 def _message_visible_in_workers(celery_id: str, *, child_id: str) -> Tuple[bool, bool]:

@@ -1,14 +1,17 @@
 """Shared PublicationTask lifecycle for Cookie-backed browser publishers."""
 
+import logging
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, FrozenSet, Optional
 
-from celery_config import celery_app
 from models import db
 from models.task import PublicationTask
 from services.platform_publish_dispatch import PLATFORM_UPLOAD_QUEUE, dispatch_platform_publish
+from services.runtime_guard import revoke_celery_task_after_db_commit
 
 
 QUEUE_NAME = PLATFORM_UPLOAD_QUEUE
@@ -16,6 +19,7 @@ STATUS_MAP = {
     "pending": "queued", "processing": "running", "completed": "succeeded",
     "failed": "failed", "canceled": "canceled",
 }
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -103,42 +107,91 @@ def create_browser_publish_task(
         "source": source_label,
         **dict(spec.default_extra or {}), **dict(extra or {}),
     }
-    task = PublicationTask(
-        status="pending", current_step="queued", progress=0,
-        params={
+    broker_task_id = str(uuid.uuid4())
+    params = {
             "feature": spec.feature_name, "user_id": user_id,
             "parent_feature": parent_feature, "parent_task_id": parent_id,
             "source_feature": parent_feature, "source_task_id": parent_id,
             spec.feature_name: command,
-        },
-        result={
+        }
+    result = {
             "publish_status": "queued", "submit_requested": bool(submit),
             "visibility": visibility, "credential_id": auth.get("credential_id"),
             "credential_name": auth.get("credential_name"), "source": source_label,
             "video_key": command["video_key"],
             **{key: command.get(key) for key in (spec.default_extra or {})},
-        },
+        }
+    task = PublicationTask(
+        celery_task_id=broker_task_id,
+        status="pending", current_step="queued", progress=0,
+        params=params,
+        result=result,
     )
     db.session.add(task)
+    db.session.flush()
+    snapshot = SimpleNamespace(
+        id=str(task.id),
+        celery_task_id=broker_task_id,
+        status="pending",
+        current_step="queued",
+        progress=0,
+        params=dict(params),
+        result=dict(result),
+        error_message=None,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+        completed_at=None,
+    )
     db.session.commit()
-    return task
+    return snapshot
 
 
 def enqueue_browser_publish_task(spec: BrowserPublishJobSpec, task):
     task_id = str(task.id)
-    try:
-        submission = dispatch_platform_publish(spec.platform, task_id, retry=False)
-        task.celery_task_id = submission["celery_id"]
+    broker_task_id = str(getattr(task, "celery_task_id", None) or "").strip()
+    if not broker_task_id:
+        broker_task_id = str(uuid.uuid4())
+        updated = PublicationTask.query.filter(
+            PublicationTask.id == task_id,
+        ).update(
+            {PublicationTask.celery_task_id: broker_task_id},
+            synchronize_session=False,
+        )
+        if not updated:
+            db.session.rollback()
+            raise RuntimeError(f"{spec.platform_label}上传任务不存在: {task_id}")
         db.session.commit()
-        return task
+        task.celery_task_id = broker_task_id
+    try:
+        submission = dispatch_platform_publish(
+            spec.platform,
+            task_id,
+            broker_task_id=broker_task_id,
+            retry=False,
+        )
     except Exception as exc:
         db.session.rollback()
-        row = PublicationTask.query.filter(PublicationTask.id == str(task.id)).one_or_none()
-        if row:
-            row.status = "failed"; row.current_step = "failed"
-            row.error_message = f"{spec.platform_label}上传任务入队失败: {exc}"
-            row.completed_at = datetime.utcnow(); db.session.commit()
+        PublicationTask.query.filter(PublicationTask.id == task_id).update({
+            PublicationTask.status: "failed",
+            PublicationTask.current_step: "failed",
+            PublicationTask.error_message: f"{spec.platform_label}上传任务入队失败: {exc}",
+            PublicationTask.completed_at: datetime.utcnow(),
+            PublicationTask.updated_at: datetime.utcnow(),
+        }, synchronize_session=False)
+        db.session.commit()
         raise RuntimeError(f"{spec.platform_label}上传任务入队失败: {exc}") from exc
+    actual_celery_id = str(submission.get("celery_id") or broker_task_id)
+    if actual_celery_id != broker_task_id:
+        PublicationTask.query.filter(PublicationTask.id == task_id).update(
+            {
+                PublicationTask.celery_task_id: actual_celery_id,
+                PublicationTask.updated_at: datetime.utcnow(),
+            },
+            synchronize_session=False,
+        )
+        db.session.commit()
+    task.celery_task_id = actual_celery_id
+    return task
 
 
 def browser_publish_payload(spec: BrowserPublishJobSpec, task):
@@ -234,8 +287,49 @@ def browser_publish_children(spec: BrowserPublishJobSpec, parent_id, *, parent_f
 def cancel_browser_publish_task(spec: BrowserPublishJobSpec, task):
     if task.status != "pending":
         return False, f"仅排队中的{spec.platform_label}任务可以取消"
-    if task.celery_task_id:
-        celery_app.control.revoke(task.celery_task_id, terminate=False)
-    task.status = "canceled"; task.current_step = "canceled"
-    task.completed_at = datetime.utcnow(); db.session.commit()
+    task_id = str(task.id)
+    celery_task_id = str(task.celery_task_id or "").strip()
+    now = datetime.utcnow()
+    snapshot = SimpleNamespace(
+        id=task_id,
+        celery_task_id=celery_task_id or None,
+        status="canceled",
+        current_step="canceled",
+        progress=int(task.progress or 0),
+        params=dict(task.params or {}),
+        result=dict(task.result or {}),
+        error_message=None,
+        created_at=task.created_at,
+        updated_at=now,
+        completed_at=now,
+    )
+    response_payload = browser_publish_payload(spec, snapshot)
+    updated = PublicationTask.query.filter(
+        PublicationTask.id == task_id,
+        PublicationTask.status == "pending",
+    ).update({
+        PublicationTask.status: "canceled",
+        PublicationTask.current_step: "canceled",
+        PublicationTask.completed_at: now,
+        PublicationTask.updated_at: now,
+    }, synchronize_session=False)
+    if not updated:
+        db.session.rollback()
+        return False, f"{spec.platform_label}任务状态已变化，请刷新后重试"
+    db.session.commit()
+    task._browser_publish_cancel_response_payload = response_payload
+    if celery_task_id:
+        revoked = revoke_celery_task_after_db_commit(
+            celery_task_id,
+            operation=(
+                f"{spec.platform} browser upload cancel revoke task={task_id}"
+            ),
+            business_task_id=task_id,
+            log=logger,
+        )
+        if not revoked:
+            return True, (
+                f"{spec.platform_label}上传任务已取消；"
+                "broker 撤回失败，终态门禁将拦截旧消息"
+            )
     return True, f"{spec.platform_label}上传任务已取消"

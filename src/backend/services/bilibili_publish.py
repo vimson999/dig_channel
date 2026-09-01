@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import re
 import time
 import uuid
@@ -6,14 +7,13 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from sqlalchemy.orm import load_only
-from sqlalchemy.orm.attributes import flag_modified
 
-from celery_config import celery_app
 from models import db
 from models.bilibili_publish import PublicationTaskBilibiliUpload
 from models.platform_credential import PlatformCredentialAccount
 from models.task import PublicationTask
 from services.platform_publish_dispatch import dispatch_platform_publish
+from services.runtime_guard import revoke_celery_task_after_db_commit
 
 
 STATUS_MAP = {
@@ -25,6 +25,8 @@ STATUS_MAP = {
 }
 
 DEFAULT_BILIBILI_NEUTRAL_MARK = "个人观点，仅供参考"
+_CREDENTIAL_NAME_UNSET = object()
+logger = logging.getLogger(__name__)
 
 
 class BilibiliUploadRetryConflict(RuntimeError):
@@ -319,6 +321,7 @@ def create_bilibili_upload_task(
     default_tags=None,
     metadata_extra=None,
     result_extra=None,
+    credential_name=_CREDENTIAL_NAME_UNSET,
 ):
     if not video_path:
         raise ValueError("当前任务还没有可上传的视频文件")
@@ -330,7 +333,10 @@ def create_bilibili_upload_task(
         data.get("credential_id") or data.get("platform_credential_id"),
         max_length=80,
     )
-    credential_name = platform_credential_display_name(credential_id)
+    if credential_name is _CREDENTIAL_NAME_UNSET:
+        credential_name = platform_credential_display_name(credential_id)
+    else:
+        credential_name = clean_upload_text(credential_name, max_length=255) or None
     charging_pay = charging_pay_from_payload(data)
     delay_time = upload_delay_time(data)
     season_id = upload_season_id(data)
@@ -397,7 +403,9 @@ def create_bilibili_upload_task(
         "youtube": {"enabled": False},
         "metadata": metadata,
     }
+    broker_task_id = str(uuid.uuid4())
     child = PublicationTask(
+        celery_task_id=broker_task_id,
         status="pending",
         current_step="queued",
         progress=0,
@@ -448,7 +456,7 @@ def create_bilibili_upload_task(
     response_payload = bilibili_upload_child_payload(child, upload=projection)
     child_snapshot = SimpleNamespace(
         id=str(child.id),
-        celery_task_id=None,
+        celery_task_id=broker_task_id,
         status="pending",
         current_step="queued",
         progress=0,
@@ -537,8 +545,29 @@ def bilibili_upload_execution_context(task_id):
 
 def enqueue_bilibili_upload_task(child):
     child_id = str(child.id)
+    broker_task_id = str(getattr(child, "celery_task_id", None) or "").strip()
+    if not broker_task_id:
+        broker_task_id = str(uuid.uuid4())
+        updated = (
+            PublicationTask.query
+            .filter(PublicationTask.id == child_id)
+            .update(
+                {PublicationTask.celery_task_id: broker_task_id},
+                synchronize_session=False,
+            )
+        )
+        if not updated:
+            db.session.rollback()
+            raise ValueError(f"B站上传任务不存在: {child_id}")
+        db.session.commit()
+        child.celery_task_id = broker_task_id
     try:
-        submission = dispatch_platform_publish("bilibili", child_id, retry=False)
+        submission = dispatch_platform_publish(
+            "bilibili",
+            child_id,
+            broker_task_id=broker_task_id,
+            retry=False,
+        )
     except Exception as exc:
         message = f"B站上传任务入队失败: {exc}"
         (
@@ -554,23 +583,105 @@ def enqueue_bilibili_upload_task(child):
         )
         db.session.commit()
         raise
-    updated = (
-        PublicationTask.query
-        .filter(PublicationTask.id == child_id)
-        .update(
-            {PublicationTask.celery_task_id: submission["celery_id"]},
-            synchronize_session=False,
+    actual_celery_id = str(submission.get("celery_id") or broker_task_id)
+    if actual_celery_id != broker_task_id:
+        updated = (
+            PublicationTask.query
+            .filter(PublicationTask.id == child_id)
+            .update(
+                {PublicationTask.celery_task_id: actual_celery_id},
+                synchronize_session=False,
+            )
         )
-    )
-    if not updated:
-        db.session.rollback()
-        raise ValueError(f"B站上传任务不存在: {child_id}")
+        if not updated:
+            db.session.rollback()
+            raise ValueError(f"B站上传任务不存在: {child_id}")
+        db.session.commit()
     response_payload = dict(getattr(child, "_bilibili_create_response_payload", None) or {})
-    response_payload["celery_id"] = submission["celery_id"]
-    db.session.commit()
-    child.celery_task_id = submission["celery_id"]
+    response_payload["celery_id"] = actual_celery_id
+    child.celery_task_id = actual_celery_id
     child._bilibili_enqueue_response_payload = response_payload
     return child
+
+
+def bilibili_upload_action_row(
+    task_id,
+    *,
+    parent_task_id=None,
+    parent_feature=None,
+    source_label=None,
+    include_result=False,
+    for_update=False,
+):
+    """Load one upload child through the narrow task/projection contract."""
+
+    task_columns = [
+        PublicationTask.id,
+        PublicationTask.celery_task_id,
+        PublicationTask.status,
+        PublicationTask.current_step,
+        PublicationTask.progress,
+        PublicationTask.error_message,
+        PublicationTask.feature,
+        PublicationTask.parent_task_id,
+        PublicationTask.parent_feature,
+        PublicationTask.created_at,
+        PublicationTask.updated_at,
+        PublicationTask.completed_at,
+    ]
+    if include_result:
+        task_columns.append(PublicationTask.result)
+    upload_columns = [
+        PublicationTaskBilibiliUpload.task_id,
+        PublicationTaskBilibiliUpload.parent_task_id,
+        PublicationTaskBilibiliUpload.parent_feature,
+        PublicationTaskBilibiliUpload.source_label,
+        PublicationTaskBilibiliUpload.video_key,
+        PublicationTaskBilibiliUpload.cover_key,
+        PublicationTaskBilibiliUpload.title,
+        PublicationTaskBilibiliUpload.credential_id,
+        PublicationTaskBilibiliUpload.credential_name,
+        PublicationTaskBilibiliUpload.charging_enabled,
+        PublicationTaskBilibiliUpload.preview_start_time,
+        PublicationTaskBilibiliUpload.preview_end_time,
+        PublicationTaskBilibiliUpload.upower_level_id,
+        PublicationTaskBilibiliUpload.upower_unit_price,
+        PublicationTaskBilibiliUpload.upower_mode,
+        PublicationTaskBilibiliUpload.member_first_exp_time,
+        PublicationTaskBilibiliUpload.delay_time,
+        PublicationTaskBilibiliUpload.season_id,
+        PublicationTaskBilibiliUpload.aid,
+        PublicationTaskBilibiliUpload.bvid,
+        PublicationTaskBilibiliUpload.canceled_at,
+        PublicationTaskBilibiliUpload.cancel_reason,
+    ]
+    query = (
+        db.session.query(PublicationTask, PublicationTaskBilibiliUpload)
+        .join(
+            PublicationTaskBilibiliUpload,
+            PublicationTaskBilibiliUpload.task_id == PublicationTask.id,
+        )
+        .options(
+            load_only(*task_columns),
+            load_only(*upload_columns),
+        )
+        .filter(PublicationTask.id == str(task_id))
+    )
+    if parent_task_id:
+        query = query.filter(
+            PublicationTaskBilibiliUpload.parent_task_id == str(parent_task_id)
+        )
+    if parent_feature:
+        query = query.filter(
+            PublicationTaskBilibiliUpload.parent_feature == parent_feature
+        )
+    if source_label:
+        query = query.filter(
+            PublicationTaskBilibiliUpload.source_label == source_label
+        )
+    if for_update:
+        query = query.with_for_update()
+    return query.one_or_none()
 
 
 def retry_bilibili_upload_child(
@@ -592,22 +703,14 @@ def retry_bilibili_upload_child(
     if not task_key:
         raise ValueError("B站上传任务 ID 不能为空")
 
-    query = (
-        db.session.query(PublicationTask, PublicationTaskBilibiliUpload)
-        .join(
-            PublicationTaskBilibiliUpload,
-            PublicationTaskBilibiliUpload.task_id == PublicationTask.id,
-        )
-        .filter(PublicationTask.id == task_key)
+    row = bilibili_upload_action_row(
+        task_key,
+        parent_task_id=parent_task_id,
+        parent_feature=parent_feature,
+        source_label=source_label,
+        include_result=True,
+        for_update=True,
     )
-    if parent_task_id:
-        query = query.filter(PublicationTaskBilibiliUpload.parent_task_id == str(parent_task_id))
-    if parent_feature:
-        query = query.filter(PublicationTaskBilibiliUpload.parent_feature == parent_feature)
-    if source_label:
-        query = query.filter(PublicationTaskBilibiliUpload.source_label == source_label)
-
-    row = query.with_for_update().one_or_none()
     if row is None:
         raise LookupError("B站上传任务不存在")
     task, upload = row
@@ -644,7 +747,22 @@ def retry_bilibili_upload_child(
     task.completed_at = None
     task.celery_task_id = new_celery_id
     task.result = result
-    flag_modified(task, "result")
+    response_payload = bilibili_upload_child_payload(
+        task,
+        source_label=source_label,
+        upload=upload,
+    )
+    task_snapshot = SimpleNamespace(
+        id=str(task.id),
+        celery_task_id=new_celery_id,
+        status="pending",
+        current_step="queued",
+        progress=0,
+        error_message=None,
+        created_at=task.created_at,
+        completed_at=None,
+        _bilibili_retry_response_payload=response_payload,
+    )
     db.session.commit()
 
     try:
@@ -676,7 +794,6 @@ def retry_bilibili_upload_child(
 
     actual_celery_id = str(submission.get("celery_id") or new_celery_id)
     if actual_celery_id != new_celery_id:
-        task.celery_task_id = actual_celery_id
         (
             PublicationTask.query
             .filter(PublicationTask.id == task_key)
@@ -690,7 +807,9 @@ def retry_bilibili_upload_child(
         )
         db.session.commit()
 
-    return task
+    task_snapshot.celery_task_id = actual_celery_id
+    task_snapshot._bilibili_retry_response_payload["celery_id"] = actual_celery_id
+    return task_snapshot
 
 
 def bilibili_upload_children(parent_id, *, parent_feature=None, source_label=None, limit=20):
@@ -783,20 +902,20 @@ def bilibili_upload_child_payload(task, *, source_label=None, upload=None):
     }
 
 
-def cancel_bilibili_upload_child(task):
+def cancel_bilibili_upload_child(task, *, upload=None):
+    task_id = str(task.id)
     status = str(task.status or "").lower()
     if status in {"completed", "failed", "canceled"}:
         return True, "上传任务已结束"
     if status not in {"pending", "queued"}:
         return False, "上传任务已开始运行，暂不支持从这里取消"
 
-    if task.celery_task_id:
-        celery_app.control.revoke(task.celery_task_id, terminate=False)
-
     now = datetime.utcnow()
-    upload = PublicationTaskBilibiliUpload.query.filter_by(task_id=task.id).one_or_none()
+    if upload is None:
+        upload = PublicationTaskBilibiliUpload.query.filter_by(task_id=task.id).one_or_none()
     if upload is None:
         return False, "B站上传任务结构化记录不存在"
+    celery_task_id = str(task.celery_task_id or "").strip()
     upload.canceled_at = now
     upload.cancel_reason = "user_canceled_queued_upload"
     task.status = "canceled"
@@ -805,8 +924,17 @@ def cancel_bilibili_upload_child(task):
     task.error_message = None
     task.completed_at = now
     response_payload = bilibili_upload_child_payload(task, upload=upload)
-    db.session.commit()
     task._bilibili_cancel_response_payload = response_payload
+    db.session.commit()
+    if celery_task_id:
+        revoked = revoke_celery_task_after_db_commit(
+            celery_task_id,
+            operation=f"bilibili upload cancel revoke task={task_id}",
+            business_task_id=task_id,
+            log=logger,
+        )
+        if not revoked:
+            return True, "已取消 B站上传排队任务；broker 撤回失败，终态门禁将拦截旧消息"
     return True, "已取消 B站上传排队任务"
 
 

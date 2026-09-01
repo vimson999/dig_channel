@@ -666,6 +666,30 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertIn("内资闭门会 / 特斯拉Optimus量产", payload["title_6"])
         self.assertIn("内资闭门会 | Optimus V3量产不延", payload["title_7"])
 
+    def test_api_ds_extract_prefers_authoritative_plan_over_raw_heading_noise(self):
+        raw_title_2 = "AI硬件需求远未结束：存储、光、能源电力成确定性方向"
+        raw_title_7 = "内资闭门会 | AI赚钱效应已现：云厂订单保障收入 / 2026-08-19"
+        plan_title_7 = "内资闭门会 | AI赚钱效应已现：云厂订单保障收入 | 2026-08-19"
+        payload = _api_ds_extract_payload({
+            "source": {
+                "response_text": (
+                    "1. 标题（主版本，含具体对象与投资影响）\nAI商业化拐点确认\n"
+                    f"2. 不同角度标题版本（换一个核心变量）\n{raw_title_2}\n"
+                    "4. 最精华片段\n起点：00:03:57.140\n终点：00:52:33.540\n"
+                    f"7. 标题优化另一版本（内资闭门会 | 格式）\n{raw_title_7}"
+                )
+            },
+            "plan": {
+                "title_options": ["AI商业化拐点确认", raw_title_2],
+                "audio": {"start_seconds": 237.14, "end_seconds": 3153.54},
+                "ciketc_video_title": plan_title_7,
+            },
+        })
+
+        self.assertEqual(payload["title_2"], raw_title_2)
+        self.assertEqual(payload["title_7"], plan_title_7)
+        self.assertNotIn("格式）", payload["title_7"])
+
     def test_api_ds_extract_ignores_date_as_clip_pair(self):
         payload = _api_ds_extract_payload({
             "source": {"response_text": "6. 内资闭门会 / 特斯拉V3量产确认 / 2026-07-07"},
@@ -857,6 +881,91 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertEqual(
             plan["ciketc_video_title"],
             "内资闭门会 | 华为涛哲学 | 产业链话语权之战 | 超级通胀赛道 | 2026-07-07",
+        )
+
+    def test_extract_audio_range_accepts_origin_destination_labels(self):
+        response = (
+            "4. 最精华音频片段\n"
+            "起点：00:03:57.140（讨论AI商业化）\n"
+            "终点：00:52:33.540（总结投资方向）"
+        )
+
+        self.assertEqual(extract_audio_range(response), (237.14, 3153.54))
+
+    def test_direct_ds_response_skips_descriptive_title_headings(self):
+        response = (
+            "1. 标题（主版本，单一主重点，含具体对象、最新事实/预期差、投资影响）\n"
+            "AI商业化拐点确认：云厂订单与收入高增，企业级AI需求持续\n"
+            "2. 不同角度标题版本（换一个核心变量，仍以二级市场最关心变量为锚）\n"
+            "AI赚钱效应已现：云厂在手订单保障未来收入\n"
+            "4. 最精华片段\n"
+            "开始时间戳：00:03:57.140\n"
+            "结束时间戳：00:52:33.540\n"
+            "6. 标题优化（内资闭门会 / 格式）\n"
+            "内资闭门会 / AI商业化拐点确认 / 云厂订单高增 / 企业级AI需求持续 / 2026-08-19\n"
+            "7. 标题优化另一版本（内资闭门会 | 格式）\n"
+            "内资闭门会 | AI赚钱效应已现：云厂订单保障收入，能源电力成下一棋眼 / 2026-08-19"
+        )
+
+        with patch("services.mp3_video_workflow.deepseek_plan", return_value={}):
+            plan = plan_from_direct_ds_response(response, audio={"filename": "demo.mp3", "duration_seconds": 3504})
+        _validate_strict_ds_plan(plan)
+
+        self.assertEqual(plan["title"], "AI赚钱效应已现：云厂在手订单保障未来收入")
+        self.assertNotIn("标题版本", plan["title"])
+        self.assertEqual(
+            plan["xiaojunjun_video_title"],
+            "内资闭门会 / AI商业化拐点确认 / 云厂订单高增 / 企业级AI需求持续 / 2026-08-19",
+        )
+        self.assertEqual(
+            plan["ciketc_video_title"],
+            "内资闭门会 | AI赚钱效应已现：云厂订单保障收入，能源电力成下一棋眼 | 2026-08-19",
+        )
+
+    def test_direct_ds_response_maps_unnumbered_descriptive_headings(self):
+        response = (
+            "标题（主版本，单一主重点，含具体对象、最新事实/预期差、投资影响）\n"
+            "AI算力爆发驱动MPO/FAU量价齐升：光模块三倍增长拉动MPO需求翻倍\n"
+            "（说明：聚焦MPO/FAU需求爆发叠加小型化涨价。）\n\n"
+            "不同角度标题版本（换一个核心变量，仍以二级市场最关心变量为锚）\n"
+            "AI集群化推动FAU价值跃升：36芯DFU单价提升10倍\n"
+            "（说明：从FAU场景切换和单价提升角度切入。）\n\n"
+            "精简短标题（保留最有辨识度的对象和核心变化）\n"
+            "MPO/FAU需求爆发叠加涨价\n\n"
+            "黄金片段（最精华连续区间）\n"
+            "起点：00:01:12.880（开始讨论MPO和FAU）\n"
+            "终点：00:12:48.860（以上是全部内容）\n"
+            "说明：完整覆盖量升和价格提升逻辑。\n\n"
+            "金句（代表性语句，非完整列表）\n"
+            "MPO连接器的使用数量会大幅增加。\n\n"
+            "标题优化（内资闭门会 / 格式）\n"
+            "内资闭门会 / MPO需求翻倍 / 小型连接器涨价 / 三家标的量价弹性 / 2026-08-26\n\n"
+            "标题优化另一版本（内资闭门会 | 格式）\n"
+            "内资闭门会 | MPO量价齐升 | 光模块三倍增长 | 三家标的受益 | 2026-08-26"
+        )
+
+        with patch(
+            "services.mp3_video_workflow.deepseek_plan",
+            side_effect=Mp3VideoWorkflowError("DeepSeek 规划失败: HTTP 402"),
+        ):
+            plan = plan_from_direct_ds_response(
+                response,
+                audio={"filename": "demo.mp3", "duration_seconds": 827.446893},
+            )
+
+        self.assertEqual(
+            plan["title"],
+            "AI集群化推动FAU价值跃升：36芯DFU单价提升10倍",
+        )
+        self.assertEqual(plan["audio"]["start_seconds"], 72.88)
+        self.assertEqual(plan["audio"]["end_seconds"], 768.86)
+        self.assertEqual(
+            plan["xiaojunjun_video_title"],
+            "内资闭门会 / MPO需求翻倍 / 小型连接器涨价 / 三家标的量价弹性 / 2026-08-26",
+        )
+        self.assertEqual(
+            plan["ciketc_video_title"],
+            "内资闭门会 | MPO量价齐升 | 光模块三倍增长 | 三家标的受益 | 2026-08-26",
         )
 
     def test_direct_ds_response_prefers_deepseek_structured_plan(self):

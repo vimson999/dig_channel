@@ -3,6 +3,7 @@ import io
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -249,6 +250,24 @@ class DbPerformanceLogAnalyzerTest(unittest.TestCase):
         self.assertTrue(analyzer.is_proxy_tun_source("198.18.0.1"))
         self.assertEqual("100.96.3.12", analyzer.pgbouncer_server_source(tailscale))
         self.assertFalse(analyzer.is_proxy_tun_source("100.96.3.12"))
+
+    def test_quantifies_pgbouncer_connection_churn_per_window_hour(self):
+        analyzer = load_analyzer()
+        since = datetime(2026, 8, 29, 10, 0, 0)
+        until = datetime(2026, 8, 29, 11, 0, 0)
+
+        summary = analyzer.pgbouncer_connection_churn(
+            [
+                datetime(2026, 8, 29, 10, 0, 0),
+                datetime(2026, 8, 29, 10, 30, 0),
+            ],
+            since=since,
+            until=until,
+        )
+
+        self.assertEqual(2, summary["connections"])
+        self.assertEqual(1.0, summary["window_hours"])
+        self.assertEqual(2.0, summary["connections_per_window_hour"])
 
     def test_reports_pgbouncer_route_fallback_and_failure_categories(self):
         analyzer = load_analyzer()

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import fitz
 from flask import Flask
+from sqlalchemy import event
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -234,6 +235,72 @@ class PdfMergeWorkflowApiTest(unittest.TestCase):
         self.assertEqual(refreshed.params[FEATURE_NAME]["sources"], frozen_sources)
         enqueue.assert_called_once()
 
+    def test_list_jobs_uses_one_lightweight_query_and_preserves_public_summary(self):
+        task = self._new_task(
+            status="completed",
+            result={
+                "source_count": 2,
+                "logs": [
+                    {
+                        "stage": "completed",
+                        "message": "PDF 合并完成",
+                        "progress": 100,
+                        "at": "2026-08-31T02:57:00Z",
+                    }
+                ],
+                "output": {
+                    "asset_id": "asset-1",
+                    "asset_ref": "pipeline:asset-1",
+                    "filename": "merged-output.pdf",
+                    "bytes": 2048,
+                    "page_count": 7,
+                    "sha256": "c" * 64,
+                    "reused_asset": True,
+                },
+                "unrelated_audit": {"raw": "x" * 10000},
+            },
+        )
+        task_id = str(task.id)
+        db.session.remove()
+        statements = []
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            statements.append(" ".join(statement.lower().split()))
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            with self.app.test_request_context(
+                "/api/pdf-merge-workflows/jobs?page=1&per_page=30"
+            ):
+                response = pdf_merge_api.list_jobs.__wrapped__(SimpleNamespace(id="owner"))
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(1, payload["data"]["pagination"]["total"])
+        item = payload["data"]["items"][0]
+        self.assertEqual(task_id, item["job_id"])
+        self.assertEqual("历史 PDF 合集", item["title"])
+        self.assertEqual(2, item["source_count"])
+        self.assertEqual(["one.pdf", "two.pdf"], [source["filename"] for source in item["sources"]])
+        self.assertEqual(7, item["output"]["page_count"])
+        self.assertTrue(item["output"]["reused_asset"])
+        self.assertEqual("PDF 合并完成", item["logs"][0]["message"])
+        self.assertNotIn("unrelated_audit", item)
+
+        task_selects = [
+            statement
+            for statement in statements
+            if statement.startswith("select") and "from publication_tasks" in statement
+        ]
+        self.assertEqual(1, len(task_selects), task_selects)
+        statement = task_selects[0]
+        self.assertNotIn("publication_tasks.params as", statement)
+        self.assertNotIn("publication_tasks.result as", statement)
+        self.assertNotIn("publication_tasks.report_audio_", statement)
+        self.assertIn("over (", statement)
+
     def test_download_only_serves_completed_outputs_to_the_owner(self):
         asset = self._pipeline_asset("MERGED OUTPUT")
         task = self._new_task(
@@ -257,10 +324,13 @@ class PdfMergeWorkflowApiTest(unittest.TestCase):
 
         with self.app.test_request_context(f"/api/pdf-merge-workflows/jobs/{task.id}/download"):
             response = pdf_merge_api.download_job.__wrapped__(owner, str(task.id))
-            response.direct_passthrough = False
-            self.assertEqual(response.status_code, 200)
-            with fitz.open(stream=response.get_data(), filetype="pdf") as document:
-                self.assertIn("MERGED OUTPUT", document[0].get_text())
+            try:
+                response.direct_passthrough = False
+                self.assertEqual(response.status_code, 200)
+                with fitz.open(stream=response.get_data(), filetype="pdf") as document:
+                    self.assertIn("MERGED OUTPUT", document[0].get_text())
+            finally:
+                response.close()
 
     def test_api_submission_runs_to_a_reusable_asset_and_owner_download(self):
         existing = self._pipeline_asset("SYSTEM ASSET FIRST")
@@ -294,10 +364,13 @@ class PdfMergeWorkflowApiTest(unittest.TestCase):
 
         with self.app.test_request_context(f"/api/pdf-merge-workflows/jobs/{task_id}/download"):
             download = pdf_merge_api.download_job.__wrapped__(owner, task_id)
-            download.direct_passthrough = False
-            self.assertEqual(download.status_code, 200)
-            with fitz.open(stream=download.get_data(), filetype="pdf") as merged:
-                self.assertEqual(merged.page_count, 2)
+            try:
+                download.direct_passthrough = False
+                self.assertEqual(download.status_code, 200)
+                with fitz.open(stream=download.get_data(), filetype="pdf") as merged:
+                    self.assertEqual(merged.page_count, 2)
+            finally:
+                download.close()
 
 
 if __name__ == "__main__":

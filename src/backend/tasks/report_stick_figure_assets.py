@@ -21,6 +21,7 @@ from services.report_stick_figure_assets import (
 )
 from services.report_pdf_evidence import evidence_visual_for_segment, render_claim_screenshot
 from services.report_visual_scheme import visual_scheme
+from services.runtime_guard import revoke_celery_tasks_after_db_commit
 
 
 logger = logging.getLogger("REPORT_STICK_FIGURE_ASSETS_TASK")
@@ -443,7 +444,14 @@ def _cancel_workflow_images_for_quota(
     }, synchronize_session=False)
     db.session.commit()
     if celery_ids:
-        celery_app.control.revoke(celery_ids, terminate=True, signal="SIGTERM")
+        revoke_celery_tasks_after_db_commit(
+            celery_ids,
+            terminate=True,
+            signal="SIGTERM",
+            operation=f"stick figure image quota sibling revoke workflow={workflow_task_id}",
+            business_task_id=str(workflow_task_id),
+            log=logger,
+        )
 
 
 def _mark_task_failed(task_id: str, error: str) -> None:

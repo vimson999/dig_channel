@@ -16,24 +16,45 @@
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
-| 2026-08-25 | [MP3 详情页隐藏发布面板扇出凭据与上传记录请求](2026-08-25-mp3-detail-hidden-publish-panel-request-fanout.md) | MP3 详情 / 平台凭据 / 隐藏发布面板 | RUNTIME_REPLACED/OBSERVING；静态资源已替换，待真实流量窗口 |
+| 2026-09-01 | [每日数据库性能与错误巡检](reviews/2026-09-01-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | 两条 P0 根因已改码并最终安全替换；通知积压自然排空，图片待自然提交与完整后窗 |
+| 2026-09-01 | [文案到成片图片批量提交逐场景重复宽读与提交](2026-09-01-script-video-image-submit-query-amplification.md) | 文案到成片图片 / publication_tasks / broker | RUNTIME_REPLACED/OBSERVING；定向查询预算与故障合同通过，待自然提交和完整后窗 |
+| 2026-09-01 | [长驻通知 Worker 混用新旧模块导致导入失败风暴](2026-09-01-workflow-notification-mixed-version-import-storm.md) | workflow notification / Celery / app factory / outbox | RUNTIME_REPLACED/OBSERVING；最终进程真实排空 140 条，待完整后窗 |
+| 2026-08-31 | [每日数据库性能与错误巡检](reviews/2026-08-31-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / 后台任务 | 固定窗改善但真实 query timeout 与 Tailscale 30% 丢包复发；OPEN/OBSERVING |
+| 2026-08-31 | [文案到成片详情轮询重复加载子任务与父任务大 JSON](2026-08-31-script-video-detail-polling-n-plus-one.md) | 文案到成片 / publication_tasks / PgBouncer / 页面轮询 | CODE_CHANGED/AWAITING_RUNTIME；两层根因修复已通过定向合同，待最终全量、运行替换和后续窗口 |
+| 2026-08-31 | [平台发布重试、取消与后台撤销跨数据库事务等待](2026-08-31-platform-publish-retry-cancel-session-lifecycle.md) | B站/抖音/视频号 / 工作流取消 / Celery control / Session | RUNTIME_REPLACED/OBSERVING；全量 revoke 守卫、304 文件 AST 门禁、1565 项完整回归与 PID4274 安全重启通过，待自然动作与 24h 后窗 |
+| 2026-08-31 | [本机 ZSXQ 桥接拒绝超大表单时返回连接重置](2026-08-31-frontend-oversized-form-connection-reset.md) | frontend bridge / HTTP 413 / loopback | RUNTIME_E2E/OBSERVING；真实 HTTP 1/1 与 bridge 20/20 通过，待后续完整窗口 |
+| 2026-08-31 | [报告音频 B站上传提交宽读父任务并跨文件探测持有 Session](2026-08-31-report-audio-bilibili-upload-wide-session-hold.md) | 报告音频 B站上传 / publication_tasks / Session / 文件 I/O | RUNTIME_REPLACED/OBSERVING；代码与 worker 已加载，待自然成功提交和完整 24h 后窗 |
+| 2026-08-31 | [MP3 B站上传提交宽读父任务并在 broker 后二次提交](2026-08-31-mp3-bilibili-upload-wide-parent-double-commit.md) | MP3 B站上传 / publication_tasks / Session / broker | RUNTIME_REPLACED/OBSERVING；代码与 worker 已加载，待自然成功提交和完整 24h 后窗 |
+| 2026-08-31 | [PDF 合并任务列表宽读与终态轮询放大数据库网络长尾](2026-08-31-pdf-merge-list-wide-polling.md) | PDF 合并工作台 / publication_tasks / PgBouncer | RUNTIME_REPLACED/OBSERVING；真实 API 与终态浏览器短窗通过，待活动任务和完整 24h 后窗 |
+| 2026-08-31 | [MP3 从关键帧续跑完整视频在两次 commit 后重复整行回读](2026-08-31-mp3-continue-full-video-post-commit-reload.md) | MP3 continue/retry/regenerate / publication_tasks / broker | RUNTIME_REPLACED/OBSERVING；安全重启完成，待自然入口与 24h 后窗 |
+| 2026-08-31 | [MP3 视觉素材重生成跨浏览器渲染持有 Session 并提交后整行回读](2026-08-31-mp3-artifact-regeneration-session-hold.md) | MP3 视觉素材 / Session / publication_tasks / PgBouncer | RUNTIME_REPLACED/OBSERVING；两次自然成功最大耗时较旧样本下降 80.9%，待 24h 后窗 |
+| 2026-08-31 | [内容清洗在数据库重试时删除已完成工作区并整批重做](2026-08-31-content-pipeline-clean-retry-workspace-reset.md) | PDF/音频清洗 / Celery retry / durable checkpoint | RUNTIME_REPLACED/OBSERVING；新 worker ready，待自然 DB retry 后窗 |
+| 2026-08-31 | [数据表页面先全量读取再用 Python 分页](2026-08-31-data-table-python-pagination-overfetch.md) | 频道数据表 / channel_data / SQL 分页 | RUNTIME_REPLACED/OBSERVING；真实 API 490 行、热态 1.02 秒，待 24h 旧指纹归零 |
+| 2026-08-29 | [MP3 音频素材目录从失效附件候选反复扫描并放大远端往返](2026-08-29-mp3-audio-asset-stale-candidate-scan.md) | MP3 audio catalog / canonical source / PgBouncer | RUNTIME_REPLACED/OBSERVING；真实冷/暖/快速输入已验收，待完整 24 小时窗口 |
+| 2026-08-29 | [MP3 内容流水线资产引用截断导致历史编排不可见](2026-08-29-mp3-pipeline-source-key-truncation.md) | MP3 source identity / workflow-stats / publication_tasks | RUNTIME_REPLACED/OBSERVING；历史真实页已恢复，待自然新投递与完整窗口 |
+| 2026-08-29 | [知识星球发布状态同步超时污染 Session 并丢失完成通知](2026-08-29-zsxq-publish-status-timeout-poisoned-session.md) | ZSXQ publish / Session / notification | RUNTIME_REPLACED/AWAITING_REAL_TASK_ACCEPTANCE；新 worker ready，待真实发布验收 |
+| 2026-08-29 | [MP3 音频素材搜索在输入法组合期间并发叠加](2026-08-29-mp3-audio-search-ime-request-overlap.md) | MP3 audio assets / IME / request single-flight | RUNTIME_REPLACED/OBSERVING；真实快速输入已无重叠，待 native IME 与完整窗口 |
+| 2026-08-28 | [MP3 编排历史轮询在隐藏页和慢请求时继续触发](2026-08-28-mp3-history-polling-overlap.md) | MP3 编排列表 / Page Visibility / PgBouncer | RUNTIME_REPLACED/OBSERVING；静态资源已替换，待真实隐藏页与慢请求窗口 |
+| 2026-08-27 | [PDF 目录把“已批量确认不存在”误当成“尚未查询”并逐项补查](2026-08-27-pdf-canonical-miss-n-plus-one.md) | 研报音频 / 基础文案 / Top10 / PDF canonical asset | RUNTIME_REPLACED/OBSERVING；真实 API 已验收，待完整窗口确认不复发 |
+| 2026-08-26 | [MP3 手动 DS 的“起点/终点”被严格规划误拒绝](2026-08-26-mp3-direct-ds-origin-destination-parser-rejection.md) | MP3 视频编排 / 手动 DS / 时间轴与标题解析 | RUNTIME_REPLACED/OBSERVING；三条现场任务已越过原失败点，第三条已完成横竖成片，待后续窗口 |
+| 2026-08-25 | [MP3 详情页隐藏发布面板扇出凭据与上传记录请求](2026-08-25-mp3-detail-hidden-publish-panel-request-fanout.md) | MP3 详情 / 平台凭据 / 隐藏发布面板 | RUNTIME_REPLACED/OBSERVING；08-26 第二 owner 竞态已替换，待真实流量窗口 |
 | 2026-08-20 | [研报基础文案物料页在后台持续刷新 Celery 状态](2026-08-20-report-script-material-hidden-worker-polling.md) | 研报基础文案物料台 / Celery / Page Visibility | CLOSED；后续完整窗口无隐藏态分钟级序列 |
-| 2026-08-19 | [B站情报双调度器与未变化 JSON 重写放大数据库](2026-08-19-bilibili-intelligence-duplicate-scheduler-write-amplification.md) | Bilibili intelligence / scheduler / JSON 写放大 / 索引 | RUNTIME_REPLACED/OBSERVING；待完整窗口与人工索引维护 |
+| 2026-08-19 | [B站情报双调度器与未变化 JSON 重写放大数据库](2026-08-19-bilibili-intelligence-duplicate-scheduler-write-amplification.md) | Bilibili intelligence / scheduler / JSON 写放大 / 索引 | RUNTIME_REPLACED/OBSERVING；09:21 真实 6/6 同步通过，待完整窗口；重复索引 DDL 未执行 |
 | 2026-08-18 | [视频编辑器后台标签页持续轮询 Celery 与 Publisher](2026-08-18-video-editor-hidden-polling.md) | 视频编辑器 / Celery / Publisher / Page Visibility | CODE_CHANGED/OBSERVING；待完整窗口 hidden 验收 |
 | 2026-08-18 | [Watchdog 成功修复分支未归还数据库 Session](2026-08-18-watchdog-success-session-hold.md) | Celery Watchdog / Session / publication_tasks | RUNTIME_REPLACED/OBSERVING；新进程已验收，待完整窗口 |
-| 2026-08-18 | [ZSXQ Insights 冷聚合在查询后继续持有 Session](2026-08-18-zsxq-insights-session-held-after-read.md) | 生财情报台 / PgBouncer / Session | Session 边界已替换；远端网络长尾 OPEN |
+| 2026-08-18 | [ZSXQ Insights 冷聚合在查询后继续持有 Session](2026-08-18-zsxq-insights-session-held-after-read.md) | 生财情报台 / PgBouncer / Session | Session 边界已替换；2026-08-31 五冷 key P95 9.475 秒，网络长尾 OPEN/REPEATED |
 | 2026-08-18 | [DB 巡检把托管日志中的 SQL 失败误分为临时诊断](2026-08-18-managed-sql-error-source-misclassified.md) | DB 分析器 / scheduler / PgBouncer | CODE_CHANGED/OBSERVING；回放已通过 |
 | 2026-08-16 | [后台状态页持续轮询并放大 API 与数据库往返](2026-08-16-hidden-status-pages-unbounded-polling.md) | Celery Monitor / ZSXQ 系统同步 / Page Visibility / PgBouncer | CODE_CHANGED/OBSERVING；真实页面已加载，待完整窗口验收 |
 | 2026-08-15 | [DB 巡检未识别 PgBouncer 路由回退与等待错误](2026-08-15-db-audit-missed-pgbouncer-route-fallback.md) | DB 巡检 / PgBouncer / Tailscale / 代理 TUN | 分析器已修复并回放验证；网络根因 OPEN/OBSERVING |
 | 2026-08-14 | [研报音频 DeepSeek 结构化跨外部调用持有数据库 Session](2026-08-14-report-audio-deepseek-session-hold.md) | report audio / DeepSeek / Session / PgBouncer | RUNTIME_REPLACED/OPEN；待真实任务和完整窗口验收 |
-| 2026-08-13 | [工作流通知 SMTP 断连触发同步重试风暴](2026-08-13-workflow-notification-smtp-retry-storm.md) | workflow_notify / SMTP / Celery 重试 | RUNTIME_REPLACED/OPEN；单预算已加载，待真实失败与最终送达 |
+| 2026-08-13 | [工作流通知 SMTP 断连触发同步重试风暴](2026-08-13-workflow-notification-smtp-retry-storm.md) | workflow_notify / SMTP / Celery 重试 | RUNTIME_REPLACED/OBSERVING；完整 24h 37/37 成功，待 provider 故障恢复与邮箱回执 |
 | 2026-08-12 | [ZSXQ 自动发布预览跨远程上传持有数据库 Session](2026-08-12-zsxq-auto-publish-preview-session-hold.md) | ZSXQ 自动发布 / 内容流水线 / 七牛 / Session | CLOSED；29 个真实批次和下一完整窗口确认未复发 |
 | 2026-08-11 | [Celery 状态接口跨 broker inspect 持有鉴权 Session](2026-08-11-celery-status-auth-session-held-across-inspect.md) | Celery 状态页 / 鉴权 / PgBouncer / Session | 并发强刷单飞已运行替换；单次 17.4 秒仍 OBSERVING |
 | 2026-08-10 | [研报完整视频编排需要人工恢复与跨页面判断](2026-08-10-report-production-orchestration-manual-recovery.md) | report audio / Publisher / 方案三 / runtime guard / 工作台 | CODE_MODIFIED，等待新三 PDF 批次运行验收 |
 | 2026-08-10 | [失败 SQL 耗时被错记为非 SQL Session 持有](2026-08-10-failed-sql-lifecycle-duration-misclassified.md) | database logger / Session 生命周期 / PgBouncer 归因 | 新代码已加载，等待真实失败样本校准，OBSERVING |
 | 2026-08-10 | [Report audio finalization 周期 JSON 扫描与详情 N+1](2026-08-10-report-audio-finalization-json-polling-n-plus-one.md) | report audio / publication_tasks / watchdog / 详情列表 | 2026-08-14 单任务路径复发已重新修复并完成真实 API 验收，OBSERVING |
 | 2026-08-09 | [ZSXQ Insights 冷查询把全量正文跨网络搬到应用](2026-08-09-zsxq-insights-cold-fulltext-transfer.md) | 生财 Insights / zsxq_topics / 网络传输 | 新代码已部署并完成真实冷/热 API 验收，OBSERVING |
-| 2026-08-08 | [PostgreSQL 长连接经代理虚拟隧道反复黑洞超时](2026-08-08-postgres-tunneled-route-query-timeout.md) | 全站数据库链路 / PgBouncer / 本机代理 TUN/Tailscale | 两轮隔离后仍有应用 timeout 与 server crash，OPEN/OBSERVING |
+| 2026-08-08 | [PostgreSQL 长连接经代理虚拟隧道反复黑洞超时](2026-08-08-postgres-tunneled-route-query-timeout.md) | 全站数据库链路 / PgBouncer / 本机代理 TUN/Tailscale | 2026-08-31 真实 20 秒 query timeout、Tailscale 30% 丢包；OPEN/REPEATED |
 | 2026-08-07 | [分镜提交成功后断连被误写为失败](2026-08-07-storyboard-ambiguous-commit-false-failure.md) | 火柴人视觉视频 / PostgreSQL / 父子任务状态机 | 指定任务端到端验收完成，RUNTIME_REPLACED/OBSERVING |
 | 2026-08-07 | [火柴人分镜轮询误回读任务大字段并放大网络超时](2026-08-07-visual-storyboard-wide-polling-network-timeout.md) | 火柴人视觉视频详情 / publication_tasks / PgBouncer | 新后端与真实 API 已验收，待完整窗口确认不复发 |
 | 2026-08-06 | [分镜多轮回复丢失前轮内容并误报提示词改写](2026-08-06-visual-plan-multiturn-prompt-loss.md) | 火柴人视觉视频 / 标题与正文分镜 / Gemini / DS | 代码已修复，待 worker 重载及真实任务验收 |
@@ -98,7 +119,7 @@
 | 2026-07-21 | [重启安全门无条件切换公网数据库导致无法验收](2026-07-21-restart-guard-unconditional-direct-db.md) | 完整重启 / 活动任务门禁 / PostgreSQL / PgBouncer | 代码与双分支测试已修，待真实安全重启验收 |
 | 2026-07-21 | [媒体宽字段被批量 JSON 更新绕过并持续漂移](2026-07-21-media-projection-bulk-update-drift.md) | report audio / publisher / publication_tasks / 启动门禁 | 入库已修、现场已回填，待新进程真实任务验收 |
 | 2026-07-21 | [ZSXQ 同步逐条点查放大远端数据库抖动](2026-07-21-zsxq-sync-point-query-amplification.md) | ZSXQ 同步 / 附件入库与下载 / PostgreSQL | 第 138 轮页面级真实负载验收通过 |
-| 2026-07-21 | [Watchdog 修复事务跨外部检查与轮询重叠](2026-07-21-watchdog-repair-idle-transaction-and-poll-overlap.md) | publisher watchdog / PostgreSQL / Celery / Redis | 2026-08-01 第四次打开；processing/terminal cleanup 已修，待安全重启与真实窗口验收 |
+| 2026-07-21 | [Watchdog 修复事务跨外部检查与轮询重叠](2026-07-21-watchdog-repair-idle-transaction-and-poll-overlap.md) | watchdog / report-video 展示统计 / PostgreSQL / Celery / Redis | 2026-08-31 第五次复发；展示聚合已从自愈循环移除并加载 PID4810，连续 3 轮为 0，待 24h 与后续窗 |
 | 2026-07-19 | [MP3 双封皮标题版本被格式标题覆盖](2026-07-19-mp3-cover-copy-variants-collapsed.md) | mp3_video_workflow / DS 标题规划 / 横屏封皮 | 代码已修复并完成回归，待新任务运行态验收 |
 | 2026-07-19 | [Report audio pending 父任务不在孤儿修复范围](2026-07-19-report-audio-pending-orphan-not-repairable.md) | report_audio_workflow / watchdog / publication_tasks | 已修复并完成历史任务收口与新进程验收 |
 | 2026-07-19 | [内容清洗 processing 孤儿不在自动修复范围](2026-07-19-content-clean-processing-orphan-not-repairable.md) | Content Pipeline / watchdog / 重启安全门 / ZSXQ workflow | 已修复并完成现场恢复与重启验收 |

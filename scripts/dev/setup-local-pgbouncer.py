@@ -16,6 +16,7 @@ PID_PATH = RUNTIME_DIR / "pgbouncer.pid"
 
 LISTEN_HOST = os.environ.get("LOCAL_PGBOUNCER_HOST", "127.0.0.1")
 LISTEN_PORT = int(os.environ.get("LOCAL_PGBOUNCER_PORT", "6432"))
+SUPPORTED_SERVER_LIFETIMES = (300, 900, 1800)
 MIN_POOL_SIZE = max(6, int(os.environ.get("LOCAL_PGBOUNCER_MIN_POOL_SIZE", "6")))
 SERVER_IDLE_TIMEOUT = max(
     600,
@@ -23,8 +24,13 @@ SERVER_IDLE_TIMEOUT = max(
 )
 SERVER_LIFETIME = max(
     120,
-    int(os.environ.get("LOCAL_PGBOUNCER_SERVER_LIFETIME", "300")),
+    int(os.environ.get("LOCAL_PGBOUNCER_SERVER_LIFETIME", "1800")),
 )
+if SERVER_LIFETIME not in SUPPORTED_SERVER_LIFETIMES:
+    raise SystemExit(
+        "LOCAL_PGBOUNCER_SERVER_LIFETIME must be one of "
+        + ", ".join(str(item) for item in SUPPORTED_SERVER_LIFETIMES)
+    )
 QUERY_TIMEOUT = max(10, int(os.environ.get("LOCAL_PGBOUNCER_QUERY_TIMEOUT", "20")))
 
 

@@ -39,7 +39,10 @@ from services.report_audio_workflow import (
     clean_final_script_for_tts,
     review_prompt_for_pdf_evidence,
 )
-from services.runtime_guard import maybe_guarded_apply_async
+from services.runtime_guard import (
+    maybe_guarded_apply_async,
+    revoke_celery_task_after_db_commit,
+)
 from tasks.report_script_material_workflow import process_report_script_material_workflow_job
 from utils.auth_utils import require_login
 from utils.date_filters import submission_date_utc_range
@@ -600,8 +603,7 @@ def cancel_job(current_user, job_id):
     if task.status in TERMINAL_STATUSES:
         payload = _job_payload(task)
         return jsonify({"success": True, "message": "任务已结束", **payload, "data": payload})
-    if task.celery_task_id:
-        celery_app.control.revoke(task.celery_task_id, terminate=False)
+    celery_task_id = str(task.celery_task_id or "").strip()
     result = dict(task.result or {})
     result["canceled_at"] = datetime.utcnow().isoformat() + "Z"
     task.status = "canceled"
@@ -609,9 +611,17 @@ def cancel_job(current_user, job_id):
     task.completed_at = datetime.utcnow()
     task.result = result
     flag_modified(task, "result")
-    db.session.commit()
     payload = _job_payload(task)
-    return jsonify({"success": True, "message": "任务已取消", **payload, "data": payload})
+    db.session.commit()
+    revoked = revoke_celery_task_after_db_commit(
+        celery_task_id,
+        operation=f"report script material workflow cancel revoke task={task.id}",
+        business_task_id=str(task.id),
+    )
+    message = "任务已取消"
+    if celery_task_id and not revoked:
+        message += "；broker 撤回失败，终态门禁将拦截旧消息"
+    return jsonify({"success": True, "message": message, **payload, "data": payload})
 
 
 @report_script_material_workflow_bp.route("/jobs/<job_id>/retry", methods=["POST"])
@@ -1180,10 +1190,17 @@ def _pdf_meta_from_zsxq_attachment(asset_id):
     }
 
 
-def _pdf_asset_payload(row, *, canonical_asset=None):
-    asset = canonical_asset or _canonical_pdf_asset_by_source_path(
-        getattr(row, "local_path", None)
-    )
+_UNRESOLVED_CANONICAL_PDF_ASSET = object()
+
+
+def _pdf_asset_payload(
+    row,
+    *,
+    canonical_asset=_UNRESOLVED_CANONICAL_PDF_ASSET,
+):
+    asset = canonical_asset
+    if asset is _UNRESOLVED_CANONICAL_PDF_ASSET:
+        asset = _canonical_pdf_asset_by_source_path(getattr(row, "local_path", None))
     resolution = resolve_cleaned_asset(asset, media_type="pdf")
     path = resolution.path
     if resolution.state != "ready" or not path:
@@ -1224,6 +1241,7 @@ def _content_pipeline_source_label(source_mode):
         "sidebar": "侧边栏下载",
         "browser_sidebar": "侧边栏下载",
         "manual_download": "手动投递",
+        "web_upload": "网页投递",
     }.get(str(source_mode or "").strip().lower(), "内容流水线")
 
 

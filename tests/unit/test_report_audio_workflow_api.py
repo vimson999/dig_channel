@@ -22,6 +22,7 @@ from api import report_audio_workflow as report_audio_api  # noqa: E402
 from models import db  # noqa: E402
 from models.bilibili_publish import PublicationTaskBilibiliUpload  # noqa: E402
 from models.content_pipeline_asset import ContentPipelineAsset  # noqa: E402
+from models.platform_credential import PlatformCredentialAccount  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
 from models.zsxq_sync import ZsxqAttachment, ZsxqTopic  # noqa: E402
 from services.bilibili_publish import (  # noqa: E402
@@ -34,6 +35,10 @@ from services.bilibili_publish import (  # noqa: E402
 from services.browser_publish_jobs import (  # noqa: E402
     BrowserPublishJobSpec,
     browser_publish_children,
+    browser_publish_payload,
+    cancel_browser_publish_task,
+    create_browser_publish_task,
+    enqueue_browser_publish_task,
 )
 from services.report_audio_workflow import FEATURE_NAME  # noqa: E402
 
@@ -1412,20 +1417,30 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
                 title="测试投稿",
                 data={},
             )
+            preassigned_celery_id = child.celery_task_id
 
             with patch(
                 "tasks.publisher.run_bilibili_upload_only.apply_async",
-                return_value=SimpleNamespace(id="celery-upload"),
-            ):
+                side_effect=lambda *_args, **kwargs: SimpleNamespace(
+                    id=kwargs.get("task_id")
+                ),
+            ) as apply_async:
                 enqueue_bilibili_upload_task(child)
         finally:
             event.remove(db.engine, "before_cursor_execute", capture)
 
         response = child._bilibili_enqueue_response_payload
         self.assertEqual(response["task_id"], child.id)
-        self.assertEqual(response["celery_id"], "celery-upload")
+        self.assertEqual(response["celery_id"], preassigned_celery_id)
         self.assertEqual(response["status"], "queued")
         self.assertEqual(response["title"], "测试投稿")
+        self.assertTrue(preassigned_celery_id)
+        self.assertNotEqual(child.id, preassigned_celery_id)
+        self.assertEqual(child.celery_task_id, preassigned_celery_id)
+        self.assertEqual(
+            apply_async.call_args.kwargs.get("task_id"),
+            preassigned_celery_id,
+        )
         projection = PublicationTaskBilibiliUpload.query.filter_by(task_id=child.id).one()
         self.assertEqual(projection.parent_task_id, parent_id)
         self.assertEqual(projection.source_label, report_audio_api.BILIBILI_UPLOAD_SOURCE)
@@ -1435,6 +1450,299 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             if statement.lstrip().startswith("select") and "publication_tasks" in statement
         ]
         self.assertEqual(publication_selects, [])
+        publication_updates = [
+            statement
+            for statement in statements
+            if statement.lstrip().startswith("update publication_tasks")
+        ]
+        self.assertEqual(publication_updates, [])
+
+    def test_bilibili_submit_uses_one_detached_parent_and_credential_snapshot(self):
+        root = Path(self.tmpdir.name)
+        video_path = root / "landscape.mp4"
+        cover_path = root / "bilibili-cover.jpg"
+        video_path.write_bytes(b"video")
+        cover_path.write_bytes(b"cover")
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "report_audio_workflow": {
+                    "metadata": {"title": "父任务标题"},
+                    "pdf": {"filename": "中信证券-半导体-20260831.pdf"},
+                },
+            },
+            result={
+                "structured_result": {
+                    "landscape_title": "半导体景气反转",
+                    "landscape_subtitle": "供需拐点确认",
+                },
+                "video": {
+                    "video_path": str(video_path),
+                    "cover_path": str(cover_path),
+                    "bilibili_cover_path": str(cover_path),
+                },
+                "raw_audit_payload": "x" * 100_000,
+            },
+        )
+        credential = PlatformCredentialAccount(
+            platform="bilibili",
+            name="研报主账号",
+            owner_label="研报账号展示名",
+            encrypted_payload="encrypted",
+            payload_fingerprint="report-audio-bili-narrow-snapshot",
+        )
+        db.session.add_all([parent, credential])
+        db.session.commit()
+        parent_id = str(parent.id)
+        credential_id = str(credential.id)
+        statements = []
+        file_probe_transactions = []
+        original_path_exists = report_audio_api._path_exists
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            statements.append(" ".join(statement.lower().split()))
+
+        def probe_path_without_db_hold(path):
+            file_probe_transactions.append(db.session().in_transaction())
+            return original_path_exists(path)
+
+        def enqueue_without_broker(child):
+            child._bilibili_enqueue_response_payload = dict(
+                child._bilibili_create_response_payload
+            )
+            return child
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            with (
+                self.app.test_request_context(
+                    f"/api/report-audio-workflows/jobs/{parent_id}/bilibili-upload",
+                    method="POST",
+                    json={
+                        "credential_id": credential_id,
+                        "video_key": "landscape",
+                        "charging_pay": {"enabled": False},
+                    },
+                ),
+                patch.object(
+                    report_audio_api,
+                    "_path_exists",
+                    side_effect=probe_path_without_db_hold,
+                ),
+                patch.object(
+                    report_audio_api,
+                    "enqueue_bilibili_upload_task",
+                    side_effect=enqueue_without_broker,
+                ),
+            ):
+                response = report_audio_api.submit_bilibili_upload.__wrapped__(
+                    SimpleNamespace(id="user-1"),
+                    parent_id,
+                )
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertIn("半导体景气反转", payload["upload_task"]["title"])
+        self.assertEqual(
+            payload["upload_task"]["credential_name"],
+            "研报账号展示名",
+        )
+        self.assertTrue(file_probe_transactions)
+        self.assertEqual(
+            file_probe_transactions,
+            [False] * len(file_probe_transactions),
+            "任何视频或封面文件探测前都必须释放父任务数据库事务",
+        )
+        publication_selects = [
+            statement
+            for statement in statements
+            if statement.startswith("select") and "publication_tasks" in statement
+        ]
+        self.assertEqual(len(publication_selects), 1)
+        self.assertIn("platform_credential_accounts", publication_selects[0])
+        self.assertNotIn(
+            "publication_tasks.params as publication_tasks_params",
+            publication_selects[0],
+        )
+        self.assertNotIn(
+            "publication_tasks.result as publication_tasks_result",
+            publication_selects[0],
+        )
+        standalone_credential_selects = [
+            statement
+            for statement in statements
+            if statement.startswith("select")
+            and "platform_credential_accounts" in statement
+            and "publication_tasks" not in statement
+        ]
+        self.assertEqual(standalone_credential_selects, [])
+
+    def test_bilibili_submit_uses_result_pdf_metadata_when_request_pdf_is_absent(self):
+        root = Path(self.tmpdir.name)
+        video_path = root / "result-only-landscape.mp4"
+        cover_path = root / "result-only-cover.jpg"
+        video_path.write_bytes(b"video")
+        cover_path.write_bytes(b"cover")
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            created_at=datetime(2026, 8, 31, 9, 0, 0),
+            params={"feature": FEATURE_NAME, "user_id": "user-1"},
+            result={
+                "pdf": {"filename": "广发证券-算力产业-20260830.pdf"},
+                "structured_result": {
+                    "landscape_title": "算力需求进入新拐点",
+                },
+                "video": {
+                    "video_path": str(video_path),
+                    "bilibili_cover_path": str(cover_path),
+                },
+            },
+        )
+        db.session.add(parent)
+        db.session.commit()
+        parent_id = str(parent.id)
+
+        def enqueue_without_broker(upload_task):
+            upload_task._bilibili_enqueue_response_payload = dict(
+                upload_task._bilibili_create_response_payload
+            )
+            return upload_task
+
+        with (
+            self.app.test_request_context(
+                f"/api/report-audio-workflows/jobs/{parent_id}/bilibili-upload",
+                method="POST",
+                json={
+                    "video_key": "landscape",
+                    "charging_pay": {"enabled": False},
+                },
+            ),
+            patch.object(
+                report_audio_api,
+                "enqueue_bilibili_upload_task",
+                side_effect=enqueue_without_broker,
+            ),
+        ):
+            response = report_audio_api.submit_bilibili_upload.__wrapped__(
+                SimpleNamespace(id="user-1"),
+                parent_id,
+            )
+
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        title = payload["upload_task"]["title"]
+        self.assertIn("广发证券", title)
+        self.assertIn("2026-08-30", title)
+
+    def test_bilibili_submit_prefers_completed_child_bilibili_cover_over_generic_parent_cover(self):
+        root = Path(self.tmpdir.name)
+        video_path = root / "landscape.mp4"
+        generic_cover_path = root / "generic-cover.jpg"
+        child_bilibili_cover_path = root / "child-bilibili-cover.jpg"
+        for path, body in (
+            (video_path, b"video"),
+            (generic_cover_path, b"generic"),
+            (child_bilibili_cover_path, b"bilibili"),
+        ):
+            path.write_bytes(body)
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={"feature": FEATURE_NAME, "user_id": "user-1"},
+            result={
+                "video": {
+                    "video_path": str(video_path),
+                    "cover_path": str(generic_cover_path),
+                },
+            },
+        )
+        db.session.add(parent)
+        db.session.flush()
+        parent_id = str(parent.id)
+        child = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": "publisher",
+                "source_task_id": parent_id,
+                "vertical_video": {"enabled": True},
+            },
+            result={
+                "vertical_video_path": str(video_path),
+                "bilibili_cover_path": str(child_bilibili_cover_path),
+            },
+            source_task_id=parent_id,
+        )
+        db.session.add(child)
+        db.session.commit()
+        file_probe_transactions = []
+        original_path_exists = report_audio_api._path_exists
+
+        def probe_path_without_db_hold(path):
+            file_probe_transactions.append(db.session().in_transaction())
+            return original_path_exists(path)
+
+        def enqueue_without_broker(upload_task):
+            upload_task._bilibili_enqueue_response_payload = dict(
+                upload_task._bilibili_create_response_payload
+            )
+            return upload_task
+
+        with (
+            self.app.test_request_context(
+                f"/api/report-audio-workflows/jobs/{parent_id}/bilibili-upload",
+                method="POST",
+                json={
+                    "video_key": "landscape",
+                    "title": "保留专用封面优先级",
+                    "charging_pay": {"enabled": False},
+                },
+            ),
+            patch.object(
+                report_audio_api,
+                "enqueue_bilibili_upload_task",
+                side_effect=enqueue_without_broker,
+            ),
+            patch.object(
+                report_audio_api,
+                "_path_exists",
+                side_effect=probe_path_without_db_hold,
+            ),
+        ):
+            response = report_audio_api.submit_bilibili_upload.__wrapped__(
+                SimpleNamespace(id="user-1"),
+                parent_id,
+            )
+
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertTrue(file_probe_transactions)
+        self.assertEqual(
+            file_probe_transactions,
+            [False] * len(file_probe_transactions),
+            "child fallback 查询后也必须在文件探测前释放数据库事务",
+        )
+        self.assertEqual(
+            payload["upload_task"]["cover_key"],
+            "bilibili_cover",
+        )
+        upload_projection = PublicationTaskBilibiliUpload.query.filter_by(
+            task_id=payload["upload_task"]["task_id"]
+        ).one()
+        self.assertEqual(
+            upload_projection.cover_path,
+            str(child_bilibili_cover_path),
+        )
 
     def test_bilibili_upload_history_is_one_structured_query_without_task_json(self):
         parent = PublicationTask(
@@ -1479,6 +1787,185 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertIn("publication_task_bilibili_uploads", selects[0])
         self.assertNotIn("publication_tasks.params", selects[0])
         self.assertNotIn("publication_tasks.result", selects[0])
+
+    def test_browser_publish_enqueue_uses_detached_preallocated_broker_snapshot(self):
+        root = Path(self.tmpdir.name)
+        video_path = root / "browser-publish.mp4"
+        video_path.write_bytes(b"video")
+        spec = BrowserPublishJobSpec(
+            platform="douyin",
+            feature_name="douyin_upload_test",
+            platform_label="抖音",
+            resolve_credential=lambda **_kwargs: {
+                "credential_id": "douyin-account-1",
+                "credential_name": "抖音测试账号",
+            },
+            allowed_visibility=frozenset({"private", "public"}),
+        )
+        statements = []
+        broker_transaction_states = []
+        phase = {"broker_started": False}
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            statements.append((
+                phase["broker_started"],
+                " ".join(statement.lower().split()),
+            ))
+
+        def publish_without_broker(
+            _platform,
+            _task_id,
+            *,
+            broker_task_id=None,
+            retry,
+        ):
+            broker_transaction_states.append(db.session().in_transaction())
+            phase["broker_started"] = True
+            return {"celery_id": broker_task_id or "legacy-generated-broker-id"}
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            with patch(
+                "services.browser_publish_jobs.dispatch_platform_publish",
+                side_effect=publish_without_broker,
+            ):
+                task = create_browser_publish_task(
+                    spec,
+                    current_user=SimpleNamespace(id="user-1"),
+                    video_path=video_path,
+                    title="浏览器发布窄快照",
+                    credential_id="douyin-account-1",
+                    description="测试简介",
+                    tags=["财经"],
+                    visibility="private",
+                )
+                task = enqueue_browser_publish_task(spec, task)
+                payload = browser_publish_payload(spec, task)
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        self.assertEqual(payload["status"], "queued")
+        self.assertEqual(payload["credential_name"], "抖音测试账号")
+        self.assertEqual(broker_transaction_states, [False])
+        task_selects = [
+            statement
+            for _after_broker, statement in statements
+            if statement.startswith("select") and "publication_tasks" in statement
+        ]
+        self.assertEqual(task_selects, [])
+        post_broker_selects = [
+            statement
+            for after_broker, statement in statements
+            if after_broker and statement.startswith("select")
+        ]
+        self.assertEqual(post_broker_selects, [])
+
+    def test_browser_publish_cancel_persists_before_revoke_and_returns_snapshot(self):
+        root = Path(self.tmpdir.name)
+        video_path = root / "browser-cancel.mp4"
+        video_path.write_bytes(b"video")
+        spec = BrowserPublishJobSpec(
+            platform="wechat_channels",
+            feature_name="wechat_channels_upload_test",
+            platform_label="视频号",
+            resolve_credential=lambda **_kwargs: {
+                "credential_id": "channels-account-1",
+                "credential_name": "视频号测试账号",
+            },
+            allowed_visibility=frozenset({"private", "public"}),
+        )
+        task = create_browser_publish_task(
+            spec,
+            current_user=SimpleNamespace(id="user-1"),
+            video_path=video_path,
+            title="视频号取消事务边界",
+            credential_id="channels-account-1",
+            visibility="private",
+        )
+        task.celery_task_id = "channels-cancel-broker-id"
+        db.session.commit()
+        task_id = str(task.id)
+        statements = []
+        revoke_transaction_states = []
+        phase = {"revoke_started": False}
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            statements.append((
+                phase["revoke_started"],
+                " ".join(statement.lower().split()),
+            ))
+
+        def revoke_without_broker(*_args, **_kwargs):
+            revoke_transaction_states.append(db.session().in_transaction())
+            phase["revoke_started"] = True
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            with patch(
+                "celery_config.celery_app.control.revoke",
+                side_effect=revoke_without_broker,
+            ):
+                ok, message = cancel_browser_publish_task(spec, task)
+                payload = getattr(
+                    task,
+                    "_browser_publish_cancel_response_payload",
+                    None,
+                ) or browser_publish_payload(spec, task)
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        self.assertTrue(ok)
+        self.assertIn("已取消", message)
+        self.assertEqual(payload["task_id"], task_id)
+        self.assertEqual(payload["status"], "canceled")
+        self.assertEqual(revoke_transaction_states, [False])
+        post_revoke_selects = [
+            statement
+            for after_revoke, statement in statements
+            if after_revoke and statement.startswith("select")
+        ]
+        self.assertEqual(post_revoke_selects, [])
+
+    def test_browser_publish_cancel_keeps_terminal_guard_when_revoke_fails(self):
+        root = Path(self.tmpdir.name)
+        video_path = root / "browser-cancel-failure.mp4"
+        video_path.write_bytes(b"video")
+        spec = BrowserPublishJobSpec(
+            platform="douyin",
+            feature_name="douyin_upload_test",
+            platform_label="抖音",
+            resolve_credential=lambda **_kwargs: {
+                "credential_id": "douyin-account-2",
+                "credential_name": "抖音备用账号",
+            },
+            allowed_visibility=frozenset({"private"}),
+        )
+        task = create_browser_publish_task(
+            spec,
+            current_user=SimpleNamespace(id="user-1"),
+            video_path=video_path,
+            title="控制面失败仍取消",
+            credential_id="douyin-account-2",
+            visibility="private",
+        )
+        task.celery_task_id = "douyin-cancel-broker-id"
+        db.session.commit()
+        task_id = str(task.id)
+
+        with patch(
+            "celery_config.celery_app.control.revoke",
+            side_effect=RuntimeError("broker control unavailable"),
+        ):
+            try:
+                ok, message = cancel_browser_publish_task(spec, task)
+            except RuntimeError as exc:
+                self.fail(f"持久化取消不能被 broker revoke 失败回滚: {exc}")
+
+        self.assertTrue(ok)
+        self.assertIn("已取消", message)
+        persisted = db.session.get(PublicationTask, task_id)
+        self.assertEqual(persisted.status, "canceled")
+        self.assertEqual(persisted.current_step, "canceled")
 
     def test_failed_bilibili_upload_can_be_requeued_without_rebuilding_media(self):
         parent = PublicationTask(
@@ -1534,6 +2021,204 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
             PublicationTask.query.filter_by(id=child.id).one().result["bilibili_retry_history"][-1]["previous_error"],
             "HTTP 403",
         )
+
+    def test_bilibili_retry_uses_detached_narrow_state_across_broker_publish(self):
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "raw_request_audit": "p" * 100_000,
+            },
+            result={"raw_parent_audit": "r" * 100_000},
+        )
+        db.session.add(parent)
+        db.session.commit()
+        child = create_bilibili_upload_task(
+            parent,
+            parent_feature=FEATURE_NAME,
+            source_label=report_audio_api.BILIBILI_UPLOAD_SOURCE,
+            video_path="/tmp/retry-narrow-report.mp4",
+            video_key="landscape",
+            title="重投窄快照",
+            data={"credential_id": "credential-1", "season_id": "456"},
+            result_extra={"raw_child_audit": "x" * 100_000},
+        )
+        child_id = str(child.id)
+        parent_id = str(parent.id)
+        persisted = PublicationTask.query.filter_by(id=child_id).one()
+        persisted.status = "failed"
+        persisted.current_step = "failed"
+        persisted.progress = 23
+        persisted.error_message = "HTTP 502"
+        persisted.completed_at = datetime.utcnow()
+        db.session.commit()
+
+        statements = []
+        broker_transaction_states = []
+        phase = {"broker_started": False}
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            statements.append((
+                phase["broker_started"],
+                " ".join(statement.lower().split()),
+            ))
+
+        def publish_without_broker(_platform, _task_id, *, broker_task_id, retry):
+            broker_transaction_states.append(db.session().in_transaction())
+            phase["broker_started"] = True
+            return {"celery_id": broker_task_id}
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            with (
+                self.app.test_request_context(
+                    f"/api/report-audio-workflows/jobs/{parent_id}/"
+                    f"bilibili-upload/{child_id}/retry",
+                    method="POST",
+                ),
+                patch(
+                    "services.bilibili_publish.dispatch_platform_publish",
+                    side_effect=publish_without_broker,
+                ),
+            ):
+                response = report_audio_api.retry_bilibili_upload.__wrapped__(
+                    SimpleNamespace(id="user-1"),
+                    parent_id,
+                    child_id,
+                )
+                payload = response.get_json()
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["upload_task"]["task_id"], child_id)
+        self.assertEqual(payload["upload_task"]["status"], "queued")
+        self.assertEqual(broker_transaction_states, [False])
+        task_selects = [
+            statement
+            for _after_broker, statement in statements
+            if statement.startswith("select") and "publication_tasks" in statement
+        ]
+        self.assertTrue(task_selects)
+        for statement in task_selects:
+            self.assertNotIn("publication_tasks.params", statement)
+        post_broker_selects = [
+            statement
+            for after_broker, statement in statements
+            if after_broker and statement.startswith("select")
+        ]
+        self.assertEqual(post_broker_selects, [])
+
+    def test_report_bilibili_cancel_uses_narrow_state_and_releases_before_revoke(self):
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={
+                "feature": FEATURE_NAME,
+                "user_id": "user-1",
+                "raw_request_audit": "p" * 100_000,
+            },
+            result={"raw_parent_audit": "r" * 100_000},
+        )
+        db.session.add(parent)
+        db.session.flush()
+        parent_id = str(parent.id)
+        child = PublicationTask(
+            feature="publisher",
+            user_id="user-1",
+            parent_task_id=parent_id,
+            parent_feature=FEATURE_NAME,
+            source_task_id=parent_id,
+            source_feature=FEATURE_NAME,
+            status="pending",
+            current_step="queued",
+            progress=0,
+            celery_task_id="report-cancel-broker-id",
+            params={
+                "feature": "publisher",
+                "user_id": "user-1",
+                "parent_task_id": parent_id,
+                "parent_feature": FEATURE_NAME,
+                "source_task_id": parent_id,
+                "source_feature": FEATURE_NAME,
+                "raw_request_audit": "c" * 100_000,
+            },
+            result={"raw_child_audit": "d" * 100_000},
+        )
+        db.session.add(child)
+        db.session.flush()
+        child_id = str(child.id)
+        db.session.add(PublicationTaskBilibiliUpload(
+            task_id=child_id,
+            parent_task_id=parent_id,
+            parent_feature=FEATURE_NAME,
+            source_label=report_audio_api.BILIBILI_UPLOAD_SOURCE,
+            video_key="landscape",
+            title="取消窄快照",
+            video_path="/tmp/report-cancel.mp4",
+            tags=["财经"],
+        ))
+        db.session.commit()
+
+        statements = []
+        revoke_transaction_states = []
+        phase = {"revoke_started": False}
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            statements.append((
+                phase["revoke_started"],
+                " ".join(statement.lower().split()),
+            ))
+
+        def revoke_without_broker(*_args, **_kwargs):
+            revoke_transaction_states.append(db.session().in_transaction())
+            phase["revoke_started"] = True
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            with (
+                self.app.test_request_context(
+                    f"/api/report-audio-workflows/jobs/{parent_id}/"
+                    f"bilibili-upload/{child_id}/cancel",
+                    method="POST",
+                ),
+                patch.object(
+                    report_audio_api.celery_app.control,
+                    "revoke",
+                    side_effect=revoke_without_broker,
+                ),
+            ):
+                response = report_audio_api.cancel_bilibili_upload.__wrapped__(
+                    SimpleNamespace(id="user-1"),
+                    parent_id,
+                    child_id,
+                )
+                payload = response[0].get_json() if isinstance(response, tuple) else response.get_json()
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        self.assertTrue(payload["success"], payload)
+        self.assertEqual(payload["upload_task"]["status"], "canceled")
+        self.assertEqual(revoke_transaction_states, [False])
+        task_selects = [
+            statement
+            for _after_revoke, statement in statements
+            if statement.startswith("select") and "publication_tasks" in statement
+        ]
+        self.assertTrue(task_selects)
+        for statement in task_selects:
+            self.assertNotIn("publication_tasks.params", statement)
+            self.assertNotIn("publication_tasks.result", statement)
+        post_revoke_selects = [
+            statement
+            for after_revoke, statement in statements
+            if after_revoke and statement.startswith("select")
+        ]
+        self.assertEqual(post_revoke_selects, [])
 
     def test_bilibili_upload_retry_rejects_completed_remote_submission(self):
         parent = PublicationTask(
@@ -2082,10 +2767,14 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
                 "cover.jpg",
             )
 
-        self.assertTrue(preview.headers["Content-Disposition"].startswith("inline;"))
-        self.assertTrue(preview.cache_control.no_store)
-        self.assertTrue(preview.cache_control.no_cache)
-        self.assertTrue(download.headers["Content-Disposition"].startswith("attachment;"))
+        try:
+            self.assertTrue(preview.headers["Content-Disposition"].startswith("inline;"))
+            self.assertTrue(preview.cache_control.no_store)
+            self.assertTrue(preview.cache_control.no_cache)
+            self.assertTrue(download.headers["Content-Disposition"].startswith("attachment;"))
+        finally:
+            preview.close()
+            download.close()
 
     def test_bilibili_cover_is_promoted_and_accepted_by_upload_resolver(self):
         root = Path(self.tmpdir.name)

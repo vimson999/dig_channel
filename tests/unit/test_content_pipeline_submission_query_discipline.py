@@ -139,10 +139,14 @@ class ContentPipelineSubmissionQueryDisciplineTest(unittest.TestCase):
         finally:
             event.remove(db.engine, "before_cursor_execute", capture)
 
-        self.assertFalse(any(
-            sql.startswith("select") and " from publication_tasks " in sql
+        task_selects = [
+            sql
             for sql in statements
-        ), statements)
+            if sql.startswith("select") and " from publication_tasks " in sql
+        ]
+        self.assertEqual(len(task_selects), 1, statements)
+        self.assertNotIn("publication_tasks.params", task_selects[0])
+        self.assertNotIn("publication_tasks.result", task_selects[0])
         self.assertEqual(payload["result"]["queued"], True)
         self.assertEqual(payload["celery_task_id"], dispatch_mock.call_args.kwargs["broker_task_id"])
         persisted = db.session.get(PublicationTask, payload["id"])
@@ -182,6 +186,52 @@ class ContentPipelineSubmissionQueryDisciplineTest(unittest.TestCase):
         self.assertEqual(persisted.status, "failed")
         self.assertEqual(persisted.current_step, "failed")
         self.assertEqual(persisted.result["reason"], "queue_failed")
+
+    def test_auto_publish_redelivery_reuses_existing_child_without_redispatch(self):
+        output_dir = Path(self.temp_dir.name) / "retry-clean-output"
+        output_dir.mkdir()
+
+        def dispatch(_platform, _task_id, *, broker_task_id, retry):
+            return {
+                "celery_id": broker_task_id,
+                "admission": {"allowed": True, "reason": "ok"},
+                "deferred": False,
+                "deferred_state": None,
+            }
+
+        with patch.object(
+            auto_publish_handoff,
+            "dispatch_platform_publish",
+            side_effect=dispatch,
+        ) as dispatch_mock, patch(
+            "services.content_pipeline.notification_service.notify_content_pipeline_event",
+            return_value={"queued": False},
+        ):
+            first = auto_publish_handoff.submit_publish_clean_output_task(
+                title="清洗产物发布",
+                file_type="pdf",
+                output_dir=str(output_dir),
+                options={"enabled": True},
+                source_task_id="clean-task-redelivery",
+            )
+            second = auto_publish_handoff.submit_publish_clean_output_task(
+                title="清洗产物发布",
+                file_type="pdf",
+                output_dir=str(output_dir),
+                options={"enabled": True},
+                source_task_id="clean-task-redelivery",
+            )
+
+        self.assertEqual(second["id"], first["id"])
+        self.assertTrue(second["result"]["reused_existing"])
+        self.assertEqual(dispatch_mock.call_count, 1)
+        self.assertEqual(
+            PublicationTask.query.filter_by(
+                feature="zsxq_clean_output_publish",
+                source_task_id="clean-task-redelivery",
+            ).count(),
+            1,
+        )
 
     def test_clean_refresh_reads_projection_without_result_payload(self):
         completed = PublicationTask(

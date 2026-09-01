@@ -3,9 +3,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from flask import Flask
+from sqlalchemy import event
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -14,9 +16,11 @@ if str(BACKEND_DIR) not in sys.path:
 
 from api import report_audio_workflow as report_audio_api  # noqa: E402
 from api import report_script_material_workflow as report_script_api  # noqa: E402
+from api import report_top10_workflow as report_top10_api  # noqa: E402
 from models import db  # noqa: E402
 from models.content_pipeline_asset import ContentPipelineAsset  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
+from models.zsxq_sync import ZsxqAttachment  # noqa: E402
 from services import report_top10_workflow as report_top10_service  # noqa: E402
 
 
@@ -100,6 +104,7 @@ class PdfCanonicalAssetConsumersTest(unittest.TestCase):
     def test_report_audio_catalog_lists_only_ready_cleaned_assets_from_all_sources(self):
         expected_labels = {
             "manual_download": "手动投递",
+            "web_upload": "网页投递",
             "sidebar": "侧边栏下载",
             "scheduled_api": "计划任务",
         }
@@ -163,7 +168,7 @@ class PdfCanonicalAssetConsumersTest(unittest.TestCase):
         payload = response.get_json()["data"]
         items = payload["items"]
 
-        self.assertEqual(len(items), 3)
+        self.assertEqual(len(items), len(expected_labels))
         self.assertEqual(
             {item["source_label"] for item in items},
             set(expected_labels.values()),
@@ -171,6 +176,53 @@ class PdfCanonicalAssetConsumersTest(unittest.TestCase):
         self.assertTrue(all(item["id"].startswith("pipeline:") for item in items))
         self.assertTrue(all("content-pipeline-output" in item["local_path"] for item in items))
         self.assertEqual(payload["pagination"]["skipped_missing"], 1)
+
+    def test_report_audio_catalog_keeps_missing_canonical_lookups_constant(self):
+        for index in range(8):
+            db.session.add(ZsxqAttachment(
+                group_id="group-1",
+                tab_id="tab-1",
+                topic_id=f"topic-{index}",
+                attachment_key=f"attachment-{index}",
+                name=f"source-{index}.pdf",
+                local_path=str((self.root / f"source-{index}.pdf").resolve()),
+                download_status="downloaded",
+            ))
+        db.session.commit()
+
+        statements = []
+
+        def record_statement(_conn, _cursor, statement, _parameters, _context, _executemany):
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement)
+
+        event.listen(db.engine, "before_cursor_execute", record_statement)
+        try:
+            with self.app.test_request_context("/pdf-assets?page=1&per_page=10&scope=all"):
+                response = report_audio_api.list_pdf_assets.__wrapped__(None)
+        finally:
+            event.remove(db.engine, "before_cursor_execute", record_statement)
+
+        self.assertEqual(response.get_json()["data"]["items"], [])
+        self.assertLessEqual(len(statements), 4)
+
+    def test_pdf_payload_helpers_do_not_requery_known_missing_canonical_asset(self):
+        row = SimpleNamespace(local_path=str((self.root / "missing.pdf").resolve()))
+        statements = []
+
+        def record_statement(_conn, _cursor, statement, _parameters, _context, _executemany):
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement)
+
+        event.listen(db.engine, "before_cursor_execute", record_statement)
+        try:
+            self.assertIsNone(report_audio_api._pdf_asset_row_payload(row, canonical_asset=None))
+            self.assertIsNone(report_script_api._pdf_asset_payload(row, canonical_asset=None))
+            self.assertIsNone(report_top10_api._pdf_asset_payload(row, canonical_asset=None))
+        finally:
+            event.remove(db.engine, "before_cursor_execute", record_statement)
+
+        self.assertEqual(statements, [])
 
 
 if __name__ == "__main__":

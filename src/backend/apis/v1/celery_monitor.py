@@ -63,6 +63,7 @@ ZSXQ_ORPHANABLE_STATUSES = ("running", "retrying")
 BUSINESS_TASK_ACTIVE_STATUSES = ("pending", "processing")
 BUSINESS_TASK_CONSUMER_GRACE_SECONDS_DEFAULT = 1800
 BUSINESS_TASK_LIMIT_PER_SERVICE = 8
+RUNTIME_STATUS_SERVICE_LIMIT = 8
 NON_INTERRUPTIBLE_SERVICE_STEPS = {
     "platform_upload": ("upload_bilibili", "upload_youtube", "uploading_video", "filling_copy", "submitting"),
 }
@@ -823,8 +824,14 @@ def _queue_length(queue_name):
         return None, str(exc)
 
 
-def _queue_lengths():
-    queues = [service["queue"] for service in SERVICES.values()]
+def _queue_lengths_for(queue_names):
+    queues = list(dict.fromkeys(
+        str(queue_name or "").strip()
+        for queue_name in queue_names or ()
+        if str(queue_name or "").strip()
+    ))
+    if not queues:
+        return {}
     try:
         client = redis.Redis.from_url(
             _broker_url(),
@@ -843,6 +850,12 @@ def _queue_lengths():
     except Exception as exc:
         error = str(exc)
         return {queue_name: (None, error) for queue_name in queues}
+
+
+def _queue_lengths():
+    return _queue_lengths_for(
+        [service["queue"] for service in SERVICES.values()]
+    )
 
 
 def _purge_queue(queue_name):
@@ -1247,6 +1260,7 @@ def run_watchdog_once():
             business_tasks=business_tasks.get(service_id),
             business_task_error=business_task_errors.get(service_id),
             force_refresh=True,
+            include_dashboard_stats=False,
         )
         if _consumer_stuck(status):
             heartbeat_tasks, heartbeat_error = _watchdog_business_activity_probe(
@@ -1261,6 +1275,7 @@ def run_watchdog_once():
                 business_tasks=heartbeat_tasks,
                 business_task_error=heartbeat_error,
                 force_refresh=True,
+                include_dashboard_stats=False,
             )
         item_state = services_state.setdefault(service_id, {})
         stuck = _consumer_stuck(status)
@@ -2143,6 +2158,7 @@ def _service_status(
     business_tasks=None,
     business_task_error=None,
     force_refresh=False,
+    include_dashboard_stats=True,
 ):
     process_source = all_processes if all_processes is not None else _list_processes()
     processes = [proc for proc in process_source if _matches_service(proc, service)]
@@ -2219,7 +2235,7 @@ def _service_status(
         "consumer_note": consumer_note,
         "updated_at": datetime.utcnow().isoformat() + "Z",
     }
-    if service_id == "report_video":
+    if service_id == "report_video" and include_dashboard_stats:
         report_video_stats, report_video_error = _report_video_stage_stats(force_refresh=force_refresh)
         status["report_video_stats"] = report_video_stats
         status["report_video_stats_error"] = report_video_error
@@ -2542,6 +2558,83 @@ def list_services():
             for service_id, service in SERVICES.items()
         ],
     })
+
+
+def _runtime_status_service_ids(raw_value):
+    service_ids = list(dict.fromkeys(
+        item.strip()
+        for item in str(raw_value or "").split(",")
+        if item.strip()
+    ))
+    if not service_ids:
+        raise ValueError("services 参数不能为空")
+    if len(service_ids) > RUNTIME_STATUS_SERVICE_LIMIT:
+        raise ValueError(
+            f"services 最多允许 {RUNTIME_STATUS_SERVICE_LIMIT} 项"
+        )
+    unknown = [service_id for service_id in service_ids if service_id not in SERVICES]
+    if unknown:
+        raise ValueError(f"未知 Celery 服务: {', '.join(unknown)}")
+    return tuple(service_ids)
+
+
+def _runtime_status_payload(service_ids):
+    # Login/auth may have opened a read transaction.  This endpoint performs
+    # only process and Redis checks, so release it before any external I/O and
+    # never load the cross-table business-task snapshot used by the full
+    # control-plane status endpoint.
+    _release_db_session_quietly()
+    _ensure_dirs()
+
+    selected = [
+        (service_id, SERVICES[service_id])
+        for service_id in service_ids
+    ]
+    all_processes = _list_processes()
+    queue_lengths = _queue_lengths_for(
+        [service["queue"] for _service_id, service in selected]
+    )
+    paused_services = _load_paused_services()
+    updated_at = datetime.utcnow().isoformat() + "Z"
+    services = []
+    for service_id, service in selected:
+        processes = [
+            proc for proc in all_processes
+            if _matches_service(proc, service)
+        ]
+        queue_length, queue_error = queue_lengths.get(
+            service["queue"],
+            (None, "queue status unavailable"),
+        )
+        starter_pid = _read_pid_file(service_id)
+        services.append({
+            "id": service_id,
+            "label": service["label"],
+            "queue": service["queue"],
+            "running": bool(processes),
+            "paused": bool(paused_services.get(service_id)),
+            "pids": [proc["pid"] for proc in processes],
+            "starter_pid": starter_pid if _process_exists(starter_pid) else None,
+            "queue_length": queue_length,
+            "queue_error": queue_error,
+            "updated_at": updated_at,
+        })
+    return {
+        "success": True,
+        "data": {
+            "mode": "runtime_only",
+            "services": services,
+        },
+    }
+
+
+@bp.route("/runtime-status", methods=["GET"])
+def runtime_status():
+    try:
+        service_ids = _runtime_status_service_ids(request.args.get("services"))
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    return jsonify(_runtime_status_payload(service_ids))
 
 
 def _status_payload(include_logs=False, log_lines=20, include_inspect=False, force_refresh=False):

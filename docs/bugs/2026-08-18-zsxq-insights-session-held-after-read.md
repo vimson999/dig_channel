@@ -30,3 +30,27 @@
 ## 防复发与下一轮验收
 
 Insights 所有 DB 读取必须是显式有界 scope，scope 外禁止访问 ORM/Result。下一轮分别统计 execute、结果 fetch、rollback/checkin 和响应聚合耗时；要求应用 CPU 阶段 checkout=0，同时将远端 query/connect timeout 与 page-detail fetch 尾延迟降至零后才允许关闭网络根因。
+
+## 2026-08-30 复发复核
+
+真实冷请求 `21b8b432` 为 22.668 秒；详情 scope 持有 13.515 秒，其中对应 SQL 13.476 秒，
+非 SQL 仅 38.53 毫秒。CPU 聚合/缓存阶段没有继续占用该 Session，说明显式 read scope 修复仍然有效；
+但相同 SQL 的 executor 只有 1.069 毫秒，远端结果抓取/事务回收长尾再次出现。热请求
+`29c7ab66` 为 0.81 毫秒只能证明 cache hit，不能证明冷链路根治。
+
+状态保持 `RUNTIME_REPLACED / OBSERVING`，远端网络根因改记为 2026-08-30 再次复发并继续 OPEN。
+下一轮必须以不同冷 key 分别捕获 execute、fetch 与 checkin；完整 24 小时无十秒级 fetch 尾部前，
+不得以测试通过、热缓存或当前 PgBouncer 错误为零关闭。
+
+## 2026-08-31 多冷 key 复核
+
+真实页面依次切换 `ai`、`ai-content`、`ai-sales`、`agent-workflow`、`ai-coding` 五个冷 key，
+端到端分别为 5.353/9.475/2.974/2.293/2.447 秒，P50/P95/max 为
+2.974/9.475/9.475 秒；五次均返回完整真实数据。最慢 `ai-content` request `c51d2624` 中
+selected SQL 为 6.761 秒、2085 行，详情 SQL 1.649 秒、48 行；连接持有 6.805 秒而非 SQL 持有
+仅 43.76ms，证明 CPU/缓存阶段没有再次跨界持有 Session。相同 canonical 查询的现场 executor
+为 36.513ms。
+
+相较上一轮单冷 key 22.668 秒，最大值改善 58.2%，但 P95 仍超过 5 秒验收线，且同期其他真实页面
+再次捕获 PgBouncer query timeout 与 Tailscale 30% 丢包。Session 边界代码保持
+`RUNTIME_REPLACED`；网络相关冷链仍为 `OPEN / REPEATED / OBSERVING`，不得标记已解决。

@@ -470,11 +470,17 @@ class BilibiliIntelligenceSchedulerTest(unittest.TestCase):
         db.session.commit()
 
         statements = []
+        update_rowcounts = []
 
         def capture_statement(_conn, _cursor, statement, _parameters, _context, _executemany):
             statements.append(statement)
 
+        def capture_rowcount(_conn, cursor, statement, _parameters, _context, _executemany):
+            if statement.lower().lstrip().startswith("update bilibili_competitor_videos"):
+                update_rowcounts.append((statement.lower(), cursor.rowcount))
+
         event.listen(db.engine, "before_cursor_execute", capture_statement)
+        event.listen(db.engine, "after_cursor_execute", capture_rowcount)
         try:
             with (
                 patch.object(
@@ -502,15 +508,132 @@ class BilibiliIntelligenceSchedulerTest(unittest.TestCase):
                 intelligence_service.sync_competitor("same-id", page_size=30)
         finally:
             event.remove(db.engine, "before_cursor_execute", capture_statement)
+            event.remove(db.engine, "after_cursor_execute", capture_rowcount)
 
-        video_updates = [
+        identity_selects = [
             statement.lower()
             for statement in statements
-            if statement.lower().startswith("update bilibili_competitor_videos")
+            if statement.lower().lstrip().startswith("select")
+            and "from bilibili_competitor_videos" in statement.lower()
         ]
-        self.assertEqual(len(video_updates), 1)
-        self.assertNotIn("raw_payload", video_updates[0])
-        self.assertIn("last_seen_at", video_updates[0])
+        self.assertEqual(len(identity_selects), 1)
+        self.assertIn("bilibili_competitor_videos.id", identity_selects[0])
+        self.assertIn("bilibili_competitor_videos.bvid", identity_selects[0])
+        self.assertNotIn("raw_payload", identity_selects[0])
+        self.assertNotIn("description", identity_selects[0])
+
+        scalar_updates = [
+            statement
+            for statement, _rowcount in update_rowcounts
+            if "last_seen_at" in statement
+        ]
+        self.assertEqual(len(scalar_updates), 1)
+        raw_updates = [
+            rowcount
+            for statement, rowcount in update_rowcounts
+            if "raw_payload" in statement
+        ]
+        self.assertTrue(all(rowcount == 0 for rowcount in raw_updates))
+
+    def test_sync_competitor_persists_raw_only_change_without_wide_identity_read(self):
+        original = {
+            "bvid": "BVRAWCHANGE",
+            "aid": "54321",
+            "title": "仅审计载荷变化的投稿",
+            "description": "正文",
+            "pic": "https://example.test/raw-change.jpg",
+            "length": "2:00",
+            "created": 1784307539,
+            "play": 200,
+            "comment": 6,
+            "video_review": 4,
+            "is_charging_arc": False,
+            "source_revision": "v1",
+        }
+        db.session.add(
+            BilibiliCompetitor(
+                id="raw-change-competitor-id",
+                uid="401",
+                name="审计载荷账号",
+                content_type="report",
+                active=True,
+            )
+        )
+        db.session.add(
+            BilibiliCompetitorVideo(
+                id="video-raw-change-id",
+                competitor_id="raw-change-competitor-id",
+                content_type="report",
+                bvid="BVRAWCHANGE",
+                aid="54321",
+                title="仅审计载荷变化的投稿",
+                description="正文",
+                cover_url="https://example.test/raw-change.jpg",
+                duration_seconds=120,
+                published_at=datetime.utcfromtimestamp(1784307539),
+                play_count=200,
+                comment_count=6,
+                danmaku_count=4,
+                is_charging=False,
+                raw_payload=dict(original),
+                last_seen_at=datetime(2026, 8, 18, 0, 0, 0),
+            )
+        )
+        db.session.commit()
+
+        statements = []
+
+        def capture_statement(_conn, _cursor, statement, _parameters, _context, _executemany):
+            statements.append(statement)
+
+        incoming = {**original, "source_revision": "v2"}
+        event.listen(db.engine, "before_cursor_execute", capture_statement)
+        try:
+            with (
+                patch.object(
+                    intelligence_service,
+                    "resolve_bilibili_auth",
+                    return_value={
+                        "credential_id": "credential-1",
+                        "sessdata": "sessdata",
+                        "bili_jct": "bili-jct",
+                        "buvid3": "buvid3",
+                        "dedeuserid": "401",
+                    },
+                ),
+                patch.object(
+                    intelligence_service,
+                    "fetch_user_videos",
+                    return_value={
+                        "page": {"count": 1},
+                        "list": {"vlist": [incoming]},
+                    },
+                ),
+                patch.object(intelligence_service, "mark_credential_success"),
+                patch.object(intelligence_service, "release_db_session_quietly"),
+            ):
+                result = intelligence_service.sync_competitor(
+                    "raw-change-competitor-id",
+                    page_size=30,
+                )
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture_statement)
+
+        db.session.expire_all()
+        refreshed = db.session.get(BilibiliCompetitorVideo, "video-raw-change-id")
+        self.assertEqual(refreshed.raw_payload["source_revision"], "v2")
+        self.assertEqual(result["created"], 0)
+        self.assertEqual(result["updated"], 1)
+
+        identity_selects = [
+            statement.lower()
+            for statement in statements
+            if statement.lower().lstrip().startswith("select")
+            and "from bilibili_competitor_videos" in statement.lower()
+        ]
+        self.assertEqual(len(identity_selects), 1)
+        self.assertNotIn("raw_payload", identity_selects[0])
+        self.assertNotIn("description", identity_selects[0])
 
 
 if __name__ == "__main__":

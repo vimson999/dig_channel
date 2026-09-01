@@ -33,9 +33,50 @@
 - 任务创建必须遵循“落库并提交 -> 释放连接 -> broker 投递 -> 短事务回写 celery_task_id”。broker 失败时把已落库任务标为 `failed/enqueue_failed`，由状态机和修复器收口。
 - 释放 session 后，不能继续读旧 ORM 对象；跨等待只保存 ID，后续按 ID 重新加载。
 - 查询监控页面、任务快照、自动收口等看似“只读”的代码，也必须释放 session；只读查询同样会开启事务。
+- 任务详情的首次/显式加载与自动轮询必须分相：静态正文、场景、原始 JSON 和配置只在完整 DTO 中按需
+  读取；自动轮询只能使用显式动态投影，禁止加载整列 `params` 或与状态无关的静态 JSON。多场景/多子任务详情必须用批量
+  预取，并由测试证明 SQL 数不随场景数增长；循环内不得调用重新加载同一集合的 helper。
+- 动态 child 状态必须以稳定版本或内容哈希与首次详情合并，不能只按 sequence 覆盖；页面轮询必须同时满足
+  Page Visibility、active-only、single-flight、终态停止和有界间隔。分镜等会改变静态 DTO 的阶段完成时，
+  只允许一次显式完整刷新，禁止恢复每个 tick 全量读取。
+- watchdog 的自动修复/重启决策只能加载该决策实际消费的运行字段。仪表盘计数、跨表业务快照和展示聚合
+  必须由显式 `include_*` 开关按需获取，禁止 minute loop 通过 `force_refresh` 绕过缓存；契约测试必须同时
+  证明 watchdog 路径跳过展示 SQL、完整控制面仍保留原有公开字段。
 - 新增 worker/scheduler/watchdog 时，必须使用角色化连接池配置，并接入数据库压力准入。
+- 只需要 extensions/数据库 app context 的 Celery task、scheduler 或 watchdog 不得注册完整 Web API；应用工厂
+  必须提供显式最小模式且默认 Web 模式保持兼容。长期驻留消费者的源码/API 契约变更后必须重启并以进程
+  start time、worker ready 与真实任务验证模块图一致，磁盘函数存在不能替代运行态验收。
 - 数据库异常进入恢复分支后，任何查询、更新或提交之前必须先 `rollback/remove`；禁止在可能失效的 session 上二次查询，也禁止用 `finally: commit()` 收口这类分支。
 - 可重试数据库异常在 service 层不得提前写业务终态。由任务层先写 `retrying` 再安排 retry，只有重试耗尽才允许写 `failed`。
+- 人工素材生成等“先读共享 JSON、再执行浏览器/文件 I/O、最后写回”的链路，必须在读取阶段冻结
+  `params/result` 与响应所需关联摘要，随后 rollback/remove；I/O 结束后用 ID、原 status 与原
+  `updated_at` 做窄 CAS。CAS 失败必须保留较新的数据库结果并返回冲突，禁止无条件覆盖。
+- 只修改共享 JSON 审计载荷时，禁止借 ORM mapper 钩子重写无关投影列；commit 后响应必须复用
+  detached DTO，禁止访问过期 ORM 触发整行 `params/result` 回读。对应回归必须锁定 SQL 顺序，证明
+  外部函数入口无活动事务、仅一次窄 UPDATE 且 UPDATE 后没有任务整行 SELECT。
+- “准备任务 → commit → broker 投递 → 写 celery task id → HTTP 响应”必须在第一次 commit 前冻结
+  task id、响应 DTO 和关联摘要；broker 只接收稳定 ID。celery id 与 enqueue failure 必须使用独立短
+  事务窄写，第一次业务 UPDATE 后不得再 SELECT `params/result`；同构 retry/regenerate 入口必须共用
+  这一 helper，禁止复制旧 ORM 流程。
+- 多场景/多 child 的批量投递必须在循环前一次预取现有 child，并在内存按稳定业务键匹配；新增 child 使用
+  一次批量 commit。业务 ID 与 broker task ID 必须在该首次事务中同时持久化，随后释放连接再逐条发布；
+  正常成功路径禁止 broker 后二次写，publish failure 只能以一次短事务标记明确失败的 child。测试必须同时
+  锁定 SELECT/commit 数不随场景数增长、外部发布时 `in_transaction=False` 和失败项不污染成功项。
+- 取消、重复任务清理和 orphan repair 的顺序必须固定为“业务终态与响应 DTO → durable commit → 结束读事务
+  并归还连接 → best-effort Celery revoke”。revoke/control 失败不得回滚已提交的 `canceled/failed`，必须
+  记录告警并由消费者 terminal/current-id guard 拦截旧消息；所有新 revoke 调用都要用故障注入证明外部
+  I/O 时 `in_transaction=False` 且终态已可见。只读 child helper 也不得跨 control I/O 持有 Session。
+- 业务模块不得直接调用 `celery_app.control.revoke`；单条和批量撤销必须经过 `runtime_guard` 的共享 helper。
+  批量 helper 必须有序去重、保持一次 control 调用并显式保留 terminate/signal 语义。源码门禁应保证直接
+  revoke 只存在于共享守卫内部，避免新调用点绕过 dirty-state 检查、只读事务释放和故障降级。
+- 每次 revoke 都必须输出成对的 `[DB_SESSION_BOUNDARY] phase=before_io/after_io` 结构化事件，至少包含
+  request id、Celery request/task、business task、broker task 或 count、terminate、事务状态、durable
+  commit 标记、outcome 与 duration。未捕获自然事件不能解释为未发生；下一窗口必须按这些键与 SQL origin、
+  业务终态和旧消息 consumer guard 对账。
+- 代码审查、完整测试和运行替换前必须执行
+  `venv/bin/python scripts/dev/check-celery-revoke-boundary.py`。该 AST 门禁必须扫描整个 backend，拒绝共享
+  守卫外的 direct revoke，并拒绝缺 `operation` / `business_task_id` 的 helper 调用；人工 `rg` 只能作为
+  补充证据，不能替代会自动失败的门禁。
 
 推荐释放函数：
 
@@ -67,9 +108,12 @@ def release_db_session_quietly():
 - Worker / scheduler / watchdog：默认 `NullPool`，任务用完即还。
 - PgBouncer：transaction pool，限制服务端连接，允许应用端短连接进入排队。本地远端
   PostgreSQL 链路保留 `min_pool_size=6` 与 `server_idle_timeout=600`，避免页面并发
-  退化为冷连接扇出；跨 Tailscale 的后端 socket 默认 `server_lifetime=300`，并由
-  生成脚本和测试共同锁定。热连接数量与 socket 寿命是两项独立防线，禁止再用
-  6 小时长寿命掩盖网络漂移后的陈旧连接。
+  退化为冷连接扇出；跨 Tailscale 的后端 socket 只允许使用经过压测的
+  `server_lifetime=300/900/1800` 候选。2026-08-29 的有界 A/B 在两档均无六类连接错误时，
+  1800 秒把建连率从约 72/h 降至 7.56/h，且 P95 不劣于 900 秒，因此当前默认值为
+  `server_lifetime=1800`，并由生成脚本和测试共同锁定。调整前必须重新跑同一 A/B 和完整
+  后窗；热连接数量与 socket 寿命是两项独立防线，禁止恢复 6 小时长寿命来掩盖网络漂移后的
+  陈旧连接，也禁止把 300 秒旧基线误写成当前默认值。
 - PostgreSQL 服务端建议设置硬保险：
   - `idle_in_transaction_session_timeout`
   - `statement_timeout`
@@ -112,6 +156,10 @@ ORDER BY xact_start NULLS LAST;
 - `idle in transaction` 为 0，或仅有正在结束的短事务且小于 60 秒。
 - worker/scheduler/watchdog 重启后一轮内不留下长事务。
 - 业务列表 API、Celery 看板、自动收口逻辑不会因为只读查询留下事务。
+- 详情自动轮询的父查询不含大 JSON，SQL 数与场景/child 数无关；完整详情字段、原始审计数据和内容哈希
+  合并语义保持兼容。必须分别记录完整加载与动态轮询的 response bytes、P50/P95/max 和 SQL origin。
+- watchdog 连续周期不得重复执行不参与卡死判定、告警或修复的仪表盘展示聚合；展示 API 的单次按需查询
+  与后台自动轮询必须按 process、request id 和 SQL origin 分开统计。
 - `db_connection_lifecycle` 不应出现超过默认 5 秒的连接持有；确有长 SQL 时必须同时提供 executor 证据，不能把跨外部等待当成长 SQL。
 - 应用侧 SQL 超过 500ms、但相同 SQL 的 PostgreSQL executor 小于 10ms 时，不得新增
   索引；必须检查 PgBouncer `cl_waiting/sv_login/sv_idle`、连接事件和远端网络。

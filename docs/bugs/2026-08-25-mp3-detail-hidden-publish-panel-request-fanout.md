@@ -2,14 +2,14 @@
 
 ## 基本信息
 
-- 状态：RUNTIME_REPLACED / OBSERVING；静态资源已替换，待真实浏览器流量与下一完整窗口验收
+- 状态：RUNTIME_REPLACED / OBSERVING；2026-08-26 修复首次凭据超时后的第二 owner 竞态，待真实浏览器流量与下一完整窗口验收
 - 严重级别：P0
 - 影响模块：MP3 视频编排详情 / 平台凭据 / 抖音与视频号上传历史 / PostgreSQL
 - 首次发现：2026-08-25 每日数据库性能巡检
 - 修复提交：当前工作区
-- 根因分类：隐藏面板提前挂载、请求扇出、同源凭据重复读取
+- 根因分类：隐藏面板提前挂载、请求扇出、同源凭据重复读取、失败状态未共享导致第二 owner 重试
 - 复发键：`HOT-PATH-PAYLOAD-POLLING`
-- 是否复发：是；同属隐藏页面/隐藏面板无用户收益却持续访问热点 API 的复发模式
+- 是否复发：是；2026-08-26 在首次凭据请求超过浏览器 15 秒预算后，面板又成为第二 owner 发起请求
 - 关联记录：`2026-08-20-report-script-material-hidden-worker-polling.md`、`2026-08-16-hidden-status-pages-unbounded-polling.md`、`2026-08-02-request-auth-duplicate-user-query.md`
 - 防线层级：lazy_mount / request_budget / behavioral_contract / runtime_observation
 
@@ -51,3 +51,11 @@
 - 页面级请求预算契约：首次 MP3 详情加载最多 1 次任务详情和 1 次 B站凭据请求；未切换平台前抖音/视频号凭据与历史请求必须为 0。
 - 下一轮按时间与 request id 聚类；若仍出现一次详情后 3–4 条凭据或隐藏平台历史请求，继续追静态资源版本、旧浏览器实例和其他 mount 入口。
 - 后续完整窗口确认上述扇出指纹为 0，且平台凭据请求量相对详情访问量符合真实标签切换后，方可 CLOSED。
+
+## 2026-08-26 复发追踪：首次超时后第二 owner 请求
+
+固定窗口 `2026-08-25 06:02:19` 至 `2026-08-26 06:02:19` 内，隐藏抖音和视频号上传历史均从 50 次降为 0，说明上一轮惰性挂载已经生效；但平台凭据仍有 43 次，而 job detail 为 36 次。`request_id=c96aecff` 的详情请求从 `10:22:26` 开始、耗时 14.071 秒；页面随后发起 `request_id=4987d108` 的凭据请求，服务端耗时 24.465 秒。浏览器 15 秒预算先到期后，旧逻辑没有把失败状态标记为“页面已拥有这次加载”，面板 `setJob()` 又触发第二条 `request_id=f74541d5`，后者 0.811 秒返回。这是同一复发键下新的 owner 竞态，不是用户主动重试。
+
+修复将详情页定义为首次凭据请求的唯一 owner：挂载面板时无论成功或失败都注入凭据、错误状态并设置 `credentialsLoaded=true`，阻止共享面板自动发起第二请求；用户显式刷新仍可通过页面原入口重试，不删除错误提示或凭据字段。静态资源版本升级为 `20260826-publish-credential-single-owner-v2`。
+
+TDD 红灯证据为新增行为契约在旧代码下得到 `duplicateCredentialLoads=1`；修复后 Node 行为契约、6 项 Python 资源契约与 JavaScript 语法检查通过。本地运行 backend 的 `/health` 为 healthy，真实 HTML 已返回 v2 资源。由于修复发生在窗口结束后，尚无修复后真实 job 浏览器 request id，因此仍为 `RUNTIME_REPLACED / OBSERVING`，不得标记 CLOSED。下一完整窗口必须同时满足：每个首次详情加载至多 1 条凭据请求、超时后无自动第二 owner 请求、未切换平台时抖音/视频号历史保持 0。

@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 
 from celery.exceptions import Retry
-from flask import has_app_context
+from flask import g, has_app_context, has_request_context
 from sqlalchemy import func, text
 from sqlalchemy.exc import DBAPIError, OperationalError, PendingRollbackError
 from sqlalchemy.orm import load_only
@@ -470,6 +470,189 @@ def end_db_transaction_before_external_io(operation="external I/O", *, remove=Fa
 def apply_async_after_db_release(celery_callable, **apply_options):
     end_db_transaction_before_external_io("celery task publish")
     return celery_callable.apply_async(**apply_options)
+
+
+def revoke_celery_task_after_db_commit(
+    celery_task_id,
+    *,
+    terminate=False,
+    operation="celery task revoke",
+    business_task_id=None,
+    log=None,
+):
+    """Revoke only after durable state is committed and the DB lease is returned."""
+
+    task_id = str(celery_task_id or "").strip()
+    if not task_id:
+        return True
+    end_db_transaction_before_external_io(operation)
+    from celery_config import celery_app
+
+    event_logger = log or logger
+    request_id, celery_request_id, celery_task_name = _external_io_log_context()
+    session_in_transaction = (
+        str(bool(db.session().in_transaction())).lower()
+        if has_app_context()
+        else "unknown"
+    )
+    started_at = time.monotonic()
+    event_logger.info(
+        "[DB_SESSION_BOUNDARY] phase=before_io operation=%s request_id=%s "
+        "celery_request_id=%s celery_task_name=%s business_task=%s "
+        "broker_task=%s broker_count=1 terminate=%s "
+        "session_in_transaction=%s durable_state_committed=true",
+        operation,
+        request_id,
+        celery_request_id,
+        celery_task_name,
+        str(business_task_id or "unknown"),
+        task_id,
+        str(bool(terminate)).lower(),
+        session_in_transaction,
+    )
+    try:
+        celery_app.control.revoke(task_id, terminate=bool(terminate))
+    except Exception as exc:
+        event_logger.warning(
+            "[DB_SESSION_BOUNDARY] phase=after_io operation=%s request_id=%s "
+            "celery_request_id=%s business_task=%s broker_task=%s "
+            "outcome=failed duration_ms=%.2f error_type=%s",
+            operation,
+            request_id,
+            celery_request_id,
+            str(business_task_id or "unknown"),
+            task_id,
+            (time.monotonic() - started_at) * 1000.0,
+            type(exc).__name__,
+        )
+        event_logger.warning(
+            "%s failed after durable DB commit: celery=%s error=%s",
+            operation,
+            task_id,
+            exc,
+        )
+        return False
+    event_logger.info(
+        "[DB_SESSION_BOUNDARY] phase=after_io operation=%s request_id=%s "
+        "celery_request_id=%s business_task=%s broker_task=%s "
+        "outcome=success duration_ms=%.2f",
+        operation,
+        request_id,
+        celery_request_id,
+        str(business_task_id or "unknown"),
+        task_id,
+        (time.monotonic() - started_at) * 1000.0,
+    )
+    return True
+
+
+def revoke_celery_tasks_after_db_commit(
+    celery_task_ids,
+    *,
+    terminate=False,
+    signal=None,
+    operation="celery tasks revoke",
+    business_task_id=None,
+    log=None,
+):
+    """Batch revoke after one clean DB boundary while preserving control options."""
+
+    raw_ids = (
+        [celery_task_ids]
+        if isinstance(celery_task_ids, (str, bytes))
+        else list(celery_task_ids or [])
+    )
+    task_ids = []
+    seen = set()
+    for value in raw_ids:
+        task_id = str(value or "").strip()
+        if not task_id or task_id in seen:
+            continue
+        seen.add(task_id)
+        task_ids.append(task_id)
+    if not task_ids:
+        return True
+
+    end_db_transaction_before_external_io(operation)
+    from celery_config import celery_app
+
+    event_logger = log or logger
+    request_id, celery_request_id, celery_task_name = _external_io_log_context()
+    session_in_transaction = (
+        str(bool(db.session().in_transaction())).lower()
+        if has_app_context()
+        else "unknown"
+    )
+    signal_name = str(signal or "none")
+    started_at = time.monotonic()
+    event_logger.info(
+        "[DB_SESSION_BOUNDARY] phase=before_io operation=%s request_id=%s "
+        "celery_request_id=%s celery_task_name=%s business_task=%s "
+        "broker_count=%s terminate=%s signal=%s session_in_transaction=%s "
+        "durable_state_committed=true",
+        operation,
+        request_id,
+        celery_request_id,
+        celery_task_name,
+        str(business_task_id or "unknown"),
+        len(task_ids),
+        str(bool(terminate)).lower(),
+        signal_name,
+        session_in_transaction,
+    )
+    options = {"terminate": bool(terminate)}
+    if signal:
+        options["signal"] = str(signal)
+    try:
+        celery_app.control.revoke(task_ids, **options)
+    except Exception as exc:
+        event_logger.warning(
+            "[DB_SESSION_BOUNDARY] phase=after_io operation=%s request_id=%s "
+            "celery_request_id=%s business_task=%s broker_count=%s "
+            "outcome=failed duration_ms=%.2f error_type=%s",
+            operation,
+            request_id,
+            celery_request_id,
+            str(business_task_id or "unknown"),
+            len(task_ids),
+            (time.monotonic() - started_at) * 1000.0,
+            type(exc).__name__,
+        )
+        event_logger.warning(
+            "%s failed after durable DB commit: celery_count=%s error=%s",
+            operation,
+            len(task_ids),
+            exc,
+        )
+        return False
+    event_logger.info(
+        "[DB_SESSION_BOUNDARY] phase=after_io operation=%s request_id=%s "
+        "celery_request_id=%s business_task=%s broker_count=%s "
+        "outcome=success duration_ms=%.2f",
+        operation,
+        request_id,
+        celery_request_id,
+        str(business_task_id or "unknown"),
+        len(task_ids),
+        (time.monotonic() - started_at) * 1000.0,
+    )
+    return True
+
+
+def _external_io_log_context():
+    request_id = "unknown"
+    if has_request_context():
+        request_id = str(getattr(g, "request_id", "") or "unknown")
+    try:
+        from celery import current_task
+
+        request = current_task.request
+        celery_request_id = str(getattr(request, "id", "") or "unknown")
+        celery_task_name = str(getattr(current_task, "name", "") or "unknown")
+    except Exception:
+        celery_request_id = "unknown"
+        celery_task_name = "unknown"
+    return request_id, celery_request_id, celery_task_name
 
 
 def retry_exception_types():

@@ -773,6 +773,49 @@ class ReportVisualPlanStoryboardTest(unittest.TestCase):
             self.material()["final_script_for_tts"],
         )
 
+    def test_labeled_gemini_response_uses_complete_suffix_after_repeated_prefix(self):
+        material = {
+            "title": "测试研报",
+            "final_script_for_tts": "第一段。第二段。第三段。",
+        }
+        # Gemini can repeat the already-visible prefix when a long answer is
+        # continued.  The complete suffix is still entirely Gem-authored and
+        # must be accepted without a second provider call.
+        gemini_text = """
+标题镜头
+【文案原句】：标题：测试研报
+【画面动作】：新建画面
+【视觉隐喻】：标题板
+【AI 提示词】：Exact title prompt
+分镜 1
+【文案原句】：第一段。
+【画面动作】：新建画面
+【视觉隐喻】：第一段
+【AI 提示词】：Repeated prefix prompt
+分镜 1
+【文案原句】：第一段。第二段。
+【画面动作】：新建画面
+【视觉隐喻】：前两段
+【AI 提示词】：Complete first prompt
+分镜 2
+【文案原句】：第三段。
+【画面动作】：新建画面
+【视觉隐喻】：第三段
+【AI 提示词】：Complete second prompt
+【全文分镜完成】
+""".strip()
+        with patch.object(service, "_deepseek_json", side_effect=AssertionError("DS should not be called")):
+            result = service.normalize_storyboard_response(material, gemini_text)
+
+        self.assertEqual("deterministic_parser", result["provider"])
+        self.assertEqual(
+            ["Complete first prompt", "Complete second prompt"],
+            [item["visual_prompt"] for item in result["segments"]],
+        )
+        self.assertEqual(material["final_script_for_tts"], "".join(
+            item["script_text"] for item in result["segments"]
+        ))
+
     def test_labeled_gemini_response_accepts_observation_typo_for_action_field(self):
         gemini_text = """
 标题镜头

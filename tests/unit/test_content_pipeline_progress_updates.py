@@ -2,7 +2,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from flask import Flask
 
@@ -31,11 +31,13 @@ def _registration_from_cleaned_files(_task_id, *, cleaned_files, **_kwargs):
 
 class _SuccessfulPdfAdapter:
     last_checkpoint = None
+    last_reset_workspace = None
 
     def __init__(self, **_kwargs):
         pass
 
     def run_batch(self, *, batch_id, progress_callback, **_kwargs):
+        type(self).last_reset_workspace = _kwargs.get("reset_workspace")
         progress_callback({
             "phase": "local_cleaning",
             "progress": 46,
@@ -127,6 +129,7 @@ class ContentPipelineProgressUpdateTest(unittest.TestCase):
 
     def test_pdf_progress_keeps_audit_result_and_final_output(self):
         _SuccessfulPdfAdapter.last_checkpoint = None
+        _SuccessfulPdfAdapter.last_reset_workspace = None
         task_id = self._task(
             "content_pdf_clean",
             {"pdf_clean": {"files": ["/tmp/a.pdf"], "cleaner": {"engine": "local"}}},
@@ -154,6 +157,7 @@ class ContentPipelineProgressUpdateTest(unittest.TestCase):
         self.assertEqual(task.content_clean_failed_count, 0)
         self.assertEqual(_SuccessfulPdfAdapter.last_checkpoint["cleaner_job_id"], "pdf-job-1")
         self.assertEqual(_SuccessfulPdfAdapter.last_checkpoint["preserved"], "yes")
+        self.assertTrue(_SuccessfulPdfAdapter.last_reset_workspace)
         notify.assert_called_once()
         event = notify.call_args.kwargs["event_payload"]
         self.assertEqual(event["task_id"], task_id)
@@ -203,6 +207,33 @@ class ContentPipelineProgressUpdateTest(unittest.TestCase):
         self.assertEqual(
             event["registered_output_paths"],
             [str(Path("/tmp/audio-cleaned/a.mp3").resolve())],
+        )
+
+    def test_pdf_db_retry_reuses_workspace_and_never_marks_assets_failed(self):
+        _SuccessfulPdfAdapter.last_reset_workspace = None
+        task_id = self._task(
+            "content_pdf_clean",
+            {"pdf_clean": {"files": ["/tmp/a.pdf"], "cleaner": {"engine": "local"}}},
+        )
+        celery_task = SimpleNamespace(request=SimpleNamespace(retries=1))
+        disconnect = RuntimeError("server closed the connection unexpectedly")
+
+        with patch.object(content_pipeline, "_create_content_pipeline_app", return_value=self.app), \
+             patch.object(content_pipeline, "PdfCleanerAdapter", _SuccessfulPdfAdapter), \
+             patch.object(content_pipeline, "guard_publication_task_start"), \
+             patch.object(content_pipeline, "register_cleaned_outputs", side_effect=disconnect), \
+             patch.object(content_pipeline, "_is_retryable_db_error", return_value=True), \
+             patch.object(content_pipeline, "mark_task_assets") as mark_assets:
+            with self.assertRaisesRegex(RuntimeError, "server closed"):
+                content_pipeline._run_pdf_clean_task_impl_guarded(
+                    task_id,
+                    celery_task=celery_task,
+                )
+
+        self.assertFalse(_SuccessfulPdfAdapter.last_reset_workspace)
+        self.assertEqual(
+            mark_assets.call_args_list,
+            [call(task_id, status="cleaning")],
         )
 
 

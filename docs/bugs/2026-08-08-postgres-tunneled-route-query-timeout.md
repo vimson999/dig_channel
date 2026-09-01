@@ -240,3 +240,132 @@ scheduler/API/worker 验收；否则继续追代理配置和 Tailscale path。
   应用慢 SQL P95 7.079s。故无证据转向索引或锁，剩余根因仍在 PgBouncer/网络传输边界。
 - 状态保持 `RUNTIME_MITIGATED/OPEN`。下一完整窗口必须同时满足 query/connect timeout=0、
   proxy TUN/query-wait/crash/TLS=0、应用失败 SQL=0，并覆盖真实 API/worker 才能进入关闭观察。
+
+### 2026-08-29 query timeout 与连接持有长尾复发
+
+- 固定窗口 PgBouncer 去重 `connect/query timeout=10/2`，server wait P95 90.94ms、最大 1822.05ms；source 仍为 Tailscale `100.96.3.12` 到 `100.92.99.39`，未见 proxy TUN fallback。
+- 两次 query timeout 均与真实 worker SQL 同秒：MP3 任务点查 20.251 秒后由现有数据库重试恢复；ZSXQ publish 来源任务点查 22.247 秒后污染 Session 并导致完成通知漏投，后者已单独修复生命周期级联。
+- 只读现场无 waiting lock、无 idle-in-transaction；代表性 publication 主键/配置/列表 executor 小于 0.14ms，audio-assets 搜索 executor 102.923ms，而应用慢 SQL P95 7.434 秒。没有新增索引依据。
+- 状态保持 `RUNTIME_MITIGATED / OPEN / REPEATED`。下一轮仍要求 connect/query timeout、应用失败 SQL 同时为 0，并把 executor、PgBouncer wait、commit/checkin 与 request/task id 分段闭环。
+
+### 2026-08-29 server_lifetime 900/1800 真实 A/B 与运行替换
+
+300 秒轮换、6 条热后端连接对应的基线约为 72 次新 server connection/小时；它减少陈旧 socket
+复用，却把远端 TLS/Tailscale 建连频率放大。本轮没有调高 query/connect timeout，而是用同一
+只读 `SELECT 1` 客户端和 PgBouncer 日志口径依次跑两个完整候选窗口：
+
+- 900 秒：1,001.157 秒、185/185 成功，探针 P50/P95/max 为
+  241.178/1508.540/5424.375ms；6 次新连接，即 21.575 次/小时，较基线下降 70.03%；
+  connect/query/query-wait/server-crash/TLS/login failure 全为 0，source 仅
+  `100.96.3.12`。
+- 1800 秒：1,904.879 秒、352/352 成功，探针 P50/P95/max 为
+  239.650/1433.797/4719.955ms；4 次新连接，即 7.560 次/小时，较基线下降 89.50%；
+  同六类错误全为 0，source 仍仅 `100.96.3.12`。PgBouncer wait P95/max 为
+  13.083/23.937ms，query P95/max 为 124.712/143.657ms。
+
+两个候选都达到预先锁定的“成功率 100%、错误为 0、churn 至少下降 70%”门槛；选择器再按探针
+P95、建连率排序，确定 1800 秒。生成器默认值和契约测试已改为 1800，标准整栈重启后
+`SHOW CONFIG` 确认 `server_lifetime=1800`、`server_idle_timeout=600`、
+`min_pool_size=6`、`query_timeout=20`、`server_check_delay=5`、仅 `tcp_keepalive=1`；
+`SHOW POOLS` 为 `cl_waiting=0/sv_used=6`，六条 server 均从 Tailscale
+`100.96.3.12` 连接 `100.92.99.39`。重启后短窗口六类故障均为 0。
+
+这项变更根治了“300 秒固定轮换导致的可控建连 churn”，但没有证明 Tailscale/远端网络长尾在
+完整业务日消失。固定窗已有 connect/query timeout 10/2，真实 audio-assets 重启后冷请求仍为
+3.604 秒、暖态三次为 0.630/0.786/0.693 秒；因此网络问题保持
+`RUNTIME_REPLACED / OPEN / OBSERVING`。下一完整 24 小时仍要求 connect/query/query-wait/
+crash/TLS/login failure 和应用失败 SQL 同时为 0，才允许关闭。
+
+### 2026-08-29 17:54 业务冷启动长尾再次复发
+
+- 17:52:34–17:57:19 新 backend 真实页面窗口出现 7 条慢 SQL、累计 40.669 秒、P95 16.354 秒和
+  2 条长连接持有；目录 `7c7c4e07` 11.812 秒、jobs `f84a8c62` 16.918 秒、全量 Celery status
+  `092d1145` 14.404 秒。jobs 中 `SET LOCAL statement_timeout=5000` 本身等待 16.354 秒，进一步
+  排除具体表 executor 或缺索引是共同根因。
+- PgBouncer 同窗 `cl_waiting=0`、6 条 server 就绪，source 仅 Tailscale `100.96.3.12` 到
+  `100.92.99.39`，proxy TUN fallback 为 0；server wait 最大约 80ms，没有 query/connect/
+  query-wait/crash/TLS/login failure。慢 SQL 可同时落在不同新旧 server socket，不能只归因于一次
+  lifetime rotation。
+- 事后 Tailscale ping 为 direct UDP、约 27ms，TCP 5432 可连，只能证明复核时链路恢复，不能否认
+  17:54 短时传输/驱动等待。历史 21,600 秒 lifetime 曾产生陈旧 socket timeout，因此本轮没有凭
+  一次 spike 盲目加长；1800 秒 A/B 选择和 timeout 均保持不变。
+- 应用侧已消除页面放大器：MP3 页不再为两个 worker 徽标调用跨业务表全量 status，而使用 runtime-only
+  进程/精确队列端点。最终 18:06:17 后 12/12 请求成功、P95 377.78ms、最大 1.503 秒，0 慢 SQL、
+  0 长持有、六类 PgBouncer 错误为 0。这证明降载根因已替换，但不是底层网络不复发证据。
+
+状态保持 `RUNTIME_REPLACED / OPEN / REPEATED / OBSERVING`。下一完整 24 小时必须同时满足六类
+PgBouncer 错误为 0、应用失败 SQL 为 0、20 秒级 hold 为 0，并将任何新长尾按 request/task id、
+SQL origin、server socket 创建时间和 execute/fetch/commit/checkin 分段；一次健康 ping、一次页面
+快窗或 executor 毫秒级都不能单独关闭问题。
+
+### 2026-08-29 18:27 scheduler 配置点查再次出现网络尾部
+
+- 标准整栈重启期间，B站充电 scheduler 的 `load_schedule_config` 点查耗时 2,081.37ms；同一 SQL
+  自 8 月 5 日以来至少 14 次超过 1 秒，最新两次重启分别为 1,029.03ms 和 2,081.37ms，属于反复
+  后台尾延迟而非单次噪声。
+- 真实表只有 18 行/64KB；`EXPLAIN (ANALYZE, BUFFERS)` 顺扫 1 个 shared buffer，planning
+  0.029ms、execution 0.014ms。8 次同连接端到端点查为 27.7–31.4ms。优化器选择顺扫小表合理，
+  现有 `(key, scope)` 唯一索引完整，不新增索引。
+- 同分钟 PgBouncer 平均 wait 13.12ms、query 116.70ms，六类连接错误为 0；2.081 秒应用执行时间与
+  0.014ms executor 的差值仍落在远端 PostgreSQL 返回/网络传输边界。该 scheduler 启动最终成功，
+  不涉及失败重试风暴或 Session 跨外部 I/O。
+
+状态继续为 `RUNTIME_REPLACED / OPEN / REPEATED / OBSERVING`。下一完整窗口除六类错误、失败 SQL、
+长 hold 外，必须单列该配置指纹的次数、累计、P95/max及 scheduler 启动影响；不得以小表新增索引掩盖
+链路问题。
+
+### 2026-08-31 Tailscale 直连丢包与真实 20 秒 query timeout
+
+- 固定窗口慢 SQL 为 110 条/262.811 秒/P95 5.501 秒，较上一轮分别改善 33.7%/43.6%/47.5%；
+  PgBouncer 六类错误为 0、建连率从 36.333/h 降到 12/h。这只是窗口改善，不能关闭问题。
+- 巡检真实页面随后捕获 `POST /api/v1/zsxq/topics/local` request `8c73fe09`：用户点查
+  927.08ms、主题查询 28.82ms，第三条 SQL 等待 20,013.12ms 后接口以 502/21,088.98ms 结束；
+  PgBouncer 在 06:11:35 同秒明确记录 server/client `closing because: query timeout`。
+- 同一页面下一次 request `bd3d49cf` 以 200/1,636.88ms 恢复，后续真实筛选返回 205 条本地结果并
+  渲染首批 20 条完整主题；失败不是稳定 SQL 语义或数据缺失。
+- 精确 SQL 现场：日期范围 count distinct 使用既有
+  `ix_zsxq_topics_group_create_synced_desc`，execution 741.058ms；分页 SQL 同索引 0.079ms；MP3
+  canonical 目录顺扫 726 行、返回 280 行，execution 0.626ms，而巡检冷请求却为
+  18.386s/SQL 17.433s。没有缺索引能共同解释两个不同表的秒级尾部。
+- `SHOW CONFIG` 确认 `pool_mode=transaction`、`query_timeout=20`、`query_wait_timeout=15`、
+  `server_lifetime=1800`、`default/min pool=15/6`；`SHOW POOLS` 当时 `cl_waiting=0`，6 条 server
+  均为 used。目标 `100.92.99.39` 经 `utun5`，Tailscale 显示 active direct endpoint
+  `121.4.126.31:41641`。20 包现场探测丢包 30%，RTT 27.098–184.053ms、stddev 59.952ms，
+  5432 仍可建立 TCP；这把剩余共同根因收敛到 Tailscale/物理出口/远端网络质量，而不是 executor、
+  锁、池排队或应用 CPU。
+
+状态保持 `RUNTIME_REPLACED / OPEN / REPEATED / OBSERVING`。未提高 timeout、未加重试、未改
+PgBouncer/Tailscale 配置；这类动作不能根治丢包且属于人工基础设施变更。下一轮必须同时取得 24 小时
+丢包/路径质量、六类 PgBouncer 错误、20 秒 hold/502 与真实页面冷链指标，连续无复发后才可关闭。
+
+### 2026-08-31 08:36 恢复快照（不构成关闭证据）
+
+同一目标 `100.92.99.39` 的 20 包只读探测已恢复为 20/20、丢包 0%，但 RTT
+min/avg/max/stddev 仍为 26.731/78.135/177.386/50.807ms。它与 06:11 的 30% 丢包、
+20 秒 query timeout 共同证明链路呈间歇性抖动；一次恢复快照不能覆盖先前真实 502，也不能满足
+连续后窗验收。状态保持 `OPEN / REPEATED / OBSERVING`。
+
+### 2026-08-31 08:51 worker 连接再次中断
+
+恢复快照后仅约 15 分钟，真实 PDF 清洗任务 `5341ebed-3ef5-4ce0-aa63-8cb1fe99ca1b` 在完成 31 份
+文件、批量更新 31 个 `content_pipeline_assets` 的 commit/确认边界再次收到
+`server closed the connection unexpectedly`。Celery 有界重试成功，但旧应用把全部 31 份 PDF 重做，
+第二轮耗时 532.224 秒；用户流程直到 09:00:58 才完成。重启安全门在 08:52 的只读
+`publication_tasks` 查询也曾等待 7,857.43ms，而 09:04 后同门查询恢复至 171.06ms。
+
+这进一步证明 08:36 的 0% 丢包只是一段恢复，不是根因关闭。应用侧已新增 durable checkpoint 采用与
+状态单调防线，避免网络瞬断再次放大为整批 OCR；底层网络仍为 `OPEN / REPEATED / OBSERVING`。
+验收仍要求完整 24 小时六类 PgBouncer 错误、server closed、失败 SQL、20 秒 hold/502 均为 0。
+
+### 2026-08-31 11:27 空列表再次出现 17 秒驱动等待
+
+自然 PDF 合并列表 request `112cdfd9` 返回 200/18.024 秒，其中旧全实体任务 SQL
+`358df92aaae36a2d` 为 17.328 秒但返回 0 行，连接持有 17.644 秒；非 SQL仅41.75ms。生产只读
+EXPLAIN 对新等价条件 execution 0.201ms、planning 0.289ms、3 行、48 shared hit/0 read，同次应用
+驱动仍等待 867.57ms，`SET TRANSACTION READ ONLY` 也曾等待 1.669 秒。现有
+`(feature,user_id,created_at DESC)` 索引完整，进一步证明共同尾部不在 executor/索引。
+
+应用放大器已收窄为一次轻投影窗口查询、查询后 release、终态/隐藏停止和 single-flight。11:21 标准
+重启到 PID `82858` 后，真实 request `54fde6f1`/`7571d127` 为 459.39/370.30ms，各仅一条任务
+SELECT 318.51/119.96ms；真实终态页面 26 秒仅请求一次，未再产生长 hold。该结果只证明应用放大器已
+`RUNTIME_REPLACED / OBSERVING`；底层网络仍 `OPEN / REPEATED`，完整 24 小时与后续窗口验收条件不变。

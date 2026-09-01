@@ -78,3 +78,14 @@ Tailscale 地址 `100.96.3.12` 回退到代理 TUN 地址 `198.18.0.1`；同窗�
   path 变化；巡检不会无人值守修改系统路由。
 - 即使 route 已恢复，窗口后段仍有 query/connect timeout；下一轮必须分别归因，不能把所有
   网络异常都归给 13:07 的一次回退。
+
+## 2026-08-30 网络簇复核
+
+固定窗口仍有去重 connect/query timeout `5/1`，建连率由 72.333/h 降至 36.333/h。最终 backend
+`2026-08-29 19:06:43` 后 10.9 小时内六类 PgBouncer 错误均为 0，server source 仍为
+`100.96.3.12` 且未落入代理 TUN；但同窗 18 行 `system_configs` 查询仍出现 13.443 秒，生产
+executor 仅 0.043 毫秒。巡检真实 Insights 详情又出现 13.476 秒，而 executor 仅 1.069 毫秒。
+
+因此路由回退观测修复有效、显式 TUN fallback 未复发，但“远端网络/PgBouncer 长尾”仍为
+`OPEN/REPEATED`。10.9 小时无错误不足以关闭；下一轮必须补满最终 PID 的 24 小时，并把六类事件、
+server source、连接 churn、wait/query stats 与所有 executor<10ms、应用>5s 的 SQL 同时复核。

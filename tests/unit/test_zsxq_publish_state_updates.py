@@ -96,6 +96,37 @@ class ZsxqPublishStateUpdateTest(unittest.TestCase):
         self.assertEqual(snapshot.result["preserved"], "yes")
         notify.assert_called_once_with("workflow-1", task_id)
 
+    def test_attachment_status_update_retries_transient_db_error_with_clean_session(self):
+        transient_error = RuntimeError("server closed the connection unexpectedly")
+        update_result = {"matched": 1, "updated": 1}
+
+        with patch(
+            "services.zsxq_sync_service.zsxq_sync_service.update_attachment_publish_status_from_publish_task",
+            side_effect=[transient_error, update_result],
+        ) as update, patch.object(db.session, "rollback") as rollback, patch.object(
+            db.session, "remove"
+        ) as remove:
+            ok = zsxq_publish._update_attachment_publish_status("publish-task-1")
+
+        self.assertTrue(ok)
+        self.assertEqual(2, update.call_count)
+        rollback.assert_called_once_with()
+        self.assertEqual(2, remove.call_count)
+
+    def test_attachment_status_update_cleans_session_after_nonretryable_error(self):
+        with patch(
+            "services.zsxq_sync_service.zsxq_sync_service.update_attachment_publish_status_from_publish_task",
+            side_effect=ValueError("invalid publish context"),
+        ) as update, patch.object(db.session, "rollback") as rollback, patch.object(
+            db.session, "remove"
+        ) as remove:
+            ok = zsxq_publish._update_attachment_publish_status("publish-task-1")
+
+        self.assertFalse(ok)
+        update.assert_called_once_with("publish-task-1")
+        rollback.assert_called_once_with()
+        remove.assert_called_once_with()
+
     def test_db_credential_is_marked_only_after_publish_outcome(self):
         account = {"credential_id": "credential-1", "cookie": "token=abc"}
 

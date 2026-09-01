@@ -1557,6 +1557,7 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"REPORT_AUDIO_GEMINI_MIN_FINAL_CHARS": "10"}, clear=False), \
             patch.object(report_audio_workflow, "_run_gemini_task_with_retries") as run_gemini, \
+            patch.object(report_audio_workflow, "review_report_cover_titles", return_value=structured), \
             patch.object(report_audio_workflow, "_queue_notification", return_value=True):
             ok = _process_job(workflow.id)
 
@@ -2084,6 +2085,7 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
         ), patch.object(report_audio_workflow, "_run_gemini_task_with_retries") as run_gemini, \
             patch.object(report_audio_workflow, "_create_doubao_tts_task") as create_doubao, \
             patch.object(report_audio_workflow, "render_pdf_first_page_image", return_value=screenshot), \
+            patch.object(report_audio_workflow, "review_report_cover_titles", return_value=structured), \
             patch.object(report_audio_workflow, "_create_publisher_video_task", return_value=publisher) as create_video, \
             patch.object(report_audio_workflow, "_queue_notification", return_value=True):
             ok = _process_job(workflow.id)
@@ -2187,6 +2189,7 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
             patch.object(report_audio_workflow, "_run_doubao_tts_chunks") as run_doubao, \
             patch.object(report_audio_workflow, "combine_wav_files") as combine_audio, \
             patch.object(report_audio_workflow, "render_pdf_first_page_image", return_value=screenshot), \
+            patch.object(report_audio_workflow, "review_report_cover_titles", return_value=structured), \
             patch.object(report_audio_workflow, "_create_publisher_video_task", return_value=publisher) as create_video, \
             patch.object(report_audio_workflow, "_queue_notification", return_value=True):
             ok = _process_job(workflow.id)
@@ -2307,6 +2310,7 @@ class ReportAudioWorkflowMaterialReuseTest(unittest.TestCase):
             patch.object(report_audio_workflow, "_run_doubao_tts_chunks") as run_doubao, \
             patch.object(report_audio_workflow, "combine_wav_files") as combine_audio, \
             patch.object(report_audio_workflow, "render_pdf_first_page_image", return_value=screenshot), \
+            patch.object(report_audio_workflow, "review_report_cover_titles", return_value=structured), \
             patch.object(report_audio_workflow, "_create_publisher_video_task") as create_video, \
             patch.object(report_audio_workflow, "_queue_notification", return_value=True):
             ok = _process_job(workflow.id)

@@ -302,6 +302,36 @@ class ReportStickFigureVideoRenderTest(unittest.TestCase):
             self.assertAlmostEqual(manifest["timeline"][1]["start_seconds"], 0.4, delta=0.02)
             self.assertAlmostEqual(result["duration_seconds"], 1.0, delta=0.12)
 
+    def test_renderer_accepts_an_explicit_generic_output_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            generic_root = root / "generic-workflow"
+            audio_path = root / "whole.wav"
+            image_path = root / "001.png"
+            self._wav(audio_path, 0.5, 380)
+            Image.new("RGB", (960, 540), "white").save(image_path)
+
+            result = render_scene_timeline(
+                "generic-output-root",
+                [{
+                    "asset_id": "scene-1",
+                    "sequence": 1,
+                    "image_path": str(image_path),
+                    "script_text": "第一段。",
+                    "start_seconds": 0,
+                    "end_seconds": 0.5,
+                }],
+                audio_mode="whole_audio",
+                whole_audio_path=str(audio_path),
+                width=640,
+                height=360,
+                fps=12,
+                output_root=generic_root,
+            )
+
+            self.assertEqual(generic_root.resolve() / "video" / "video.mp4", Path(result["video_path"]))
+            self.assertTrue(Path(result["manifest_path"]).is_file())
+
     def test_text_alignment_builds_continuous_full_audio_boundaries(self):
         scenes = [
             {"asset_id": "a1", "segment_id": "s1", "sequence": 1, "script_text": "硬件公司的利润天花板正在被打破。"},
