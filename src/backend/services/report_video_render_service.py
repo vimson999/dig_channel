@@ -2619,24 +2619,49 @@ def escape_subtitle_filter_path(path):
     return str(Path(path).resolve()).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
 
 
-def make_concat_video(frame_items, output_path, width, height, audio_path=None, subtitle_path=None, transition_duration=0.6):
+def make_concat_video(
+    frame_items,
+    output_path,
+    width,
+    height,
+    audio_path=None,
+    subtitle_path=None,
+    transition_duration=0.6,
+    motion=False,
+):
     output_path = Path(output_path)
     cmd = ["ffmpeg", "-y"]
     transition_duration = max(0.0, min(float(transition_duration or 0.0), 1.2))
     visible_duration = sum(max(float(duration), 1.0) for _, duration in frame_items)
+    frame_item_limit = max(MAX_XFADE_FRAME_ITEMS, 96) if motion else MAX_XFADE_FRAME_ITEMS
     use_xfade = (
         len(frame_items) > 1
         and transition_duration > 0.0
-        and len(frame_items) <= MAX_XFADE_FRAME_ITEMS
+        and len(frame_items) <= frame_item_limit
         and visible_duration <= MAX_XFADE_DURATION_SEC
     )
     post_trim_duration = 0.0
     encode_path = output_path
+    video_extensions = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
+    video_inputs = [
+        Path(frame_path).suffix.lower() in video_extensions
+        for frame_path, _ in frame_items
+    ]
 
     if use_xfade:
         for index, (frame_path, duration) in enumerate(frame_items):
             segment_duration = max(float(duration), 1.0)
             input_duration = segment_duration + transition_duration if index < len(frame_items) - 1 else segment_duration
+            if video_inputs[index]:
+                cmd.extend([
+                    "-t",
+                    f"{input_duration:.3f}",
+                    "-i",
+                    str(Path(frame_path).resolve()),
+                ])
+                continue
+            if motion:
+                cmd.extend(["-framerate", "30"])
             cmd.extend([
                 "-loop",
                 "1",
@@ -2671,9 +2696,23 @@ def make_concat_video(frame_items, output_path, width, height, audio_path=None, 
     if use_xfade:
         filter_parts = []
         for index in range(len(frame_items)):
+            media_prefix = (
+                f"[{index}:v]tpad=stop_mode=clone:stop_duration={transition_duration:.3f},"
+                if video_inputs[index]
+                else f"[{index}:v]"
+            )
+            base_filter = (
+                f"{media_prefix}scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
+            )
+            if motion and not video_inputs[index]:
+                base_filter += (
+                    f"zoompan=z='min(1.0+on*0.00010,1.022)':"
+                    f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                    f"d=1:s={width}x{height}:fps=30,"
+                )
             filter_parts.append(
-                f"[{index}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps=30,format=yuv420p,setsar=1[v{index}]"
+                f"{base_filter}fps=30,format=yuv420p,setsar=1[v{index}]"
             )
 
         visible_total = max(float(frame_items[0][1]), 1.0)
@@ -2743,9 +2782,12 @@ def make_concat_video(frame_items, output_path, width, height, audio_path=None, 
         cmd.extend(["-an"])
     cmd.append(str(encode_path))
 
+    timeout_scale = 3.2 if motion and use_xfade else (1.2 if use_xfade else 0.35)
+    timeout_padding = 300 if motion and use_xfade else 180
     render_timeout = max(
         240,
-        int((post_trim_duration or visible_duration or 0) * (1.2 if use_xfade else 0.35)) + 180,
+        int((post_trim_duration or visible_duration or 0) * timeout_scale)
+        + timeout_padding,
     )
     subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=render_timeout)
     if post_trim_duration > 0 and encode_path != output_path:
