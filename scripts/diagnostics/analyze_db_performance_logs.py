@@ -40,7 +40,9 @@ EVENT_CATEGORIES = (
     "idle_in_transaction",
 )
 TIMESTAMP = re.compile(
-    r"^\[?(?P<value>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[,.]\d+"
+    r"^(?:[🔍✅⚠️❌🚨📝]+\s+|===== UI START )?\[?"
+    r"(?P<value>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[,.]\d+)?)"
+    r"(?=[]:\s]|$)"
 )
 SLOW_START = re.compile(
     r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[,.]\d+"
@@ -69,7 +71,7 @@ SQL_ERROR = re.compile(
 FIELD = re.compile(
     r"(?P<name>request_id|pid|duration_ms|role|process|task_id|task_name|"
     r"checkout_origin|sql_count|sql_total_ms|sql_max_ms|non_sql_hold_ms)="
-    r"(?P<value>[^ ]+)"
+    r"(?P<value>[^\s\]]+)"
 )
 REQUEST_START = re.compile(
     r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[,.]\d+"
@@ -204,6 +206,69 @@ def open_log(path: Path):
     return path.open("r", encoding="utf-8", errors="ignore")
 
 
+def event_records(lines):
+    """Keep traceback continuations under their timestamped log header.
+
+    Chained DBAPI/SQLAlchemy exceptions are one episode, not two failures.
+    Lines before the first header have no trustworthy window and are ignored.
+    """
+    pending = None
+    for current in _timestamped_records(lines):
+        if pending is not None:
+            # The console logger emits a second-resolution colored copy right
+            # next to the full-precision plain handler. Pair only adjacent
+            # copies with identical logger/level/body; fine/fine repetitions
+            # and unrelated same-second failures remain distinct.
+            old_colored = pending[1].startswith(tuple("🔍✅⚠❌🚨📝"))
+            new_colored = current[1].startswith(tuple("🔍✅⚠❌🚨📝"))
+            if (
+                old_colored != new_colored
+                and pending[0].replace(microsecond=0) == current[0].replace(microsecond=0)
+                and _event_content(pending[1]) == _event_content(current[1])
+            ):
+                pending = current if old_colored else pending
+                continue
+            yield pending
+        pending = current
+    if pending is not None:
+        yield pending
+
+
+def _event_content(record):
+    """Canonical content for the two local logging handlers, excluding time."""
+    header, _, body = record.partition("\n")
+    match = TIMESTAMP.match(header)
+    suffix = header[match.end():] if match else header
+    for pattern in (
+        r"^ - (?P<logger>.*?) - (?P<level>\w+) - (?P<message>.*)$",
+        r"^\] (?P<level>\w+)\s+- (?P<logger>.*?)\s+- (?P<message>.*)$",
+    ):
+        parsed = re.match(pattern, suffix)
+        if parsed:
+            return "\n".join((
+                parsed.group("logger").strip(), parsed.group("level"),
+                parsed.group("message").strip(), body.strip(),
+            ))
+    return record.strip()
+
+
+def _timestamped_records(lines):
+    timestamp = None
+    parts = []
+    for raw_line in lines:
+        line = ANSI.sub("", raw_line)
+        match = TIMESTAMP.match(line)
+        if match:
+            if timestamp is not None:
+                yield timestamp, "".join(parts)
+            timestamp = datetime.fromisoformat(match.group("value").replace(",", "."))
+            parts = [line]
+        elif timestamp is not None:
+            parts.append(line)
+    if timestamp is not None:
+        yield timestamp, "".join(parts)
+
+
 def rotated_log_may_overlap(path: Path, since: datetime | None) -> bool:
     """Use rotation time to avoid scanning archives that predate the window."""
     if since is None:
@@ -239,7 +304,7 @@ def discover_event_logs(since: datetime | None = None) -> list[Path]:
 
 def event_type(line: str) -> str | None:
     lowered = line.lower()
-    if "db_connection_lifecycle" in lowered:
+    if "db_connection_lifecycle" in lowered.partition("\n")[0]:
         return "connection_held"
     if "server closed the connection unexpectedly" in lowered:
         return "server_closed"
@@ -338,11 +403,10 @@ def is_adhoc_diagnostic_context(
         return True
     if source_path is not None:
         source_path = Path(source_path)
-        if source_path.parent.name == "celery" or source_path.name in {
-            "app.log",
-            "backend.log",
-            "scheduler.log",
-        }:
+        if source_path.parent.name == "celery" or any(
+            source_path.name == name or source_path.name.startswith(name + ".")
+            for name in ("app.log", "backend.log", "scheduler.log")
+        ):
             return False
     return (
         role == "unknown"
@@ -436,7 +500,7 @@ def main() -> int:
         tuple[str, str, str, str, str, str],
         tuple[tuple[str, str, str], bool],
     ] = {}
-    seen: set[tuple[datetime, str, str, str]] = set()
+    seen: dict[tuple, bool] = {}
     request_starts: dict[str, tuple[datetime, str, str]] = {}
     request_ends: dict[str, tuple[datetime, int, float]] = {}
     celery_successes: dict[str, list[float]] = defaultdict(list)
@@ -445,18 +509,48 @@ def main() -> int:
     celery_seen: set[tuple[datetime, str, str, str]] = set()
     idle_pressure_deferrals: set[tuple[datetime, str]] = set()
     idle_pressure_observations: set[tuple[datetime, int]] = set()
+    traceback_sql_errors = {}
     for path in paths:
         if not path.exists():
             continue
+        occurrences = Counter()
         with open_log(path) as handle:
-            for raw_line in handle:
-                line = ANSI.sub("", raw_line)
-                timestamp_match = TIMESTAMP.match(line)
-                if not timestamp_match:
-                    continue
-                timestamp = datetime.fromisoformat(timestamp_match.group("value"))
+            for timestamp, line in event_records(handle):
                 if timestamp < since or timestamp > until:
                     continue
+                header = line.partition("\n")[0]
+                if is_test_record(line):
+                    continue
+                # Structured context belongs to this header, not to traceback
+                # locals, SQL parameters or another exception's continuation.
+                fields = {
+                    match.group("name"): match.group("value")
+                    for match in FIELD.finditer(header)
+                }
+                origin_match = ORIGIN.search(header)
+                is_adhoc = is_adhoc_diagnostic_context(
+                    fields,
+                    origin=origin_match.group("value") if origin_match else "unknown",
+                    source_path=path,
+                )
+                category = event_type(line)
+                traceback_sql = re.search(r"\[SQL: (.*?)\](?:\s*\n|$)", line, re.DOTALL)
+                if category or traceback_sql:
+                    # Only identical complete records are verified mirrors.
+                    # Keep the maximum multiplicity across sources, rather
+                    # than collapsing repeated events within one source.
+                    record_key = (timestamp, hashlib.sha256(_event_content(line).encode()).hexdigest())
+                    occurrences[record_key] += 1
+                    record_identity = (*record_key, occurrences[record_key])
+                if traceback_sql and "sqlalchemy.exc." in line:
+                    episode = traceback_sql_errors.setdefault(record_identity, {
+                        "timestamp": timestamp,
+                        "fingerprint": fingerprint(traceback_sql.group(1)),
+                        "is_adhoc": is_adhoc,
+                        "sources": set(),
+                    })
+                    episode["is_adhoc"] = episode["is_adhoc"] and is_adhoc
+                    episode["sources"].add(str(path))
                 idle_pressure_defer_match = IDLE_PRESSURE_DEFER.search(line)
                 if idle_pressure_defer_match:
                     idle_pressure_deferrals.add(
@@ -514,20 +608,10 @@ def main() -> int:
                     else:
                         celery_failures[task_name] += 1
                     break
-                category = event_type(line)
                 if category:
-                    fields = {
-                        match.group("name"): match.group("value")
-                        for match in FIELD.finditer(line)
-                    }
-                    identity = (
-                        timestamp,
-                        category,
-                        fields.get("pid", "unknown"),
-                        fields.get("duration_ms", "unknown"),
-                    )
+                    identity = (category, *record_identity)
                     if identity not in seen:
-                        seen.add(identity)
+                        seen[identity] = is_adhoc
                         event_counts[category] += 1
                         duration_match = LIFECYCLE_DURATION.search(line)
                         if duration_match:
@@ -552,12 +636,10 @@ def main() -> int:
                                 "has_breakdown": "sql_total_ms" in fields,
                                 "source_path": path,
                             })
-                error_match = SQL_ERROR.search(line)
+                    else:
+                        seen[identity] = seen[identity] and is_adhoc
+                error_match = SQL_ERROR.search(header)
                 if error_match:
-                    fields = {
-                        match.group("name"): match.group("value")
-                        for match in FIELD.finditer(line)
-                    }
                     error_key = (
                         error_match.group("fingerprint"),
                         error_match.group("origin"),
@@ -587,6 +669,9 @@ def main() -> int:
         "events "
         + " ".join(f"{key}={event_counts[key]}" for key in EVENT_CATEGORIES)
     )
+    for label, adhoc in (("application", False), ("adhoc_diagnostics", True)):
+        counts = Counter(identity[0] for identity, value in seen.items() if value == adhoc)
+        print(f"events_{label} " + " ".join(f"{key}={counts[key]}" for key in EVENT_CATEGORIES))
     print(
         "idle_in_transaction_pressure "
         f"deferrals={len(idle_pressure_deferrals)} "
@@ -809,6 +894,19 @@ def main() -> int:
             f"failure={celery_failures[task_name]} total_ms={sum(values):.2f}"
         )
     print(f"sql_errors count={sum(sql_errors.values())} signatures={len(sql_errors)}")
+    # Separate evidence stream: may overlap instrumented SQL errors. Never sum
+    # the two streams without request/process correlation.
+    print(f"sql_error_traceback_episodes count={len(traceback_sql_errors)}")
+    for label, adhoc in (("application", False), ("adhoc_diagnostics", True)):
+        count = sum(episode["is_adhoc"] == adhoc for episode in traceback_sql_errors.values())
+        print(f"sql_error_traceback_{label} count={count}")
+    for _, episode in sorted(traceback_sql_errors.items()):
+        scope = "adhoc_diagnostics" if episode["is_adhoc"] else "application"
+        print(
+            f"sql_error_traceback at={episode['timestamp'].isoformat()} "
+            f"fingerprint={episode['fingerprint']} scope={scope} "
+            f"sources={','.join(sorted(episode['sources']))}"
+        )
     for label, error_counter in (
         ("application", application_sql_errors),
         ("adhoc_diagnostics", adhoc_sql_errors),
@@ -847,12 +945,14 @@ def main() -> int:
                 timestamp_match = TIMESTAMP.match(line)
                 if not timestamp_match:
                     continue
-                timestamp = datetime.fromisoformat(timestamp_match.group("value"))
+                timestamp = datetime.fromisoformat(timestamp_match.group("value").replace(",", "."))
                 if timestamp < since or timestamp > until:
                     continue
                 for category in pgbouncer_event_types(line):
                     pgbouncer_counts[category] += 1
-                    pgbouncer_events[category].add(timestamp)
+                    # Preserve this legacy second-bucket metric; the raw-line
+                    # counter above is separate from application episodes.
+                    pgbouncer_events[category].add(timestamp.replace(microsecond=0))
                 server_source = pgbouncer_server_source(line)
                 if server_source:
                     pgbouncer_server_sources[server_source] += 1

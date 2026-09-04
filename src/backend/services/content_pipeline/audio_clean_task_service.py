@@ -6,8 +6,12 @@ from sqlalchemy import update
 
 from models import db
 from models.task import PublicationTask
-from services.content_pipeline.dedupe_service import mark_task_assets, reserve_files
-from services.runtime_guard import maybe_guarded_apply_async
+from services.content_pipeline.dedupe_service import (
+    fingerprint_files,
+    mark_task_assets,
+    reserve_fingerprints,
+)
+from services.runtime_guard import end_db_transaction_before_external_io, maybe_guarded_apply_async
 from tasks.content_pipeline import run_audio_clean_task
 
 
@@ -42,6 +46,9 @@ def submit_audio_clean_task(
         if not source_root_path.exists() or not source_root_path.is_dir():
             raise ValueError(f"source_root 不存在: {source_root_path}")
         normalized_source_root = str(source_root_path)
+
+    end_db_transaction_before_external_io("content pipeline file fingerprint")
+    fingerprints = fingerprint_files(normalized_files)
 
     task = PublicationTask(
         status="pending",
@@ -81,10 +88,10 @@ def submit_audio_clean_task(
     db.session.add(task)
     db.session.flush()
     task_id = str(task.id)
-    dedupe = reserve_files(
+    dedupe = reserve_fingerprints(
         task_id=task_id,
         media_type="audio",
-        files=normalized_files,
+        fingerprints=fingerprints,
         source_mode=metadata.get("source_mode"),
     )
     unique_files = [item["path"] for item in dedupe["unique_files"]]

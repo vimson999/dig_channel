@@ -33,10 +33,10 @@ TASK_COLUMNS = (
 )
 
 
-def _create_app():
+def _create_app(register_apis=False):
     from app import create_app
 
-    return create_app()
+    return create_app(register_apis=False)
 
 
 def _load_task(task_id):
@@ -49,7 +49,7 @@ def _load_task(task_id):
 
 @celery_app.task(bind=True, name="tasks.external_documents.run_backfill")
 def run_external_document_backfill(self, task_id):
-    app = _create_app()
+    app = _create_app(register_apis=False)
     with app.app_context():
         task = _load_task(task_id)
         if not task:

@@ -25,6 +25,142 @@ def load_analyzer():
 
 
 class DbPerformanceLogAnalyzerTest(unittest.TestCase):
+    def test_multiline_traceback_is_one_timestamped_failure_episode(self):
+        analyzer = load_analyzer()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scheduler.log"
+            path.write_text(
+                "2026-09-03 08:54:10,721 - watchdog - ERROR - recovery failed\n"
+                "Traceback (most recent call last):\n"
+                "  File utils/db_connection_lifecycle.py, line 12\n"
+                "psycopg2.OperationalError: server closed the connection unexpectedly\n"
+                "sqlalchemy.exc.OperationalError: server closed the connection unexpectedly\n"
+                "[SQL: SELECT provider, count(id) FROM workflow_notification_deliveries\n"
+                "WHERE status IN (%(status_1)s) GROUP BY provider]\n"
+                "2026-09-03 08:55:00,001 - watchdog - INFO - recovered\n",
+                encoding="utf-8",
+            )
+            with path.open() as handle:
+                records = list(analyzer.event_records(handle))
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0][0], datetime(2026, 9, 3, 8, 54, 10, 721000))
+        self.assertEqual(analyzer.event_type(records[0][1]), "server_closed")
+        self.assertIn("GROUP BY provider]", records[0][1])
+        self.assertIsNone(analyzer.event_type(records[1][1]))
+
+    def test_main_counts_duplicated_traceback_once_not_as_a_connection_hold(self):
+        analyzer = load_analyzer()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record = (
+                "2026-09-03 08:54:10,721 - watchdog - ERROR - recovery failed\n"
+                "Traceback (most recent call last):\n"
+                "  File utils/db_connection_lifecycle.py, line 12\n"
+                "psycopg2.OperationalError: server closed the connection unexpectedly\n"
+                "sqlalchemy.exc.OperationalError: server closed the connection unexpectedly\n"
+                "[SQL: SELECT provider FROM workflow_notification_deliveries]\n"
+            )
+            paths = [root / "scheduler.log", root / "celery.log"]
+            for path in paths:
+                path.write_text(record)
+            output = io.StringIO()
+            with patch("sys.argv", [str(SCRIPT_PATH), "--since", "2026-09-03 06:00:00", "--until", "2026-09-04 06:00:00", *map(str, paths)]), patch.object(analyzer, "ROOT", root), patch.object(analyzer, "SLOW_LOG", root / "absent.log"), redirect_stdout(output):
+                self.assertEqual(analyzer.main(), 0)
+        self.assertIn("events connection_held=0 server_closed=1", output.getvalue())
+        self.assertIn("sql_error_traceback_episodes count=1", output.getvalue())
+
+    @staticmethod
+    def _traceback(at="2026-09-03 08:54:10,100", context="pid=11 role=worker request_id=one"):
+        return (
+            f"{at} - watchdog - ERROR - failed {context}\n"
+            "Traceback (most recent call last):\n"
+            "sqlalchemy.exc.OperationalError: server closed the connection unexpectedly\n"
+            "[SQL: SELECT provider FROM workflow_notification_deliveries]\n"
+            "[parameters: {'secret': 'DO_NOT_PRINT_ME'}]\n"
+        )
+
+    def _analyze_events(self, contents, *, until="2026-09-04 06:00:00"):
+        analyzer = load_analyzer()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = []
+            for name, content in contents.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+                paths.append(path)
+            output = io.StringIO()
+            with patch("sys.argv", [str(SCRIPT_PATH), "--since", "2026-09-03 06:00:00", "--until", until, *map(str, paths)]), patch.object(
+                analyzer, "ROOT", root
+            ), patch.object(analyzer, "SLOW_LOG", root / "absent.log"), redirect_stdout(output):
+                self.assertEqual(analyzer.main(), 0)
+        return output.getvalue()
+
+    def test_independent_failures_within_a_second_are_not_merged(self):
+        for later, context in (
+            ("2026-09-03 08:54:10,900", "pid=11 role=worker request_id=one"),
+            ("2026-09-03 08:54:10,100", "pid=22 role=worker request_id=two"),
+        ):
+            with self.subTest(later=later, context=context):
+                output = self._analyze_events({"scheduler.log": self._traceback() + self._traceback(later, context)})
+                self.assertIn("sql_error_traceback_episodes count=2", output)
+                self.assertIn("events connection_held=0 server_closed=2", output)
+                self.assertNotIn("DO_NOT_PRINT_ME", output)
+
+    def test_mirrored_files_preserve_repeated_occurrences_in_one_source(self):
+        record = self._traceback()
+        output = self._analyze_events({"scheduler.log": record * 2, "backend.log": record * 2})
+        self.assertIn("sql_error_traceback_episodes count=2", output)
+        self.assertIn("events connection_held=0 server_closed=2", output)
+        self.assertIn("scheduler.log", output)
+        self.assertIn("backend.log", output)
+
+    def test_tracebacks_exclude_tests_and_separate_adhoc_diagnostics(self):
+        output = self._analyze_events({"scheduler.log": (
+            self._traceback(context="pid=1 role=test process=pytest dialect=sqlite")
+            + self._traceback(context="pid=2 role=unknown process=-c origin=unknown")
+            + self._traceback(context="pid=3 role=worker process=celery")
+        )})
+        self.assertIn("sql_error_traceback_episodes count=2", output)
+        self.assertIn("sql_error_traceback_application count=1", output)
+        self.assertIn("sql_error_traceback_adhoc_diagnostics count=1", output)
+        self.assertIn("events_application connection_held=0 server_closed=1", output)
+        self.assertIn("events_adhoc_diagnostics connection_held=0 server_closed=1", output)
+
+    def test_colored_headers_own_their_window_and_do_not_poison_fields(self):
+        in_window = (
+            "2026-09-03 23:59:59,100 - lifecycle - WARNING - "
+            "db_connection_lifecycle duration_ms=5000 pid=1 role=worker non_sql_hold_ms=5000\n"
+        )
+        outside = self._traceback().replace(
+            "2026-09-03 08:54:10,100 - watchdog - ERROR -",
+            "\033[31m❌ [2026-09-04 06:30:00] ERROR    - watchdog -",
+        ) + "\033[0m\n"
+        output = self._analyze_events({"backend.log": in_window + outside})
+        self.assertIn("events connection_held=1 server_closed=0", output)
+        self.assertIn("sql_error_traceback_episodes count=0", output)
+
+    def test_unowned_prefix_and_fractional_window_boundary_are_excluded(self):
+        prefix = "sqlalchemy.exc.OperationalError: server closed the connection unexpectedly\n[SQL: SELECT 1]\n"
+        output = self._analyze_events(
+            {"backend.log": prefix + self._traceback() + self._traceback("2026-09-03 08:54:10,901")},
+            until="2026-09-03 08:54:10.900",
+        )
+        self.assertIn("sql_error_traceback_episodes count=1", output)
+
+    def test_console_mirror_and_ui_restart_marker_do_not_duplicate_errors(self):
+        hold = "db_connection_lifecycle duration_ms=5000 pid=1 role=worker non_sql_hold_ms=5000"
+        colored = f"⚠️ [2026-09-03 08:54:09] WARNING  - lifecycle - {hold}\n"
+        plain = f"2026-09-03 08:54:09,714 - lifecycle - WARNING - {hold}\n"
+        error = self._traceback()
+        restart = "\n===== UI START 2026-09-03T09:00:46.259211 service=celery_watchdog =====\n🩺 正在启动 Celery Watchdog...\n"
+        output = self._analyze_events({
+            "scheduler.log": plain + error,
+            "celery/celery_watchdog.log": colored + plain + error + restart,
+        })
+        self.assertIn("events connection_held=1 server_closed=1", output)
+        self.assertIn("sql_error_traceback_episodes count=1", output)
+
     def test_parses_multiline_slow_query_record(self):
         analyzer = load_analyzer()
         with tempfile.TemporaryDirectory() as directory:
@@ -320,7 +456,7 @@ class DbPerformanceLogAnalyzerTest(unittest.TestCase):
         )
 
         self.assertIsNotNone(match)
-        self.assertEqual("2026-07-30 04:15:55", match.group("value"))
+        self.assertEqual("2026-07-30 04:15:55,872", match.group("value"))
 
     def test_dedicated_publication_query_log_is_in_default_event_logs(self):
         analyzer = load_analyzer()

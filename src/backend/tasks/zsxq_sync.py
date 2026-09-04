@@ -77,7 +77,7 @@ def run_zsxq_sync(self, run_id, payload):
     from app import create_app
     from services.zsxq_sync_service import zsxq_sync_service
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         terminal_delivery = _terminal_delivery_result(run_id, task_id=self.request.id)
         if terminal_delivery:

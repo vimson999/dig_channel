@@ -107,7 +107,7 @@ def _load_task(task_id, *columns):
     store_errors_even_if_ignored=True,
 )
 def process_doubao_browser_tts_job(self, task_id):
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         return _process_job(task_id, celery_task=self)
 

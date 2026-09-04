@@ -300,7 +300,7 @@ def _mark_report_video_failure_safely(task_name, *, args=None, kwargs=None, exc=
     try:
         from app import create_app
 
-        app = create_app()
+        app = create_app(register_apis=False)
         with app.app_context():
             if task_name == "tasks.report_video.parse_report_pdf_task":
                 report_id = _arg(args, kwargs, "report_id", 0)
@@ -540,7 +540,7 @@ def _update_audio_timeline_job(task, **updates):
 def parse_report_pdf_task(self, report_id):
     from app import create_app
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         report = (
             ReportVideoReport.query
@@ -625,7 +625,7 @@ def parse_report_pdf_task(self, report_id):
 def generate_ai_scripts_task(self, task_id, segment_count=4):
     from app import create_app
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         task = _load_report_video_task(task_id, include_reports=True)
         if not task:
@@ -690,7 +690,7 @@ def generate_ai_scripts_task(self, task_id, segment_count=4):
 def generate_topic_cards_task(self, task_id):
     from app import create_app
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         task = _load_report_video_task(task_id, include_result=True, include_reports=True)
         if not task:
@@ -753,7 +753,7 @@ def generate_topic_cards_task(self, task_id):
 def generate_topic_clusters_task(self, task_id):
     from app import create_app
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         task = _load_report_video_task(task_id, include_result=True, include_reports=True)
         if not task:
@@ -814,7 +814,7 @@ def generate_topic_clusters_task(self, task_id):
 def generate_topic_video_script_task(self, task_id, topic_id):
     from app import create_app
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         task = _load_report_video_task(task_id, include_result=True, include_reports=True)
         if not task:
@@ -867,7 +867,7 @@ def process_audio_timeline_task(self, audio_id, options=None):
     """Generate a full-audio timeline with ASR and match it to report-video segments."""
     from app import create_app
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         options = options or {}
         audio = ReportVideoAudio.query.get(audio_id)
@@ -1051,7 +1051,7 @@ def process_audio_timeline_task(self, audio_id, options=None):
 def generate_render_preview_task(self, task_id, preview_type, ratios=None, duration_sec=10, selected_milestones=None):
     from app import create_app
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         task = _load_report_video_task(
             task_id,
@@ -1152,7 +1152,7 @@ def generate_render_preview_task(self, task_id, preview_type, ratios=None, durat
 def generate_videos_task(self, task_id, ratios=None, report_id=None, force_preview_gate=False):
     from app import create_app
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         task = _load_report_video_task(task_id, include_result=True, include_reports=True, include_previews=True)
         if not task:
@@ -1268,7 +1268,7 @@ def generate_videos_task(self, task_id, ratios=None, report_id=None, force_previ
 def generate_remotion_videos_task(self, task_id, ratios=None):
     from app import create_app
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         task = _load_report_video_task(
             task_id,
@@ -1351,7 +1351,7 @@ def generate_remotion_videos_task(self, task_id, ratios=None):
 def auto_process_report_task(self, report_id):
     from app import create_app
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         report = ReportVideoReport.query.get(report_id)
         if not report:
@@ -1482,7 +1482,7 @@ def auto_process_report_task(self, report_id):
 def scan_report_video_folder_task(self, config_override=None, dry_run=False, trigger="manual"):
     from app import create_app
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         config = load_auto_scan_config()
         if isinstance(config_override, dict):
@@ -1531,7 +1531,7 @@ def scan_report_video_folder_task(self, config_override=None, dry_run=False, tri
 def scan_zsxq_report_assets_task(self, payload=None, dry_run=False):
     from app import create_app
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         payload = payload or {}
         if dry_run:

@@ -650,7 +650,7 @@ def run_publication_pipeline(self, task_id):
         
     from app import create_app
     overall_start = time.time()
-    app = create_app()
+    app = create_app(register_apis=False)
     
     with app.app_context():
         start_state = _load_task_with_retries(task_id, *TASK_START_COLUMNS)
@@ -1523,7 +1523,7 @@ def run_youtube_upload_only(self, task_id):
     Supplements an existing task by uploading its already-synthesized video to YouTube.
     """
     from app import create_app
-    app = create_app()
+    app = create_app(register_apis=False)
     
     with app.app_context():
         task = _load_task(task_id, *TASK_PAYLOAD_COLUMNS)
@@ -1597,7 +1597,7 @@ def run_bilibili_upload_only(self, task_id):
     """
     from app import create_app
 
-    app = create_app()
+    app = create_app(register_apis=False)
 
     with app.app_context():
         context = _load_bilibili_upload_context_with_retries(task_id)

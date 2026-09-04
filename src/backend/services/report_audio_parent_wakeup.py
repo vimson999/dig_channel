@@ -27,6 +27,11 @@ PUBLISHER_WAIT_LABEL = "publisher_video"
 WORKFLOW_QUEUE = "report_audio_workflow"
 WAKE_STEP = "pub_resume_queued"
 WAKE_TOKEN_PREFIX = "publisher-terminal:"
+# Admission can persist one of these steps before its broker publish fails.
+# They are still owned by this claim, unlike a worker that has advanced it.
+RECOVERABLE_CLAIM_STEPS = (
+    WAKE_STEP, "deferred_db_pressure", "deferred_backlog", "deferred_capacity",
+)
 
 CHILD_COLUMNS = (
     PublicationTask.id,
@@ -40,7 +45,7 @@ PARENT_COLUMNS = (
     PublicationTask.feature,
     PublicationTask.status,
     PublicationTask.current_step,
-    PublicationTask.result,
+    PublicationTask.updated_at,
     PublicationTask.error_message,
     PublicationTask.completed_at,
     PublicationTask.waiting_child_label,
@@ -74,7 +79,7 @@ def wake_report_audio_parent_for_child(child_task_id: str) -> dict:
         return _result(False, "child_not_terminal")
 
     parent = (
-        PublicationTask.query.options(load_only(*PARENT_COLUMNS))
+        db.session.query(*PARENT_COLUMNS)
         .filter(PublicationTask.feature.in_(REPORT_AUDIO_FEATURES))
         .filter(PublicationTask.status.in_(ACTIVE_PARENT_STATUSES))
         .filter(PublicationTask.waiting_child_label == PUBLISHER_WAIT_LABEL)
@@ -95,9 +100,21 @@ def wake_report_audio_parent_for_child(child_task_id: str) -> dict:
     if not expected_token:
         return _result(False, "missing_wait_token", parent_task_id=parent_id)
 
+    # Candidate discovery and duplicate events must not materialize audit JSON.
+    # Only the selected, eligible parent needs the exact rollback snapshot.
+    payload = (
+        db.session.query(PublicationTask.result)
+        .filter(PublicationTask.id == parent_id)
+        .filter(PublicationTask.updated_at == parent.updated_at)
+        .with_for_update()
+        .one_or_none()
+    )
+    if payload is None:
+        return _result(False, "parent_changed", parent_task_id=parent_id)
+
     old_state = {
         "celery_task_id": parent.celery_task_id,
-        "result": dict(parent.result or {}),
+        "result": dict(payload.result or {}),
         "status": parent.status,
         "current_step": parent.current_step,
         "error_message": parent.error_message,
@@ -197,20 +214,39 @@ def wake_report_audio_parent_for_child(child_task_id: str) -> dict:
 def _restore_delayed_delivery(*, parent_id, child_id, broker_task_id, wake_token, old_state):
     """Restore the delayed fallback only if this wake-up still owns the claim."""
 
-    restored = (
+    owned_claim = (
         PublicationTask.query
         .filter(PublicationTask.id == parent_id)
+        .filter(PublicationTask.feature.in_(REPORT_AUDIO_FEATURES))
+        .filter(PublicationTask.status.in_(ACTIVE_PARENT_STATUSES))
+        .filter(PublicationTask.current_step.in_(RECOVERABLE_CLAIM_STEPS))
+        .filter(PublicationTask.waiting_child_label == PUBLISHER_WAIT_LABEL)
         .filter(PublicationTask.waiting_child_id == child_id)
         .filter(PublicationTask.celery_task_id == broker_task_id)
         .filter(PublicationTask.waiting_child_updated_at == wake_token)
-        .update(
+    )
+    # Broker I/O happens outside the transaction. Another writer may append
+    # audit data while it is in flight, so never restore the old whole payload.
+    latest = owned_claim.with_entities(PublicationTask.result).with_for_update().one_or_none()
+    restored = 0
+    if latest is not None:
+        restored_result = dict(latest.result or {})
+        restored_wait = dict(restored_result.get("waiting_child") or {})
+        old_wait = dict(old_state["result"].get("waiting_child") or {})
+        for key in ("label", "child_id", "status", "step", "updated_at"):
+            if key in old_wait:
+                restored_wait[key] = old_wait[key]
+            else:
+                restored_wait.pop(key, None)
+        if restored_wait or "waiting_child" in old_state["result"]:
+            restored_result["waiting_child"] = restored_wait
+        else:
+            restored_result.pop("waiting_child", None)
+        restored = owned_claim.update(
             {
                 PublicationTask.celery_task_id: old_state["celery_task_id"],
-                PublicationTask.status: old_state["status"],
                 PublicationTask.current_step: old_state["current_step"],
-                PublicationTask.result: old_state["result"],
-                PublicationTask.error_message: old_state["error_message"],
-                PublicationTask.completed_at: old_state["completed_at"],
+                PublicationTask.result: restored_result,
                 PublicationTask.waiting_child_status: old_state["waiting_child_status"],
                 PublicationTask.waiting_child_step: old_state["waiting_child_step"],
                 PublicationTask.waiting_child_updated_at: old_state["waiting_child_updated_at"],
@@ -218,7 +254,6 @@ def _restore_delayed_delivery(*, parent_id, child_id, broker_task_id, wake_token
             },
             synchronize_session=False,
         )
-    )
     db.session.commit()
     if not restored:
         logger.warning(

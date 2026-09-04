@@ -43,7 +43,7 @@ def run_podcast_visualizer_task(self, task_id):
         _generate_podcast_visualizer_video,
     )
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         task = (
             PublicationTask.query.options(load_only(*PODCAST_TASK_COLUMNS))

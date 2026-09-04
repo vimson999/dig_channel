@@ -15,7 +15,12 @@ if str(BACKEND_DIR) not in sys.path:
 
 from models import db  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
-from services.content_pipeline import audio_clean_task_service, auto_publish_handoff, pdf_clean_task_service  # noqa: E402
+from services.content_pipeline import (  # noqa: E402
+    audio_clean_task_service,
+    auto_publish_handoff,
+    dedupe_service,
+    pdf_clean_task_service,
+)
 from services.zsxq_workflow_service import zsxq_workflow_service  # noqa: E402
 
 
@@ -57,6 +62,86 @@ class ContentPipelineSubmissionQueryDisciplineTest(unittest.TestCase):
         finally:
             event.remove(db.engine, "before_cursor_execute", capture)
         return payload, statements, guarded
+
+    def _assert_fingerprinting_has_no_active_transaction(self, module, submit, path):
+        transaction_states = []
+        real_fingerprint_file = dedupe_service.fingerprint_file
+
+        def capture_transaction_state(file_path):
+            transaction_states.append(db.session().in_transaction())
+            return real_fingerprint_file(file_path)
+
+        guarded_result = {
+            "async_result": SimpleNamespace(id="celery-fingerprint"),
+            "admission": {"allowed": True, "reason": "ok"},
+            "deferred": False,
+            "deferred_state": None,
+        }
+        with patch.object(
+            dedupe_service,
+            "fingerprint_file",
+            side_effect=capture_transaction_state,
+        ), patch.object(module, "maybe_guarded_apply_async", return_value=guarded_result), patch(
+            "services.content_pipeline.notification_service.notify_content_pipeline_event",
+            return_value={"queued": False},
+        ):
+            submit(title="事务外指纹", files=[str(path)])
+
+        self.assertEqual([False], transaction_states)
+
+    def test_audio_submit_fingerprints_files_before_opening_transaction(self):
+        path = Path(self.temp_dir.name) / "large-recording.mp3"
+        path.write_bytes(b"ID3" + b"audio" * 1024)
+
+        self._assert_fingerprinting_has_no_active_transaction(
+            audio_clean_task_service,
+            audio_clean_task_service.submit_audio_clean_task,
+            path,
+        )
+
+    def test_pdf_submit_fingerprints_files_before_opening_transaction(self):
+        path = Path(self.temp_dir.name) / "large-report.pdf"
+        path.write_bytes(b"%PDF-1.4\n" + b"page" * 1024)
+
+        self._assert_fingerprinting_has_no_active_transaction(
+            pdf_clean_task_service,
+            pdf_clean_task_service.submit_pdf_clean_task,
+            path,
+        )
+
+    def test_fingerprinting_releases_an_inherited_read_transaction(self):
+        for module, submit, suffix in (
+            (audio_clean_task_service, audio_clean_task_service.submit_audio_clean_task, "mp3"),
+            (pdf_clean_task_service, pdf_clean_task_service.submit_pdf_clean_task, "pdf"),
+        ):
+            with self.subTest(suffix=suffix):
+                path = Path(self.temp_dir.name) / f"inherited.{suffix}"
+                path.write_bytes(b"inherited-read-fixture")
+                db.session.query(PublicationTask.id).all()
+                self.assertTrue(db.session().in_transaction())
+                self._assert_fingerprinting_has_no_active_transaction(module, submit, path)
+                db.session.remove()
+
+    def test_fingerprinting_rejects_pending_writes_without_losing_them(self):
+        from services.runtime_guard import DatabaseSessionBoundaryError
+
+        for module, submit, suffix in (
+            (audio_clean_task_service, audio_clean_task_service.submit_audio_clean_task, "mp3"),
+            (pdf_clean_task_service, pdf_clean_task_service.submit_pdf_clean_task, "pdf"),
+        ):
+            with self.subTest(suffix=suffix):
+                path = Path(self.temp_dir.name) / f"pending.{suffix}"
+                path.write_bytes(b"pending-write-fixture")
+                pending = PublicationTask(status="pending", params={}, result={})
+                db.session.add(pending)
+                with patch.object(
+                    dedupe_service, "fingerprint_file", wraps=dedupe_service.fingerprint_file
+                ) as fingerprint:
+                    with self.assertRaises(DatabaseSessionBoundaryError):
+                        submit(title="pending write", files=[str(path)])
+                    fingerprint.assert_not_called()
+                self.assertIn(pending, db.session.new)
+                db.session.rollback()
 
     def test_pdf_submit_never_refreshes_wide_task_after_commit(self):
         path = Path(self.temp_dir.name) / "report.pdf"

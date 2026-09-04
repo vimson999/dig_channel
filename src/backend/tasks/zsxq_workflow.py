@@ -27,7 +27,7 @@ def run_zsxq_workflow(self, workflow_run_id, runtime=None):
     from app import create_app
     from services.zsxq_workflow_service import zsxq_workflow_service
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         logger.info("[ZSXQ_WORKFLOW_TASK] start | workflow=%s", workflow_run_id)
         try:
@@ -50,7 +50,7 @@ def advance_zsxq_workflow(self, workflow_run_id, reason=None, event_payload=None
     from app import create_app
     from services.zsxq_workflow_service import zsxq_workflow_service
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         logger.info("[ZSXQ_WORKFLOW_TASK] advance | workflow=%s reason=%s", workflow_run_id, reason or "-")
         try:
@@ -77,7 +77,7 @@ def finalize_zsxq_sync_stage(self, workflow_run_id, run_id, *, success, result=N
     from app import create_app
     from services.zsxq_workflow_service import zsxq_workflow_service
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         logger.info(
             "[ZSXQ_WORKFLOW_TASK] finalize sync | workflow=%s run_id=%s success=%s",

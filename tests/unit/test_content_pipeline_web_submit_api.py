@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from flask import Flask
+from werkzeug.datastructures import FileStorage
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -14,6 +15,8 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from apis.v1 import content_pipeline as content_pipeline_api  # noqa: E402
+from models import db  # noqa: E402
+from models.task import PublicationTask  # noqa: E402
 
 
 class ContentPipelineWebSubmitApiTest(unittest.TestCase):
@@ -24,7 +27,10 @@ class ContentPipelineWebSubmitApiTest(unittest.TestCase):
         self.app.config.update(
             TESTING=True,
             CONTENT_PIPELINE_WEB_UPLOAD_ROOT=str(self.upload_root),
+            SQLALCHEMY_DATABASE_URI="sqlite:///:memory:",
+            SQLALCHEMY_TRACK_MODIFICATIONS=False,
         )
+        db.init_app(self.app)
         self.app.register_blueprint(content_pipeline_api.bp)
         self.client = self.app.test_client()
         self.auth_patch = patch(
@@ -101,6 +107,36 @@ class ContentPipelineWebSubmitApiTest(unittest.TestCase):
         self.assertTrue(Path(audio_kwargs["files"][0]).is_file())
         self.assertEqual(Path(pdf_kwargs["files"][0]).name, "中文研报.pdf")
         self.assertEqual(Path(audio_kwargs["files"][0]).name, "会议纪要.mp3")
+
+    def test_upload_save_releases_auth_read_transaction(self):
+        observed = []
+        real_save = FileStorage.save
+
+        def auth_read():
+            db.session.query(PublicationTask.id).all()
+            self.assertTrue(db.session().in_transaction())
+            return SimpleNamespace(id=42, is_admin=True)
+
+        def save(uploaded, *args, **kwargs):
+            observed.append(db.session().in_transaction())
+            return real_save(uploaded, *args, **kwargs)
+
+        with self.app.app_context():
+            db.create_all()
+            try:
+                with patch("utils.auth_utils.get_current_user", side_effect=auth_read), patch.object(
+                    FileStorage, "save", save
+                ), patch.object(content_pipeline_api, "enqueue_pdf_clean_task", return_value=self._task("pdf")):
+                    response = self.client.post(
+                        "/api/v1/content-pipeline/web-submit",
+                        data={"files": [(io.BytesIO(b"pdf bytes"), "report.pdf")]},
+                        content_type="multipart/form-data",
+                    )
+                self.assertEqual(response.status_code, 202)
+                self.assertEqual(observed, [False])
+            finally:
+                db.session.remove()
+                db.drop_all()
 
     def test_folder_submission_excludes_nested_files_unless_explicitly_enabled(self):
         with patch.object(

@@ -2,8 +2,8 @@
 
 ## 基本信息
 
-- 状态：2026-08-14 单任务详情路径复发已修并由新 backend 真实 API 验收；`RUNTIME_REPLACED/OBSERVING`
-- 严重级别：P1
+- 状态：2026-09-04 父任务唤醒查询形态再次检出；RUNTIME_REPLACED / OBSERVING，待自然完成事件与后续窗口
+- 严重级别：P0
 - 影响模块：研报音频 finalization watchdog / 详情列表 / `publication_tasks`
 - 首次发现：2026-08-10 日巡检
 - 修复提交：当前工作区
@@ -14,6 +14,34 @@
 - 防线层级：data_access / contract_test / runtime_acceptance
 
 ## 现象
+
+### 2026-09-04 提交前并发恢复补强
+
+独立 Session 回归确认：broker 等待期间新增的审计字段会被旧失败恢复整份 result 覆盖；父任务被取消或
+进入新步骤后，也可能被改回 processing/pub_waiting。本次失败恢复改为主键 + claim token/broker ID +
+活动状态 + 可恢复步骤锁定最新快照；可恢复步骤为 WAKE_STEP 及准入守卫写入的三种精确 deferred 步骤。
+仅恢复 claim 修改的字段；waiting_child 仅回退五个被修改键，保留其他新增审计信息，不再回写旧
+status/error/completed_at。真实准入延后后 broker 失败（三种原因）、并发追加、取消、推进及原路径
+11 项通过。该补强尚未执行运行替换；06:10 的 ready 证据只属于先前窄查询版本。
+
+### 2026-09-04 父任务唤醒复发与延迟物化
+
+固定窗口 09-03 06:00 至 09-04 06:00，`71b8b6d6cc87d1f3` 在新 worker PID7759
+再次出现 8 次 `multirow_payload`，累计252.80ms、P95/max42.28ms。虽未过1秒阈值，
+仍违反查询形态门禁；不能因 executor 快而关闭。真实 child `3bfb3376-2469-4a09-9ec3-45ba49dd8766`
+的原查询命中 waiting_child 索引，executor0.034ms、返回0行；无新增索引依据。
+
+根因是完成事件先按 waiting_child 等结构化字段找父任务，却在判断是否存在/已唤醒前读取完整 result。
+现在候选查询改为不可变窄 Row；只有匹配且未唤醒的单一父任务才按主键与 updated_at 读取完整回滚快照，
+短事务内用行锁防止筛选与更新间版本漂移。原始 JSON、CAS token、稳定 broker ID、失败回滚全部保留。
+这采用既有“先结构化判断、命中主键才延迟物化”的纪律，不机械删除 JSON 或改变业务字段。
+
+新增两项实际 SQL 回归先红后绿：无匹配与重复事件零 JSON 读取；有效唤醒恰好一次主键载荷查询，
+broker 入口无活动事务。父唤醒8项（含失败恢复、终态父、重复事件）通过；完整unit1593项通过。
+新候选查询executor0.014ms。06:07安全门及标准脚本两次门禁均无不可中断任务，冻结17队列后重启至
+backend38129；06:10:05 render、06:10:15 report_audio均ready，bootstrap17/17、errors=[]，health healthy。
+自然 publisher completion 与下一完整窗口旧指纹0
+才可进一步验收，不能用本次EXPLAIN或单测代替业务验收。
 
 固定 24 小时内，`repair_pending_finalizations_once` 指纹 `6b1c434d80a9291e`
 约执行 938 次，平均 35.76ms、P95 113.28ms、最大 357.77ms、累计约 33.5s，频率约每

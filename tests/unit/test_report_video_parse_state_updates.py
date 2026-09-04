@@ -2,7 +2,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from flask import Flask
 from sqlalchemy import event
@@ -74,7 +74,8 @@ class ReportVideoParseStateUpdatesTest(unittest.TestCase):
             statements.append(statement)
 
         event.listen(db.engine, "before_cursor_execute", capture_sql)
-        fake_app_module = SimpleNamespace(create_app=lambda: self.app)
+        create_app = Mock(return_value=self.app)
+        fake_app_module = SimpleNamespace(create_app=create_app)
         try:
             with patch.dict(sys.modules, {"app": fake_app_module}), \
                  patch.object(report_video, "parse_pdf_file", return_value=self._parsed_result()), \
@@ -84,6 +85,7 @@ class ReportVideoParseStateUpdatesTest(unittest.TestCase):
             event.remove(db.engine, "before_cursor_execute", capture_sql)
 
         self.assertEqual(result, {"status": "parsed", "report_id": "video-report-1"})
+        create_app.assert_called_once_with(register_apis=False)
         report = ReportVideoReport.query.filter_by(id="video-report-1").one()
         task = ReportVideoTask.query.filter_by(id="video-task-1").one()
         self.assertEqual(report.parse_status, "parsed")
@@ -102,12 +104,15 @@ class ReportVideoParseStateUpdatesTest(unittest.TestCase):
         self.assertFalse(any("report_video_tasks.result" in statement for statement in statements))
 
     def test_parse_failure_persists_report_and_parent_without_full_reload(self):
-        fake_app_module = SimpleNamespace(create_app=lambda: self.app)
+        create_app = Mock(return_value=self.app)
+        fake_app_module = SimpleNamespace(create_app=create_app)
         with patch.dict(sys.modules, {"app": fake_app_module}), \
              patch.object(report_video, "parse_pdf_file", side_effect=RuntimeError("parse failed")), \
              patch.object(report_video, "report_dir", return_value=Path("/tmp/video-task-1/R001")):
             with self.assertRaisesRegex(RuntimeError, "parse failed"):
                 report_video.parse_report_pdf_task.run("video-report-1")
+
+        create_app.assert_called_once_with(register_apis=False)
 
         report = ReportVideoReport.query.filter_by(id="video-report-1").one()
         task = ReportVideoTask.query.filter_by(id="video-task-1").one()

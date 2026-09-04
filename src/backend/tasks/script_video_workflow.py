@@ -130,7 +130,7 @@ WORKFLOW_PARENT_COLUMNS = (
     store_errors_even_if_ignored=True,
 )
 def process_audio(self, workflow_id: str):
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         try:
             return _process_audio(workflow_id, celery_task=self)
@@ -150,7 +150,7 @@ def process_audio(self, workflow_id: str):
 def prepare_uploaded_audio(self, workflow_id: str):
     """Normalize an uploaded source into the non-final WAV used by the editor."""
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         try:
             return _prepare_uploaded_audio(str(workflow_id))
@@ -170,7 +170,7 @@ def prepare_uploaded_audio(self, workflow_id: str):
 def finalize_audio_edit(self, workflow_id: str):
     """Render one user-confirmed trim/speed revision into the final WAV."""
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         try:
             return _finalize_audio_edit(str(workflow_id))
@@ -806,7 +806,7 @@ def _doubao_queue_name() -> str:
 def generate_storyboard(self, workflow_id: str):
     """Ask the selected storyboard Gem for the editable scene/prompt table."""
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         try:
             return _generate_storyboard(
@@ -1107,7 +1107,7 @@ def _invalidate_images_after_storyboard_refresh(parent: PublicationTask) -> None
     store_errors_even_if_ignored=True,
 )
 def generate_image(self, image_task_id: str):
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         try:
             return _generate_image(
@@ -1518,7 +1518,7 @@ def _refresh_parent_image_state(parent_id: str) -> None:
     store_errors_even_if_ignored=True,
 )
 def render_video(self, workflow_id: str):
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         try:
             return _render_video(str(workflow_id))

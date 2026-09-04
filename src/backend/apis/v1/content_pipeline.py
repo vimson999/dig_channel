@@ -26,6 +26,7 @@ from services.content_pipeline.retention_scheduler_service import (
     trigger_once as trigger_retention_cleanup_once,
 )
 from services.watermark.utils import safe_filename
+from services.runtime_guard import end_db_transaction_before_external_io
 from utils.auth_utils import require_login
 
 
@@ -122,6 +123,9 @@ def submit_web_content_pipeline(current_user):
     vice versa), because the downstream cleaner already handles item-level
     partial success.
     """
+    # Authentication may have checked out a connection. Release it before
+    # multipart parsing and upload staging, not just before the later hash.
+    end_db_transaction_before_external_io("content pipeline upload staging")
     input_mode = str(request.form.get("input_mode") or "upload").strip().lower()
     if input_mode not in {"upload", "folder"}:
         return jsonify({"success": False, "message": "input_mode 仅支持 upload 或 folder"}), 400

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -50,11 +51,56 @@ def reserve_files(*, task_id, media_type, files, source_mode=None):
     transaction lets a racing insert fall back to reading the canonical row
     without poisoning the task submission transaction.
     """
+    return reserve_fingerprints(
+        task_id=task_id,
+        media_type=media_type,
+        fingerprints=fingerprint_files(files),
+        source_mode=source_mode,
+    )
+
+
+def reserve_fingerprints(*, task_id, media_type, fingerprints, source_mode=None):
+    """Reserve precomputed fingerprints without performing file I/O in a transaction."""
     normalized_type = str(media_type or "").strip().lower()
     if not normalized_type:
         raise ValueError("media_type 不能为空")
 
-    fingerprints = fingerprint_files(files)
+    fingerprints = [dict(item) for item in fingerprints or []]
+    first_by_hash = {}
+    for fingerprint in fingerprints:
+        first_by_hash.setdefault(fingerprint["sha256"], fingerprint)
+
+    hashes = sorted(first_by_hash)
+    canonicals = (
+        ContentPipelineAsset.query
+        .filter(
+            ContentPipelineAsset.media_type == normalized_type,
+            ContentPipelineAsset.content_sha256.in_(hashes),
+        )
+        .order_by(ContentPipelineAsset.content_sha256)
+        .with_for_update()
+        .all()
+        if hashes
+        else []
+    )
+    canonical_by_hash = {
+        canonical.content_sha256: canonical
+        for canonical in canonicals
+    }
+    missing = [
+        first_by_hash[content_hash]
+        for content_hash in hashes
+        if content_hash not in canonical_by_hash
+    ]
+    canonical_by_hash.update(
+        _insert_missing_canonicals(
+            task_id=task_id,
+            media_type=normalized_type,
+            fingerprints=missing,
+            source_mode=source_mode,
+        )
+    )
+
     unique = []
     duplicates = []
     reserved_by_hash = {}
@@ -73,23 +119,7 @@ def reserve_files(*, task_id, media_type, files, source_mode=None):
                 }
             )
             continue
-        canonical = (
-            ContentPipelineAsset.query
-            .filter(
-                ContentPipelineAsset.media_type == normalized_type,
-                ContentPipelineAsset.content_sha256 == fingerprint["sha256"],
-            )
-            .with_for_update()
-            .one_or_none()
-        )
-
-        if canonical is None:
-            canonical = _insert_or_load_canonical(
-                task_id=task_id,
-                media_type=normalized_type,
-                fingerprint=fingerprint,
-                source_mode=source_mode,
-            )
+        canonical = canonical_by_hash[fingerprint["sha256"]]
 
         if canonical.canonical_task_id != str(task_id):
             if canonical.status in RECLAIMABLE_STATUSES or _is_stale_reservation(canonical):
@@ -98,7 +128,6 @@ def reserve_files(*, task_id, media_type, files, source_mode=None):
                 canonical.filename = fingerprint["filename"]
                 canonical.source_mode = str(source_mode or "")[:80] or None
                 canonical.status = "reserved"
-                db.session.flush()
             else:
                 duplicates.append(
                     _duplicate_entry(fingerprint, canonical, reason="duplicate_content")
@@ -123,6 +152,59 @@ def reserve_files(*, task_id, media_type, files, source_mode=None):
         "unique_files": unique,
         "duplicates": duplicates,
     }
+
+
+def _new_canonical(*, task_id, media_type, fingerprint, source_mode):
+    timestamp = datetime.utcnow()
+    return ContentPipelineAsset(
+        id=str(uuid.uuid4()),
+        media_type=media_type,
+        content_sha256=fingerprint["sha256"],
+        canonical_task_id=str(task_id),
+        source_path=fingerprint["path"],
+        filename=fingerprint["filename"],
+        source_mode=str(source_mode or "")[:80] or None,
+        status="reserved",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+
+def _insert_missing_canonicals(*, task_id, media_type, fingerprints, source_mode):
+    """Insert the normal no-race batch with one flush.
+
+    A concurrent submit may win one unique hash between the batch lookup and
+    insert. In that exceptional path the savepoint rolls back the attempted
+    batch, then the established single-row race fallback resolves each hash.
+    """
+    if not fingerprints:
+        return {}
+
+    assets = [
+        _new_canonical(
+            task_id=task_id,
+            media_type=media_type,
+            fingerprint=fingerprint,
+            source_mode=source_mode,
+        )
+        for fingerprint in fingerprints
+    ]
+    try:
+        with db.session.begin_nested():
+            db.session.add_all(assets)
+            db.session.flush()
+        return {asset.content_sha256: asset for asset in assets}
+    except IntegrityError:
+        resolved = {}
+        for fingerprint in fingerprints:
+            canonical = _insert_or_load_canonical(
+                task_id=task_id,
+                media_type=media_type,
+                fingerprint=fingerprint,
+                source_mode=source_mode,
+            )
+            resolved[fingerprint["sha256"]] = canonical
+        return resolved
 
 
 def mark_task_assets(task_id, *, status):
@@ -169,14 +251,11 @@ def mark_task_assets(task_id, *, status):
 def _insert_or_load_canonical(*, task_id, media_type, fingerprint, source_mode):
     try:
         with db.session.begin_nested():
-            asset = ContentPipelineAsset(
+            asset = _new_canonical(
+                task_id=task_id,
                 media_type=media_type,
-                content_sha256=fingerprint["sha256"],
-                canonical_task_id=str(task_id),
-                source_path=fingerprint["path"],
-                filename=fingerprint["filename"],
-                source_mode=str(source_mode or "")[:80] or None,
-                status="reserved",
+                fingerprint=fingerprint,
+                source_mode=source_mode,
             )
             db.session.add(asset)
             db.session.flush()
@@ -221,6 +300,7 @@ def _is_stale_reservation(canonical):
 __all__ = [
     "fingerprint_file",
     "fingerprint_files",
+    "reserve_fingerprints",
     "reserve_files",
     "mark_task_assets",
 ]

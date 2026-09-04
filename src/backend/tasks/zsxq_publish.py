@@ -102,7 +102,7 @@ def _create_zsxq_publish_app():
     from app import create_app
 
     try:
-        return create_app()
+        return create_app(register_apis=False)
     except Exception:
         logger.exception("Full Flask app initialization failed; falling back to DB-only publish app.")
 

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from flask import Flask
+from sqlalchemy import event
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -14,8 +15,8 @@ if str(BACKEND_DIR) not in sys.path:
 
 from models import ContentPipelineAsset, db  # noqa: E402
 from models.task import PublicationTask  # noqa: E402
-from services.content_pipeline import audio_clean_task_service, pdf_clean_task_service  # noqa: E402
-from services.content_pipeline.dedupe_service import mark_task_assets  # noqa: E402
+from services.content_pipeline import audio_clean_task_service, dedupe_service, pdf_clean_task_service  # noqa: E402
+from services.content_pipeline.dedupe_service import mark_task_assets, reserve_files  # noqa: E402
 
 
 class ContentPipelineDedupeTest(unittest.TestCase):
@@ -135,6 +136,98 @@ class ContentPipelineDedupeTest(unittest.TestCase):
         self.assertEqual(payload["result"]["dedupe"]["received_count"], 2)
         self.assertEqual(payload["result"]["dedupe"]["unique_count"], 1)
         self.assertEqual(payload["result"]["dedupe"]["duplicate_count"], 1)
+
+    def test_unique_batch_uses_one_canonical_lookup(self):
+        files = [
+            self._path(f"batch-{index}.mp3", f"audio-{index}".encode())
+            for index in range(8)
+        ]
+        canonical_selects = []
+        canonical_inserts = []
+
+        def capture_statement(_conn, _cursor, statement, _params, _context, _many):
+            normalized = " ".join(str(statement).lower().split())
+            if normalized.startswith("select") and "content_pipeline_assets" in normalized:
+                canonical_selects.append(normalized)
+            if normalized.startswith("insert") and "content_pipeline_assets" in normalized:
+                canonical_inserts.append(normalized)
+
+        event.listen(db.engine, "before_cursor_execute", capture_statement)
+        try:
+            result = reserve_files(
+                task_id="batch-query-budget",
+                media_type="audio",
+                files=[str(path) for path in files],
+                source_mode="manual_download",
+            )
+            db.session.flush()
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture_statement)
+
+        self.assertEqual(result["unique_count"], len(files))
+        self.assertEqual(
+            len(canonical_selects),
+            1,
+            "canonical existence checks must be batched instead of one SELECT per file",
+        )
+        self.assertEqual(
+            len(canonical_inserts),
+            1,
+            "new canonical rows must use one batched INSERT execution",
+        )
+        self.assertIn("order by content_pipeline_assets.content_sha256", canonical_selects[0])
+        self.assertEqual([item["path"] for item in result["unique_files"]], [str(path.resolve()) for path in files])
+
+    def test_batch_unique_race_recovers_savepoint_without_losing_outer_work(self):
+        first = self._path("race.mp3", b"race")
+        second = self._path("other.mp3", b"other")
+        fingerprints = dedupe_service.fingerprint_files([first, second])
+        original_insert = dedupe_service._insert_missing_canonicals
+        outer_task = PublicationTask(status="pending", params={}, result={"audit": "keep"})
+        db.session.add(outer_task)
+        db.session.flush()
+        outer_id = outer_task.id
+
+        def concurrent_winner(**kwargs):
+            # A real unique row appears after the lookup but before its nested
+            # batch INSERT. Only the losing savepoint may be rolled back.
+            winner = dedupe_service._new_canonical(
+                task_id="other-owner", media_type="audio",
+                fingerprint=fingerprints[0], source_mode="test",
+            )
+            db.session.add(winner)
+            db.session.flush()
+            return original_insert(**kwargs)
+
+        with patch.object(dedupe_service, "_insert_missing_canonicals", side_effect=concurrent_winner):
+            result = dedupe_service.reserve_fingerprints(
+                task_id=outer_id, media_type="audio", fingerprints=fingerprints,
+            )
+        db.session.commit()
+        self.assertEqual(result["unique_count"], 1)
+        self.assertEqual(result["duplicate_count"], 1)
+        self.assertEqual(result["duplicates"][0]["canonical_task_id"], "other-owner")
+        self.assertEqual(result["unique_files"][0]["path"], str(second.resolve()))
+        self.assertEqual(ContentPipelineAsset.query.count(), 2)
+        self.assertEqual(db.session.get(PublicationTask, outer_id).result, {"audit": "keep"})
+
+    def test_batch_reclaims_failed_canonical_without_changing_input_order(self):
+        files = [self._path("first.mp3", b"first"), self._path("second.mp3", b"second")]
+        fingerprints = dedupe_service.fingerprint_files(files)
+        failed = dedupe_service._new_canonical(
+            task_id="failed-owner", media_type="audio", fingerprint=fingerprints[1], source_mode="test",
+        )
+        failed.status = "failed"
+        db.session.add(failed)
+        db.session.commit()
+        result = dedupe_service.reserve_fingerprints(
+            task_id="retry-owner", media_type="audio", fingerprints=fingerprints,
+        )
+        db.session.commit()
+        self.assertEqual(result["unique_count"], 2)
+        self.assertEqual([item["path"] for item in result["unique_files"]], [str(path.resolve()) for path in files])
+        self.assertEqual(failed.canonical_task_id, "retry-owner")
+        self.assertEqual(failed.status, "reserved")
 
     def test_retry_start_does_not_downgrade_a_cleaned_canonical_asset(self):
         task_id = "retry-preserves-cleaned"

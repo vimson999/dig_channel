@@ -170,7 +170,7 @@ def _material_source_ready(source):
     retry_kwargs={"max_retries": 3},
 )
 def process_report_visual_plan_job(self, task_id):
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         return _process_job(str(task_id), celery_task=self)
 
@@ -185,7 +185,7 @@ def process_report_visual_plan_job(self, task_id):
     retry_kwargs={"max_retries": 3},
 )
 def retry_normalize_report_visual_plan_job(self, task_id):
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         return _retry_normalize_job(str(task_id))
 

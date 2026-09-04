@@ -152,7 +152,7 @@ class ChildTaskStillRunning(RuntimeError):
     retry_kwargs={"max_retries": 3},
 )
 def process_report_script_material_workflow_job(self, task_id):
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         try:
             guard_publication_task_start(self, task_id, feature=FEATURE_NAME, queue=QUEUE_NAME)

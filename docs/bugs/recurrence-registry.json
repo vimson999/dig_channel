@@ -1,17 +1,18 @@
 {
   "schema_version": 2,
-  "reviewed_through": "2026-09-01",
+  "reviewed_through": "2026-09-04",
   "max_days_between_reviews": 7,
   "clusters": [
     {
       "key": "DB-SESSION-LIFECYCLE",
+      "daily_2026_09_04": "固定窗慢SQL29/39.148秒，长hold1次15.024秒来自notification due_provider_drains且sql15.017秒/非SQL7.12ms；PgBouncer query_wait_timeout1组，网络OPEN。自然25PDF+10音频全部成功，1查1插且无Web长hold，但哈希事务入口尚无直接生产探针，保持OBSERVING。",
       "title": "数据库 Session 生命周期与热查询",
       "priority": "P0",
       "status": "in_progress",
       "acceptance_stage": "runtime_replaced",
-      "last_reopened_at": "2026-09-01",
+      "last_reopened_at": "2026-09-03",
       "latest_watchdog_guardrail": "Watchdog 的卡死判定、告警和自愈重启只允许加载决策实际消费的字段；仪表盘计数、跨表业务快照和展示聚合必须由显式 include 开关按需获取，minute loop 禁止用 force_refresh 绕过缓存。契约必须同时证明 watchdog 路径零展示 SQL、完整控制面字段保持兼容。",
-      "latest_watchdog_runtime_observation": "2026-08-31 旧 watchdog PID609 在13:56:44至14:38:18的28轮执行84条report-video展示聚合，累计10.064秒；三条executor仅0.302/4.205/2.429毫秒。修复加载到backend PID4274/watchdog PID4810后，14:38:21、14:39:44、14:41:09连续三轮展示聚合0条，完整status仍200并返回全部统计；5秒高频采样及只读快照idle-in-transaction均为0。状态RUNTIME_REPLACED/OBSERVING，待24小时与后续窗。",
+      "latest_watchdog_runtime_observation": "2026-09-02 固定窗确认从2026-08-31 14:38:18切点至2026-09-02 06:00三个report-video展示聚合origin持续为0，已覆盖超过24小时和下一固定窗；本项获得runtime acceptance。根因簇仍因其他阻塞记录保持runtime_replaced。",
       "blocking_records": [
         "2026-08-14-report-audio-deepseek-session-hold.md",
         "2026-07-18-publication-task-progress-json-write-amplification.md",
@@ -56,7 +57,9 @@
         "2026-08-31-report-audio-bilibili-upload-wide-session-hold.md",
         "2026-08-31-platform-publish-retry-cancel-session-lifecycle.md",
         "2026-08-31-script-video-detail-polling-n-plus-one.md",
-        "2026-09-01-script-video-image-submit-query-amplification.md"
+        "2026-09-01-script-video-image-submit-query-amplification.md",
+        "2026-09-02-content-pipeline-dedupe-query-amplification.md",
+        "2026-09-03-content-pipeline-hash-inside-transaction.md"
       ],
       "latest_guardrail_addition": "任何 best-effort 数据库同步都必须在异常后 rollback/remove，且在后续 broker/网络 I/O 前释放 Session；可重试瞬断只能有界重试，不能吞掉异常后把 poisoned Session 传给通知链。外部通知先结束业务事务，再以独立短事务写 durable outbox；provider/delivery 固定锁序，SMTP、broker 和退避期间禁止持有 Session。目录构建必须从 authoritative source 单次有界加载并显式投影全部消费列；每个查询阶段结束后把结果冻结为 DTO、release/remove Session，再做文件系统校验，缓存命中也不得假设鉴权 Session 已释放。禁止因失效后过滤、分页补候选或 deferred-column lazy-load 延长 Session。只需少量 worker 徽标的页面必须使用 runtime-only 精确服务状态，在进程/Redis I/O 前释放鉴权 Session，禁止误用会加载跨表业务快照和 broker inspect 的全量控制面。API 带类型引用写入定长 source 字段前必须拆分 owner 与规范 ID，完整引用只留审计 JSON；历史兼容必须窄投影且对截断碰撞 fail closed；共享 PublicationTask 模型必须拒绝所有新建或未知的超宽 source_task_id，仅允许精确命中已持久化历史指纹的旧行保持原值。PgBouncer server_lifetime 只能从 300/900/1800 证据候选中选择并由配置契约锁定。昂贵清洗的数据库重试必须先 rollback/remove，再用 batch、输入多重集、输出根和逐项 source-output 映射验证 durable manifest；retryable 异常不得先写永久失败，terminal cleaned 状态不得倒退。人工浏览器/文件素材生成必须在读取后冻结 DTO 并 rollback/remove；写回共享任务 JSON 必须比较 status/updated_at 的版本 CAS，只窄更新 result 与版本，commit 后响应禁止重读 ORM。任务准备后经 broker 续投的入口必须在第一次commit前冻结响应DTO/child与稳定ID，broker只接收ID，celery id和入队失败只窄写；第一次UPDATE后禁止任何params/result整行SELECT。任务列表摘要必须使用显式轻投影并在查询后冻结DTO、release/remove Session；正常分页以窗口总数保持一次往返，禁止让完整ORM、params/result或HTTP序列化延长连接租约。B站等外部上传提交必须把父任务命令字段与凭据名合并为一次窄快照；路径 helper 只能收集字符串候选，每次 child/历史 fallback 查询后必须 release/remove，文件探测时 in_transaction 必须为 false；MP3、报告音频等同能力调用点必须共享 SQL/Session 合同并做全调用点复核；broker消息ID必须在child首事务中持久化，正常成功路径禁止broker后第二次数据库写入。取消、重复任务清理和orphan repair必须先冻结响应并durable写入canceled/failed，归还连接后才best-effort revoke；control失败不得回滚终态，消费者必须以terminal/current-id guard拒绝旧消息。业务代码禁止直接control.revoke，必须走共享单条/批量守卫；批量撤销保持一次control、去重顺序和signal语义；每次before/after I/O必须输出可按request/task/broker关联的DB_SESSION_BOUNDARY事件。运行替换前必须执行check-celery-revoke-boundary AST门禁，扫描整个backend并拒绝runtime_guard外direct revoke或缺operation/business_task_id的helper调用；人工源码搜索不能替代自动失败门禁。",
       "last_runtime_observation": "2026-08-31 固定窗口慢SQL110次/262.811秒/P95 5.501秒；窗后topics/local request8c73fe09以502/21.089秒失败且PgBouncer同秒query timeout，Tailscale现场20包丢失30%；08:51真实PDF清洗又遇server closed并被旧retry放大为31份重做532.224秒。10:01标准重启后backend PID70045 healthy、bootstrap17/17。素材重生成86e70f97/ffa15b05自然200/3.416/4.150秒，均仅快照SELECT、child SELECT、一次UPDATE且之后无任务回读，旧21.702秒最大改善80.9%。但continue-full-video 8b097844仍200/18.562秒：初始590指纹7.476秒，两次commit后773宽回读3.885/2.140秒，首个hold8.157秒且非SQL仅0.299秒。其后PDF merge列表112cdfd9为200/18.024秒，宽读358df92aaae36a2d 17.328秒/0行且hold17.644秒；新形状EXPLAIN executor仅0.201毫秒。11:21双门禁后标准重启到PID82858，healthy、bootstrap17/17/errors=[]。新真实API 54fde6f1/7571d127为459.39/370.30毫秒，各仅一条任务SELECT318.51/119.96毫秒、3行，无旧宽指纹或长hold；终态浏览器26秒只请求一次。11:22前4次B站提交累计25.910秒/P95最大11.115秒，最慢父宽读8.915秒并在broker后再次写celery ID；旧/新executor仅0.035/0.917毫秒。MP3新代码将47,436B快照降至2,406B并首事务预存broker ID。报告音频同构入口旧TDD证实11/11次文件探测跨读事务；生产样本21,053B，新快照2,517B减88.0%，旧/新驱动606.98/105.85毫秒而executor0.041/1.684毫秒。12:47双门禁后重启到PID92009，17/17 service ok、errors=[]、三个目标worker ready。后续横向复核又发现B站retry、抖音/视频号cancel、六个主工作流cancel及后台duplicate/orphan revoke在事务内执行control I/O；旧B站全行8,252B，新retry/cancel快照2,637/1,435B而executor均低于0.06毫秒。1511项unit通过。13:31双门禁读取47条近期任务/0活动sync并标准重启到PID96754，health healthy、bootstrap17/17/errors=[]；五个相关worker均running/ready、queue0。短窗无目标错误/超时/旧宽读，pg_stat_activity无idle in transaction；没有自然目标动作，当前RUNTIME_REPLACED/OBSERVING。唯一新慢SQL为scheduler读取一条system_configs 1248.67毫秒，网络保持OPEN/REPEATED；无DDL证据。全源码防线复核又收口B站/browser/Publisher与简笔画批量四类直接revoke，新增结构化边界事件和批量故障终态保护；170项交叉通过。13:55双门禁再次读取47条近期任务/0活动sync，未FORCE重启到PID99802；health healthy、bootstrap17/17/errors=[]，六个相关服务running/queue0。13:56:44后无自然目标动作，DB_SESSION_BOUNDARY未捕获；pg_stat_activity active1/idle7/idle-in-transaction0，诊断SET READ ONLY自身1576.42毫秒，网络仍OPEN/REPEATED，应用RUNTIME_REPLACED/OBSERVING。其后新增AST防复发门禁，实际扫描304个backend Python文件，定向3项、生命周期交叉10项及完整1517项unit全部通过；仅dev gate/test变化，无需再重启PID99802。",
@@ -116,11 +119,13 @@
         "2026-08-31-mp3-artifact-regeneration-session-hold.md",
         "2026-08-31-mp3-continue-full-video-post-commit-reload.md",
         "2026-08-31-pdf-merge-list-wide-polling.md",
-      "2026-08-31-mp3-bilibili-upload-wide-parent-double-commit.md",
-      "2026-08-31-report-audio-bilibili-upload-wide-session-hold.md",
-      "2026-08-31-platform-publish-retry-cancel-session-lifecycle.md",
-      "2026-08-31-script-video-detail-polling-n-plus-one.md",
-      "2026-09-01-script-video-image-submit-query-amplification.md"
+        "2026-08-31-mp3-bilibili-upload-wide-parent-double-commit.md",
+        "2026-08-31-report-audio-bilibili-upload-wide-session-hold.md",
+        "2026-08-31-platform-publish-retry-cancel-session-lifecycle.md",
+        "2026-08-31-script-video-detail-polling-n-plus-one.md",
+        "2026-09-01-script-video-image-submit-query-amplification.md",
+        "2026-09-02-content-pipeline-dedupe-query-amplification.md",
+        "2026-09-03-content-pipeline-hash-inside-transaction.md"
       ]
     },
     {
@@ -175,13 +180,14 @@
     },
     {
       "key": "HOT-PATH-PAYLOAD-POLLING",
+      "daily_2026_09_04": "父唤醒71b8b6d6cc87d1f3复发8次multirow_payload/P95 42.28ms，重开既有08-10记录。候选改窄Row，有效命中才按主键与版本加锁读取回滚JSON；2项SQL回归红转绿，父唤醒8项通过。安全门47条近期任务/0活动sync，未FORCE标准重启至backend38129；06:10各worker ready、bootstrap17/17/errors=[]，health healthy，DB idle-in-transaction0。RUNTIME_REPLACED/OBSERVING，仍待自然Publisher completion及后续完整窗；低于慢SQL阈值不能豁免形态失败。",
       "title": "热点接口大字段、轮询重叠与超时误报",
       "priority": "P0",
       "status": "in_progress",
       "acceptance_stage": "runtime_replaced",
-      "last_reopened_at": "2026-09-01",
+      "last_reopened_at": "2026-09-04",
       "latest_watchdog_guardrail": "自动监控循环不得复用包含仪表盘展示聚合的通用状态构建器；decision DTO 与dashboard DTO必须显式分相，完整展示仅由用户请求按需加载。",
-      "latest_watchdog_runtime_observation": "2026-08-31 report-video展示轮询旧28轮84条/10.064秒，task聚合P50/P95/max为227.28/508.42/1083.89毫秒；新watchdog PID4810连续三轮0条。完整status e6314206仍200/1670.44毫秒且字段完整，runtime-only 29781f07为200/533.38毫秒。短窗未复发不等于闭环，继续24小时和后续窗口观察。",
+      "latest_watchdog_runtime_observation": "2026-09-02 固定窗确认从2026-08-31 14:38:18切点至2026-09-02 06:00三个report-video展示聚合origin持续为0，已覆盖超过24小时和下一固定窗；Watchdog展示SQL防线获得runtime acceptance，其他热点轮询记录继续独立观察。",
       "blocking_records": [
         "2026-07-18-publication-task-progress-json-write-amplification.md",
         "2026-07-18-zsxq-run-result-clean-handoff-payload.md",
@@ -216,11 +222,12 @@
         "2026-08-31-mp3-artifact-regeneration-session-hold.md",
         "2026-08-31-mp3-continue-full-video-post-commit-reload.md",
         "2026-08-31-pdf-merge-list-wide-polling.md",
-    "2026-08-31-mp3-bilibili-upload-wide-parent-double-commit.md",
-    "2026-08-31-report-audio-bilibili-upload-wide-session-hold.md",
-    "2026-08-31-platform-publish-retry-cancel-session-lifecycle.md",
-    "2026-08-31-script-video-detail-polling-n-plus-one.md",
-    "2026-09-01-script-video-image-submit-query-amplification.md"
+        "2026-08-31-mp3-bilibili-upload-wide-parent-double-commit.md",
+        "2026-08-31-report-audio-bilibili-upload-wide-session-hold.md",
+        "2026-08-31-platform-publish-retry-cancel-session-lifecycle.md",
+        "2026-08-31-script-video-detail-polling-n-plus-one.md",
+        "2026-09-01-script-video-image-submit-query-amplification.md",
+        "2026-09-02-content-pipeline-dedupe-query-amplification.md"
       ],
       "latest_guardrail_addition": "搜索输入除 debounce 外必须覆盖 IME composition，并由单一 drain owner 保证同一页面至多一个请求在途、等待期间只保留最新参数；响应序号只能保护 UI，不能代替请求背压。每页必须给请求附加稳定 client_id、单调 client_seq、有限 trigger 和 inflight 计数，使服务端能按 request id 验证所有权且不得记录搜索文本。热点目录必须先确认 authoritative source，以有界、TTL、加锁 single-flight 的快照承载搜索；显式 refresh、真实文件二次校验、命中 telemetry 与 O(1) SQL 预算必须同时存在，历史关联表只能补充元数据。数据库查询结果在 Session 释放后才能进入文件校验，cache-hit 路径也必须清理请求事务。带类型资产引用必须先拆 owner 与规范 ID 后写结构化投影，历史截断兼容只能用有界窄查询并检测碰撞，禁止 params/result JSON 回扫。只显示选定 worker 徽标的页面必须调用 runtime-only 精确状态端点，禁止触发跨业务表全量快照；状态轮询继续同时满足 Page Visibility、single-flight、活动态限定和终态停止。表格/列表分页必须由权威行维度在SQL中先执行，并以SQL数、返回行和ORM hydration预算锁定；禁止全范围.all()后Python切片，显式导出合同才允许完整读取。人工素材更新不得在 commit 后用过期 ORM 重取整份 params/result；响应复用 detached snapshot，数据库写回必须是带版本条件的窄 UPDATE，并以 SQL 顺序契约拒绝 post-commit 整行 SELECT。任务入队响应同样必须复用commit前DTO，broker只传稳定ID，celery id/失败收口只窄写；同构入口必须共享helper而不是逐端点复制。轮询列表的正常页必须用轻投影与窗口总数保持一次数据库往返，公开字段从显式JSON子树重建；所有触发方共享单一在途Promise，空列表和终态列表不得保留timer。上传提交命令必须只投影实际消费的父任务JSON scalar并与凭据一次JOIN；路径候选查询与文件探测必须分相，任何父/child fallback 后先release/remove且探测时事务为0；同能力页面必须共享合同并做全调用点复核；broker ID在首次INSERT事务中生成和持久化，成功分支以SQL顺序门禁拒绝发布后二次UPDATE/commit。retry/cancel动作只允许读取必要投影并在commit前冻结DTO；取消、重复清理与orphan收口先durable终态再release/revoke，control失败依赖terminal/current-id guard且不得回滚终态。",
       "last_runtime_observation": "2026-08-31 Insights五冷key P95/max9.475秒、executor36.513ms；ZSXQ Lab一次topics/local被20秒query timeout打成502。MP3冷目录18.386秒而executor0.626ms，暖缓存7.93ms/0SQL。data/table旧1515行已由新API490行/热态1.020秒替换。素材重生成86e70f97/ffa15b05自然200/3.416/4.150秒，均只有快照SELECT、child预取、一次UPDATE且之后无任务SELECT。continue-full-video 8b097844为18.562秒，commit后两次773宽回读共6.025秒；共享DTO/broker ID/窄写修复已加载到PID78053，仍待自然目标入口。PDF merge旧短窗27次GET累计42.235秒、P95 4.728秒、最大18.024秒，358df92aaae36a2d 17.328秒/0行且hold17.644秒。11:21重启到PID82858后54fde6f1/7571d127仅459.39/370.30毫秒，各一条轻查询；真实浏览器26秒任务API1次、资产API0次、终态无第二tick。MP3 B站提交4次累计25.910秒/P95最大11.115秒，旧父快照47,436B且broker后另一次写；新快照2,406B并已加载。全调用点复核发现报告音频旧路由11/11文件探测跨事务，生产样本21,053B；新快照2,517B、旧/新驱动606.98/105.85毫秒。12:47标准重启到PID92009，17/17 service ok、errors=[]、目标worker ready。随后B站retry旧全行8,252B、新retry/cancel 2,637/1,435B；六主工作流与后台revoke旧回调均捕获活动事务。共享窄快照与durable-terminal-before-revoke修复已通过1511项unit。13:31双门禁后标准重启到PID96754，health healthy、bootstrap17/17/errors=[]；五个相关worker均running/ready、queue0，短窗无目标错误/超时/旧宽读且无idle in transaction。没有自然目标动作，应用根因为RUNTIME_REPLACED/OBSERVING；网络与自然pipeline identity继续OPEN/OBSERVING。",
@@ -274,19 +281,21 @@
         "2026-08-31-mp3-artifact-regeneration-session-hold.md",
         "2026-08-31-mp3-continue-full-video-post-commit-reload.md",
         "2026-08-31-pdf-merge-list-wide-polling.md",
-    "2026-08-31-mp3-bilibili-upload-wide-parent-double-commit.md",
-    "2026-08-31-report-audio-bilibili-upload-wide-session-hold.md",
-    "2026-08-31-platform-publish-retry-cancel-session-lifecycle.md",
-    "2026-08-31-script-video-detail-polling-n-plus-one.md",
-    "2026-09-01-script-video-image-submit-query-amplification.md"
+        "2026-08-31-mp3-bilibili-upload-wide-parent-double-commit.md",
+        "2026-08-31-report-audio-bilibili-upload-wide-session-hold.md",
+        "2026-08-31-platform-publish-retry-cancel-session-lifecycle.md",
+        "2026-08-31-script-video-detail-polling-n-plus-one.md",
+        "2026-09-01-script-video-image-submit-query-amplification.md",
+        "2026-09-02-content-pipeline-dedupe-query-amplification.md"
       ]
     },
     {
       "key": "REGRESSION-ACCEPTANCE-INTEGRITY",
+      "daily_2026_09_04": "重开08-18巡检误报记录：逐行解析漏掉无时间戳traceback，导致真实15s断连被报0。完整日志块解析、链式/跨文件episode去重和独立traceback SQL流已落地，23项通过，真实回放server_closed1/traceback1；完整unit1593项通过。下一窗必须三源对账，不以专用SQL logger0代表全库0。",
       "title": "回归覆盖完整性与验收假绿",
       "priority": "P0",
       "status": "in_progress",
-      "last_reopened_at": "2026-08-19",
+      "last_reopened_at": "2026-09-04",
       "systemic_guardrail": "单命令确定性全量回归、真实副作用显式 opt-in、全源编译、前端类型检查、单迁移头、SQL 契约必须编译断言 PostgreSQL JSONB/数组/UUID 真实类型、结构门禁、新 PID 与真实负载分阶段验收；数据库巡检必须覆盖 PgBouncer pool wait/server crash/TLS error 和 server source address，历史故障片段必须有回放契约；日志位于托管文件但显式 process=-/python 且 role/origin unknown 时必须优先判为 adhoc；任一门失败必须重新打开记录并从头复测",
       "records": [
         "2026-07-11-backend-restart-accepted-stale-listener.md",
@@ -381,11 +390,12 @@
     },
     {
       "key": "RUNTIME-TOPOLOGY-RELOAD",
+      "daily_2026_09_04": "自然发布9、upload-only8、MP3 delivery50均成功且目标ImportError0；DB新建publisher16/MP3父4均completed。获得上轮最小app factory真实运行正向证据，仍待后续完整窗口。",
       "title": "Worker/调度器注册、队列拓扑与代码重载",
       "priority": "P0",
       "status": "in_progress",
       "acceptance_stage": "runtime_replaced",
-      "last_reopened_at": "2026-09-01",
+      "last_reopened_at": "2026-09-03",
       "blocking_records": [
         "2026-07-18-full-restart-interrupted-active-render.md",
         "2026-07-23-optimized-video-redis-localhost-db-thundering-herd.md",
@@ -395,7 +405,8 @@
         "2026-07-27-watchdog-stop-script-self-match.md",
         "2026-06-29-feishu-cookie-import-stale-celery-workers.md",
         "2026-08-19-bilibili-intelligence-duplicate-scheduler-write-amplification.md",
-        "2026-09-01-workflow-notification-mixed-version-import-storm.md"
+        "2026-09-01-workflow-notification-mixed-version-import-storm.md",
+        "2026-09-03-worker-app-factory-api-import-fanout.md"
       ],
       "latest_guardrail_addition": "重启必须等不可中断任务自然结束；首次门禁、冻结消费、关闭 API 入队、二次门禁和新进程 readiness 缺一不可，禁止 FORCE。schema 门禁同时校验 notification outbox 表/索引/唯一约束、migration ancestry 和已清理 Bilibili 重复索引不复发；启动后还须核对 PgBouncer 实际 config/pool/server。",
       "last_runtime_observation": "2026-08-31 安全门先后因真实PDF清洗、自动发布以及20份PDF/8份音频发布多次fail closed；全部自然完成后10:01读取47条任务/0活动sync，未用FORCE完成第二次标准整栈重启。backend PID70045 healthy，bootstrap17/17、errors=[]，三个目标worker ready；素材自然成功请求证明第三项新代码加载。10:28新增continue-full-video修复后安全门又被真实publisher任务正确阻断。任务自然结束后10:41门禁读取47条任务/0 sync并放行；标准脚本冻结17队列、关闭API、二次门禁后完成重启，全程未FORCE。新backend PID78053 healthy、bootstrap17/17/errors=[]，MP3/content-pipeline/zsxq-publish均ready。11:21同一双门禁标准流程把PDF合并修复加载到PID82858。11:55 B站上传修复再次先读取47条任务/0活动sync并放行；标准脚本冻结队列和关闭API后第二次门禁仍安全，未FORCE重启到PID86809，health healthy、17/17 Celery service ok、errors=[]，platform_upload与mp3_video_workflow ready、watchdog启动。13:31同一双门禁重启到PID96754；13:55全量revoke防线补全后再次读取47条近期任务/0活动sync，冻结17队列、停止旧API、二次门禁通过，未FORCE重启到PID99802。health healthy、bootstrap17/17/errors=[]，六个相关服务running且queue0；代码已加载，仍待自然动作与完整24h。",
@@ -423,7 +434,8 @@
         "2026-07-27-celery-solo-inspect-false-stuck-watchdog.md",
         "2026-07-27-watchdog-stop-script-self-match.md",
         "2026-08-19-bilibili-intelligence-duplicate-scheduler-write-amplification.md",
-        "2026-09-01-workflow-notification-mixed-version-import-storm.md"
+        "2026-09-01-workflow-notification-mixed-version-import-storm.md",
+        "2026-09-03-worker-app-factory-api-import-fanout.md"
       ]
     },
     {

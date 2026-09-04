@@ -147,7 +147,7 @@ def _create_pdf_merge_app():
     from app import create_app
 
     try:
-        return create_app()
+        return create_app(register_apis=False)
     except Exception:
         logger.exception("Full Flask app initialization failed for PDF merge worker")
 

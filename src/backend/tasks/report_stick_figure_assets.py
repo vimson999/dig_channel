@@ -46,7 +46,7 @@ PARENT_IMAGE_COMPLETION_STEPS = frozenset({
     max_retries=2,
 )
 def generate_scene_image(self, task_id):
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         try:
             result = _generate_scene_image(

@@ -13,7 +13,7 @@ def download_video_task(self, task_id, url):
     Celery task to download a video.
     """
     from app import create_app
-    flask_app = create_app()
+    flask_app = create_app(register_apis=False)
     with flask_app.app_context():
         try:
             # Update task with Celery ID

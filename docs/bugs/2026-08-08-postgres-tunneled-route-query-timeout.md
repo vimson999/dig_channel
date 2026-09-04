@@ -2,6 +2,12 @@
 
 ## 基本信息
 
+2026-09-04复核：09-03 08:54:10又发生1组query_wait_timeout，与watchdog PID22426
+`due_provider_drains`失败SQL15016.79ms一致，非SQL持有仅7.12ms。该SQL真实EXPLAIN
+executor0.086ms、命中现有索引、现场等待锁0；不能按缺索引解释。24h server query/connect timeout
+和TLS crash均0，属于改善但并未全零；源地址100.96.3.12、目标100.92.99.39。继续OPEN/REPEATED。
+旧日志分析器漏掉traceback导致server_closed=0，本轮回放已纠正为1，不能把旧0作为未复发证据。
+
 - 状态：公网物理绕过与 Tailscale 两轮隔离后仍有应用 query timeout 和 server socket crash；`RUNTIME_MITIGATED/OPEN`
 - 严重级别：P0
 - 影响模块：全部数据库页面/API / Celery / scheduler / PgBouncer / 本机代理网络

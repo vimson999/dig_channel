@@ -13,6 +13,29 @@
 
 ## 现象与根因
 
+### 2026-09-04 提交前回放补强
+
+只读审查进一步复现：同秒独立故障被合并、测试/临时诊断混入、无毫秒的 ColoredFormatter 头被吞入前一块，
+甚至造成 `float('5000\\n❌')` 崩溃与跨窗口错归因。现保留完整时间，识别普通/Celery/彩色/UI START 头，
+结构化字段仅从本事件头提取。仅合并相邻且正文一致的彩色/普通 handler 副本；跨文件按事件正文和发生序号
+去重，同一来源的重复发生保留。明确 test/SQLite 记录排除，application/adhoc 分列并保留来源路径，不打印参数。
+29 项日志回归通过。固定历史窗再次对账仍为 hold=1、server_closed=1、traceback=1，traceback 同时关联
+scheduler.log 与 celery_watchdog.log。PgBouncer `pgbouncer_events` 仍是旧的秒桶统计，不冒充精确独立故障数。
+
+### 2026-09-04 多行 traceback 漏报复发
+
+09-03 08:54:10 watchdog PID22426 在 `due_provider_drains` 发生真实断连：连接持有
+15023.91ms，其中失败SQL15016.79ms、非SQL仅7.12ms；PgBouncer同刻query_wait_timeout。
+异常藏在时间戳头之后的 traceback，旧分析器跳过所有无时间戳行，错误地给出server_closed=0、
+结构化SQL错误=0。后者只覆盖publication_tasks专用logger，本就不能代表全库。
+
+现以完整时间戳日志块解析，链式DBAPI/SQLAlchemy异常与跨文件复制按episode去重；新增独立
+`sql_error_traceback_episodes`证据流及SQL指纹，禁止与结构化错误不经关联直接相加。
+connection-held只认日志头的lifecycle logger，避免traceback栈中的同名文件被误当持有事件。
+两项回归覆盖多行、链式异常、跨文件去重、窗口边界与非lifecycle栈帧；分析器23项通过。
+真实固定窗回放server_closed=1、traceback episode=1、指纹c1e57cc097d3e051，结构化SQL错误仍为0。
+完整unit1593项通过。状态OBSERVING：下一窗继续对账PgBouncer/traceback/Session三源。
+
 本窗口两条 `publication_tasks` OperationalError（server closed）来自 `logs/scheduler.log`，但日志字段为 role unknown、process `-`、origin unknown。分析器只依赖字段，将其计入 ad-hoc diagnostic，导致应用 SQL 错误被压成 0；slow-query 与错误日志跨源去重时也没有把托管来源升级回来。
 
 ## 实际修复

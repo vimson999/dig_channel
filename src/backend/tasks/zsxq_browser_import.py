@@ -25,7 +25,7 @@ def run_browser_import(
     """Import sidebar manifests and optionally hand them to existing cleaners."""
     from app import create_app
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         if submission_id:
             request_id = getattr(getattr(self, "request", None), "id", None)

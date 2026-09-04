@@ -108,7 +108,7 @@ def _process_with_doubao_ws(seg, article, config, base_save_dir, project_root):
 
 @celery_app.task(bind=True, name='tts.process_doubao_publication')
 def process_doubao_tts_task(self, task_id):
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         return _process_doubao_tts_task(task_id)
 
@@ -284,7 +284,7 @@ def process_tts_article(self, article_id):
     """
     处理TTS文章合成任务 (串行处理所有段落)
     """
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         return _process_tts_article(article_id)
 

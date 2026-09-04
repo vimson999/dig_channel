@@ -66,7 +66,7 @@ def _update_active_task(task_id, values):
 
 
 def _run_with_app_context(task_id):
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         return _process_job(task_id)
 
@@ -81,7 +81,7 @@ def _run_with_app_context(task_id):
     retry_kwargs={"max_retries": 3},
 )
 def process_report_pdf_gemini_job(self, task_id):
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         return _process_job(task_id, celery_task=self)
 
@@ -96,7 +96,7 @@ def process_report_pdf_gemini_job(self, task_id):
     retry_kwargs={"max_retries": 3},
 )
 def process_gemini_browser_job(self, task_id):
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         return _process_job(task_id, celery_task=self)
 

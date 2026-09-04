@@ -704,7 +704,7 @@ def _dispatch_requested_visual_workflows(source_task_id, payload):
 @celery_app.task(bind=True, name="tasks.report_audio_workflow.process_job")
 def process_report_audio_workflow_job(self, task_id):
     try:
-        app = create_app()
+        app = create_app(register_apis=False)
         with app.app_context():
             require_report_audio_workers_ready()
             start = _load_task(
@@ -5225,7 +5225,7 @@ def _mark_report_audio_failed_safely(task_id, message):
         "persist_error": None,
     }
     try:
-        app = create_app()
+        app = create_app(register_apis=False)
         with app.app_context():
             db.session.rollback()
             task = _load_task(task_id, *TASK_STATE_COLUMNS)

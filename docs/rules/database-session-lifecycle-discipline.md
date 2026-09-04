@@ -77,6 +77,15 @@
   `venv/bin/python scripts/dev/check-celery-revoke-boundary.py`。该 AST 门禁必须扫描整个 backend，拒绝共享
   守卫外的 direct revoke，并拒绝缺 `operation` / `business_task_id` 的 helper 调用；人工 `rg` 只能作为
   补充证据，不能替代会自动失败的门禁。
+- 后台任务仅为 app context 或数据库初始化创建 Flask 应用时，必须调用
+  `create_app(register_apis=False)`；禁止导入与任务无关的完整 Web API 图。运行替换前必须执行
+  `venv/bin/python scripts/dev/check-worker-app-factory-boundary.py`，以全任务树 AST 门禁防止单点修复后从其他
+  worker 复发。route/model/service 契约变化后还必须安全重启全部相关长驻进程并核对 ready 与导入错误切点。
+- 文件哈希、媒体探测、目录遍历和其他文件 I/O 必须在创建 ORM、查询或 flush 之前完成，并冻结为纯值快照；
+  数据库阶段只能消费预计算结果。测试必须直接捕获 I/O 时的 `in_transaction`，不得以“期间没有 SQL”代替
+  连接未被持有的证据。
+- 文件 I/O 入口必须考虑上游认证/同步查询已开的事务，显式释放干净只读事务并拒绝待提交 ORM 写入；
+  回归至少覆盖“无上游事务”和“真实 SELECT 预开事务”，不能只用全新 Session 验收。
 
 推荐释放函数：
 
@@ -122,6 +131,14 @@ def release_db_session_quietly():
 注意：如果 PgBouncer 配置了 `ignore_startup_parameters = options`，应用通过连接串 `options=-c statement_timeout=...` 设置的超时不会生效。此时必须用数据库角色或数据库级别的 `ALTER ROLE` / `ALTER DATABASE` 设置硬保险。
 
 ## 健康验收
+
+- 错误巡检必须按完整时间戳日志块读取 traceback，不能丢弃无时间戳续行；链式DBAPI/SQLAlchemy异常
+  与跨日志副本按episode去重。结构化SQL logger、traceback和PgBouncer为不同证据流，未关联前不得
+  相加或把任意单流的0解释为全库无错误。栈中的lifecycle文件名不能充当连接持有事件。
+- 完成事件按waiting_child等结构化字段筛选父任务时只能读窄Row；无匹配/已处理事件禁止物化JSON。
+  只有有效命中主键才能读取必要回滚快照，并校验版本以避免筛选后的并发覆盖；回归必须捕获真实SQL。
+- broker 失败恢复必须重新确认 claim 所有权和父任务仍处可恢复步骤；只回退自己修改的字段，基于最新锁定
+  快照合并 JSON，保留 broker 等待期间新增的审计信息。取消/终态/推进后的状态不得被旧快照覆盖。
 
 任一重启或修复后，至少检查：
 

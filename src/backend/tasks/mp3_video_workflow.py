@@ -27,7 +27,7 @@ logger = logging.getLogger("MP3_VIDEO_WORKFLOW_TASK")
     retry_kwargs={"max_retries": 3},
 )
 def process_mp3_video_workflow_job(self, task_id, wait_hint=None):
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         try:
             guard_publication_task_start(

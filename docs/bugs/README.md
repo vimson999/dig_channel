@@ -6,6 +6,10 @@
 
 复发根因登记表：[`recurrence-registry.json`](recurrence-registry.json)。正式回顾归档在 [`reviews/`](reviews/)。
 
+2026-09-04 每日复核：[数据库性能巡检](reviews/2026-09-04-db-performance-audit.md)。
+父任务唤醒整列JSON查询与多行traceback漏报再次检出，已更新原Bug记录并补SQL/日志回放契约；
+根因继续OBSERVING，不能因慢SQL总耗时下降而关闭。
+
 执行完整性检查：
 
 ```bash
@@ -16,6 +20,11 @@
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-09-03 | [每日数据库性能与错误巡检](reviews/2026-09-03-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | 应用慢 SQL 总时长降 28.8%；两条 P0 已改码，待安全重启；网络超时 OPEN/REPEATED |
+| 2026-09-03 | [后台任务完整注册 Web API 导致混版导入失败](2026-09-03-worker-app-factory-api-import-fanout.md) | Celery 全任务 / app factory / Web API import | RUNTIME_REPLACED/OBSERVING；15/15 service running，待自然任务与完整窗口 |
+| 2026-09-03 | [内容管线文件哈希在数据库事务内执行](2026-09-03-content-pipeline-hash-inside-transaction.md) | 内容管线 / 文件 SHA256 / Session | RUNTIME_REPLACED/OBSERVING；worker ready，事务外哈希待自然多文件批次 |
+| 2026-09-02 | [每日数据库性能与错误巡检](reviews/2026-09-02-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | 慢 SQL 降 82%；内容去重批量放大已修并安全替换，待自然提交；网络仍 OPEN |
+| 2026-09-02 | [内容管线批量去重逐文件查询与插入放大](2026-09-02-content-pipeline-dedupe-query-amplification.md) | 内容管线 / canonical asset / Web submit / PgBouncer | RUNTIME_REPLACED/OBSERVING；1 次批量查 + 1 次批量插入合同通过，待自然批次 |
 | 2026-09-01 | [每日数据库性能与错误巡检](reviews/2026-09-01-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | 两条 P0 根因已改码并最终安全替换；通知积压自然排空，图片待自然提交与完整后窗 |
 | 2026-09-01 | [文案到成片图片批量提交逐场景重复宽读与提交](2026-09-01-script-video-image-submit-query-amplification.md) | 文案到成片图片 / publication_tasks / broker | RUNTIME_REPLACED/OBSERVING；定向查询预算与故障合同通过，待自然提交和完整后窗 |
 | 2026-09-01 | [长驻通知 Worker 混用新旧模块导致导入失败风暴](2026-09-01-workflow-notification-mixed-version-import-storm.md) | workflow notification / Celery / app factory / outbox | RUNTIME_REPLACED/OBSERVING；最终进程真实排空 140 条，待完整后窗 |

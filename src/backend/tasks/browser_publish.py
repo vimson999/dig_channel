@@ -76,7 +76,7 @@ def _mark_credential_safely(action, *args, **kwargs):
 def run_browser_publish_job(celery_task, job_id, spec: BrowserPublishTaskSpec):
     from app import create_app
 
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         task = PublicationTask.query.filter(PublicationTask.id == str(job_id)).first()
         if not task:

@@ -330,7 +330,7 @@ def repair_ready_stick_figure_video_workflows_once(limit: int = 10) -> dict:
     store_errors_even_if_ignored=True,
 )
 def align_stick_figure_whole_audio(self, task_id):
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         try:
             return _align_whole_audio(
@@ -619,7 +619,7 @@ def _mark_alignment_failed(task_id: str, error: str) -> None:
     store_errors_even_if_ignored=True,
 )
 def render_stick_figure_video(self, task_id):
-    app = create_app()
+    app = create_app(register_apis=False)
     with app.app_context():
         try:
             return _render_video(
