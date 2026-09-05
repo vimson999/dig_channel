@@ -212,6 +212,7 @@
 
     <!-- 引入共享导航组件 -->
     <script src="/js/shared-navigation.js"></script>
+    <script src="/js/upload-success-sound.js?v=20260905-upload-success-sound"></script>
 
     <script>
         // 如果页面运行在8888或其他非后端端口，需要指定后端地址
@@ -347,6 +348,9 @@
             }
         }
 
+        let historySoundInitialized = false;
+        const historySuccessSoundIds = new Set();
+
         async function refreshHistory() {
             const list = document.getElementById('history-list');
             try {
@@ -355,6 +359,17 @@
                 
                 if (json.success) {
                     const files = json.data;
+                    const successfulIds = files
+                        .filter((file) => file.status === 'success')
+                        .map((file) => String(file.filename || file.title || file.modified || '').trim())
+                        .filter(Boolean);
+                    if (historySoundInitialized) {
+                        successfulIds
+                            .filter((id) => !historySuccessSoundIds.has(id))
+                            .forEach((id) => window.UploadSuccessSound?.play({ platform: 'bilibili', taskId: id }));
+                    }
+                    successfulIds.forEach((id) => historySuccessSoundIds.add(id));
+                    historySoundInitialized = true;
                     if (files.length === 0) {
                         list.innerHTML = `<div class="p-4 text-center text-gray-400 text-sm">暂无上传记录</div>`;
                         return;

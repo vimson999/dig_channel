@@ -22,6 +22,8 @@ class BilibiliPublishPanel {
         this.seasonsLoading = '';
         this.lastUpload = null;
         this.uploadRetryIds = new Set();
+        this.uploadStatuses = new Map();
+        this.uploadStatusInitialized = false;
         this.formDraft = null;
         this.localNotice = null;
         this.instanceId = `bili-${Math.random().toString(36).slice(2, 9)}`;
@@ -78,20 +80,25 @@ class BilibiliPublishPanel {
     setJob(job, options = {}) {
         const previousJobId = this.job?.job_id || this.job?.id || '';
         const nextJobId = job?.job_id || job?.id || '';
+        const jobChanged = previousJobId !== nextJobId;
         const incomingDraft = options.formDraft ? { ...options.formDraft } : null;
-        if (previousJobId !== nextJobId) {
+        if (jobChanged) {
             this.formDraft = incomingDraft || null;
             this.lastUpload = null;
+            this.uploadStatuses = new Map();
+            this.uploadStatusInitialized = false;
         } else if (incomingDraft) {
             this.formDraft = incomingDraft;
         }
         this.job = job || {};
+        this.observeUploadStatuses(this.job, { initial: !this.uploadStatusInitialized });
         this.render();
         this.loadCredentials();
     }
 
     updateJobData(job) {
         this.job = job || this.job || {};
+        this.observeUploadStatuses(this.job);
         this.refreshHistory();
     }
 
@@ -247,13 +254,42 @@ class BilibiliPublishPanel {
         return Array.isArray(options) ? options : [];
     }
 
-    uploads() {
-        const items = this.options.uploads ? this.options.uploads(this.job) : (this.job?.bilibili_uploads || []);
+    uploads(job = this.job) {
+        const sourceJob = job || {};
+        const items = this.options.uploads ? this.options.uploads(sourceJob) : (sourceJob.bilibili_uploads || []);
         const merged = Array.isArray(items) ? [...items] : [];
         if (this.lastUpload && !merged.some((item) => item.task_id === this.lastUpload.task_id)) {
             merged.unshift(this.lastUpload);
         }
         return merged;
+    }
+
+    isSuccessfulUpload(item) {
+        const status = String(item?.status || '').trim().toLowerCase();
+        const publishStatus = String(item?.publish_status || '').trim().toLowerCase();
+        return ['succeeded', 'completed', 'success'].includes(status)
+            || ['visible'].includes(publishStatus);
+    }
+
+    observeUploadStatuses(job, { initial = false } = {}) {
+        const nextStatuses = new Map();
+        const items = this.uploads(job);
+        items.forEach((item) => {
+            const taskId = String(item?.task_id || '').trim();
+            if (!taskId) return;
+            const successful = this.isSuccessfulUpload(item);
+            const previous = this.uploadStatuses.get(taskId);
+            if (!initial && successful && !previous?.successful) {
+                window.UploadSuccessSound?.play({ platform: 'bilibili', taskId });
+            }
+            nextStatuses.set(taskId, {
+                successful,
+                status: String(item?.status || '').trim().toLowerCase(),
+                publishStatus: String(item?.publish_status || '').trim().toLowerCase(),
+            });
+        });
+        this.uploadStatuses = nextStatuses;
+        this.uploadStatusInitialized = true;
     }
 
     render() {

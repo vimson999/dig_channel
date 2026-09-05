@@ -6,6 +6,8 @@ let currentTaskId = null;
 let pollInterval = null;
 let historyInterval = null;
 let startTime = null;
+const uploadSuccessSoundTaskIds = new Set();
+const uploadSuccessSoundStates = new Map();
 
 const state = {
     images: { 
@@ -738,7 +740,20 @@ function startPolling(taskId) {
     }, 2000);
 }
 
+function playUploadSuccessSound(task) {
+    const result = task?.result || {};
+    const platform = result.bilibili_result ? 'bilibili' : (result.youtube_result ? 'youtube' : '');
+    const taskId = String(task?.id || task?.task_id || currentTaskId || '').trim();
+    if (!taskId) return;
+    const previousCompleted = uploadSuccessSoundStates.get(taskId);
+    uploadSuccessSoundStates.set(taskId, Boolean(platform));
+    if (!platform || previousCompleted !== false || uploadSuccessSoundTaskIds.has(taskId)) return;
+    uploadSuccessSoundTaskIds.add(taskId);
+    window.UploadSuccessSound?.play({ platform, taskId });
+}
+
 function updateProgressUI(task) {
+    playUploadSuccessSound(task);
     if (elements.progressBar) elements.progressBar.style.width = `${task.progress}%`;
     if (elements.stepDisplay) {
         const map = { 

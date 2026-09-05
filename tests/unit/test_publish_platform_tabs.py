@@ -7,6 +7,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class PublishPlatformTabsTest(unittest.TestCase):
+    def test_upload_success_sound_contract(self):
+        contract = PROJECT_ROOT / "tests/frontend/upload_success_sound_contract.js"
+        completed = subprocess.run(
+            ["node", str(contract)],
+            cwd=PROJECT_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+
     def test_mp3_detail_lazily_mounts_publish_panels_and_reuses_credentials(self):
         contract = PROJECT_ROOT / "tests/frontend/mp3_publish_lazy_mount_contract.js"
         completed = subprocess.run(

@@ -3,6 +3,7 @@ class PlatformBrowserPublishPanel {
         this.options = options;
         this.container = options.container;
         this.job = null; this.credentials = []; this.uploads = [];
+        this.uploadStatuses = new Map(); this.uploadStatusInitialized = false;
         this.credentialsLoading = false; this.uploadsLoading = false;
         this.localNotice = null; this.formDraft = null; this.pollTimer = null;
         this.bind();
@@ -24,6 +25,13 @@ class PlatformBrowserPublishPanel {
     }
     destroy() { if (this.pollTimer) window.clearTimeout(this.pollTimer); this.pollTimer = null; }
     setJob(job, { formDraft = null } = {}) {
+        const previousJobId = this.jobId();
+        const nextJobId = String(job?.job_id || job?.id || '');
+        if (previousJobId !== nextJobId) {
+            this.uploads = [];
+            this.uploadStatuses = new Map();
+            this.uploadStatusInitialized = false;
+        }
         this.job = job || {}; this.formDraft = formDraft || this.formDraft; this.render();
         if (!this.credentials.length && !this.credentialsLoading) this.loadCredentials();
         this.loadUploads();
@@ -57,7 +65,9 @@ class PlatformBrowserPublishPanel {
         this.uploadsLoading = true;
         try {
             const result = await this.request(this.options.listPath(jobId), { timeoutMs: 15000 });
-            this.uploads = result.data?.items || result.items || []; this.render();
+            this.uploads = result.data?.items || result.items || [];
+            this.observeUploadStatuses({ initial: !this.uploadStatusInitialized });
+            this.render();
         } catch (error) { if (!quiet) this.notify(`${this.platformName()}任务读取失败：${error.message}`, 'warning'); }
         finally { this.uploadsLoading = false; this.schedulePoll(); }
     }
@@ -65,6 +75,31 @@ class PlatformBrowserPublishPanel {
         if (this.pollTimer) window.clearTimeout(this.pollTimer); this.pollTimer = null;
         if (!this.uploads.some((item) => ['queued','running','pending','processing'].includes(String(item.status || '').toLowerCase()))) return;
         this.pollTimer = window.setTimeout(() => this.loadUploads(), 3000);
+    }
+    isSuccessfulUpload(item) {
+        const status = String(item?.status || '').trim().toLowerCase();
+        const publishStatus = String(item?.publish_status || '').trim().toLowerCase();
+        return ['succeeded', 'completed', 'success', 'prepared'].includes(status)
+            || ['submitted', 'submitted_pending_verification', 'visible'].includes(publishStatus);
+    }
+    observeUploadStatuses({ initial = false } = {}) {
+        const nextStatuses = new Map();
+        this.uploads.forEach((item) => {
+            const taskId = String(item?.task_id || item?.job_id || '').trim();
+            if (!taskId) return;
+            const successful = this.isSuccessfulUpload(item);
+            const previous = this.uploadStatuses.get(taskId);
+            if (!initial && successful && !previous?.successful) {
+                window.UploadSuccessSound?.play({ platform: this.platformName(), taskId });
+            }
+            nextStatuses.set(taskId, {
+                successful,
+                status: String(item?.status || '').trim().toLowerCase(),
+                publishStatus: String(item?.publish_status || '').trim().toLowerCase(),
+            });
+        });
+        this.uploadStatuses = nextStatuses;
+        this.uploadStatusInitialized = true;
     }
     videoOptions() {
         const raw = this.options.videoOptions ? this.options.videoOptions(this.job) : [];
