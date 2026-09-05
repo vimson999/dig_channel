@@ -10,6 +10,8 @@
         charts: new Map(),
         requestSerial: 0,
         detailRequestSerial: 0,
+        historyRequestSerial: 0,
+        itemsRequestSerial: 0,
     };
 
     const elements = {};
@@ -71,6 +73,7 @@
         if (!['pdf', 'audio'].includes(kind)) return;
         state.requestSerial += 1;
         state.detailRequestSerial += 1;
+        state.itemsRequestSerial += 1;
         state.kind = kind;
         state.historyPage = 1;
         state.selectedFile = null;
@@ -143,9 +146,11 @@
 
     async function loadHistory() {
         const kindAtRequest = state.kind;
+        const pageAtRequest = state.historyPage;
+        const serial = ++state.historyRequestSerial;
         const params = new URLSearchParams({
             kind: kindAtRequest,
-            page: String(state.historyPage),
+            page: String(pageAtRequest),
             per_page: String(state.historyPerPage),
         });
         renderHistoryLoading();
@@ -156,13 +161,13 @@
             });
             const payload = await readJson(response);
             if (!response.ok || !payload.success) throw new Error(payload?.error?.message || '历史读取失败');
-            if (kindAtRequest !== state.kind) return;
+            if (serial !== state.historyRequestSerial || kindAtRequest !== state.kind || pageAtRequest !== state.historyPage) return;
             const data = payload.data || {};
             state.historyByKind.set(kindAtRequest, data.items || []);
             state.historyPagination = data.pagination || null;
             renderHistory(data.items || [], data.pagination || null);
         } catch (error) {
-            if (kindAtRequest !== state.kind) return;
+            if (serial !== state.historyRequestSerial || kindAtRequest !== state.kind || pageAtRequest !== state.historyPage) return;
             elements['analysis-history-list'].innerHTML = '';
             const empty = document.createElement('div');
             empty.className = 'history-empty';
@@ -229,6 +234,12 @@
         const runId = detail?.run?.id;
         if (!runId) return;
         const kindAtRequest = state.kind;
+        const serial = ++state.itemsRequestSerial;
+        const ownsRequest = () => (
+            serial === state.itemsRequestSerial
+            && kindAtRequest === state.kind
+            && state.currentRunByKind.get(kindAtRequest)?.run?.id === runId
+        );
         const button = elements['load-items-button'];
         button.disabled = true;
         button.textContent = '正在读取…';
@@ -240,17 +251,15 @@
             });
             const payload = await readJson(response);
             if (!response.ok || !payload.success) throw new Error(payload?.error?.message || '文件列表读取失败');
-            if (kindAtRequest !== state.kind || state.currentRunByKind.get(kindAtRequest)?.run?.id !== runId) {
-                button.textContent = '查看前 50 条文件';
-                return;
-            }
+            if (!ownsRequest()) return;
             renderTopItems(payload.data?.items || []);
             button.textContent = `已加载 ${payload.data?.items?.length || 0} 条文件`;
         } catch (error) {
+            if (!ownsRequest()) return;
             button.textContent = '文件列表读取失败';
             setStatus(error.message || '文件列表读取失败。', 'error');
         } finally {
-            button.disabled = false;
+            if (ownsRequest()) button.disabled = false;
         }
     }
 
@@ -450,7 +459,7 @@
                     <div class="history-primary"><strong></strong><span></span></div>
                     <div class="history-stat"><strong></strong><span>文件</span></div>
                     <div class="history-stat"><strong></strong><span>已下载</span></div>
-                    <div class="history-stat"><strong></strong><span>分析时间</span></div>
+                    <div class="history-stat"><strong></strong><span>下载总数</span></div>
                     <span class="history-open">打开 <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i></span>`;
                 row.querySelector('.history-primary strong').textContent = item.source_filename || '未命名 JSON';
                 row.querySelector('.history-primary span').textContent = `${formatDateTime(item.created_at)} · SHA ${item.source_sha256_prefix || '-'}`;

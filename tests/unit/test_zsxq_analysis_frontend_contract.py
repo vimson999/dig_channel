@@ -1,3 +1,4 @@
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -47,6 +48,32 @@ class ZsxqAnalysisFrontendContractTest(unittest.TestCase):
         self.assertIn("state.currentRunByKind.set(kindAtRequest", script)
         self.assertIn("detailRequestSerial", script)
         self.assertNotIn("state.currentRunByKind.set(state.kind", script)
+
+    def test_history_and_item_requests_reject_stale_responses(self):
+        contract = (
+            PROJECT_ROOT
+            / "tests/frontend/zsxq_analysis_request_race_contract.js"
+        )
+        completed = subprocess.run(
+            ["node", str(contract)],
+            cwd=PROJECT_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            completed.stderr or completed.stdout,
+        )
+
+    def test_history_download_total_column_is_labeled_correctly(self):
+        script = (
+            PROJECT_ROOT / "src/frontend/js/zsxq-analysis.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('<span>下载总数</span>', script)
+        self.assertNotIn('<span>分析时间</span>', script)
 
     def test_shared_navigation_knows_the_new_page(self):
         script = (
