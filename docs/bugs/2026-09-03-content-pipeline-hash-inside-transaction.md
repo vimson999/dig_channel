@@ -55,3 +55,15 @@
   runtime-only 状态为 running、queue=0，数据库复核无 waiting lock、无 idle-in-transaction。
 - 自然样本已接受上一轮 1 SELECT + 1 INSERT 查询预算，但本次事务外哈希尚待重启后的自然多文件批次验收。
 - 下一批要求哈希期间 `in_transaction=False`，canonical SQL 仍为 O(1)，并按 request id 对账连接持有与最终任务状态。
+
+## 2026-09-05 运行版本边界
+
+固定窗 Web submit 5/5 成功且没有 Web 长连接持有被生命周期阈值捕获，但最慢请求仍为 37.742 秒；
+单条慢 SQL 只有 1.474 秒，日志还原约 28.816 秒在 SQL 外。该旧进程没有加载 `dec217e` 对 Web multipart、
+PDF/音频入口继承只读事务与 pending-write fail-closed 的最终加固，因此不能把“未记录长 hold”写成事务边界
+已获生产验收。
+
+真实 SQLite SQL 捕获合同、定向交叉 114 项和完整 unit 1607 项均通过。两次安全门通过后，标准重启仍被
+自动审批以服务中断风险拒绝；状态保持 `OBSERVING`，最终加固为
+`CODE_VERIFIED / WAITING_RUNTIME_REPLACEMENT`。下一自然批次必须直接证明哈希及暂存期间
+`in_transaction=false`，同时核对 O(1) canonical、request hold 与最终任务状态。

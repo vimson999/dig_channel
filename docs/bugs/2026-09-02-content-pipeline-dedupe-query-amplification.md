@@ -91,3 +91,13 @@ savepoint。20 个文件因此把正常 admission 放大为约 20 次存在性�
   并对账所有文件的 canonical task ownership。
 - 下一固定窗口继续比较接口成功率/P50/P95/max、慢 SQL、PgBouncer 六类错误和 idle-in-transaction；短窗或
   单次测试不能替代运行窗口。
+
+## 2026-09-05 运行版本边界
+
+固定窗 5 次 Web submit 均返回成功，但 P50/max 为 10.201/37.742 秒；最慢 request `285c2245`
+约 13 条 SQL 累计 8.925 秒，约 28.816 秒在 SQL 外。该样本来自 06:10 旧进程，早于 18:49 的
+`dec217e` 稳定排序、真实唯一约束 savepoint 回退与外层审计补强，不能作为最终代码验收。
+
+完整 unit 1607 项与定向交叉 114 项通过；两次安全门通过，但标准重启被自动审批拒绝。状态保持
+`OBSERVING`，最终补强为 `CODE_VERIFIED / WAITING_RUNTIME_REPLACEMENT`。重启后首个自然多文件批次仍需
+验证 canonical SELECT/INSERT O(1)、输入保序、冲突回退、连接持有与最终 ownership。

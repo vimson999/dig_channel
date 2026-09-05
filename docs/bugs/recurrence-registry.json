@@ -1,11 +1,12 @@
 {
   "schema_version": 2,
-  "reviewed_through": "2026-09-04",
+  "reviewed_through": "2026-09-05",
   "max_days_between_reviews": 7,
   "clusters": [
     {
       "key": "DB-SESSION-LIFECYCLE",
       "daily_2026_09_04": "固定窗慢SQL29/39.148秒，长hold1次15.024秒来自notification due_provider_drains且sql15.017秒/非SQL7.12ms；PgBouncer query_wait_timeout1组，网络OPEN。自然25PDF+10音频全部成功，1查1插且无Web长hold，但哈希事务入口尚无直接生产探针，保持OBSERVING。",
+      "daily_2026_09_05": "固定窗慢SQL103/181.964秒，P95/max3.720/9.386秒，长hold6次且SQL占37.836/41.927秒；六类PgBouncer错误0但wait/query P95升至137.56/239.98ms，executor仅0.02–35.21ms。网络簇保持OPEN/REPEATED。dec217e全量1607项通过且双安全门通过，但标准重启被自动审批拒绝，最终事务边界补强等待运行替换。",
       "title": "数据库 Session 生命周期与热查询",
       "priority": "P0",
       "status": "in_progress",
@@ -181,6 +182,7 @@
     {
       "key": "HOT-PATH-PAYLOAD-POLLING",
       "daily_2026_09_04": "父唤醒71b8b6d6cc87d1f3复发8次multirow_payload/P95 42.28ms，重开既有08-10记录。候选改窄Row，有效命中才按主键与版本加锁读取回滚JSON；2项SQL回归红转绿，父唤醒8项通过。安全门47条近期任务/0活动sync，未FORCE标准重启至backend38129；06:10各worker ready、bootstrap17/17/errors=[]，health healthy，DB idle-in-transaction0。RUNTIME_REPLACED/OBSERVING，仍待自然Publisher completion及后续完整窗；低于慢SQL阈值不能豁免形态失败。",
+      "daily_2026_09_05": "父唤醒旧宽JSON指纹71b8b6d6cc87d1f3固定窗0；核心窄候选已在06:10运行时，但无目标自然Publisher completion。18:49 dec217e的失败恢复/事务补强未加载，自动审批拒绝标准重启。内容Web提交5次全成功但max37.742秒，最终批量/事务合同仅有1607项测试证据，保持OBSERVING并等待新PID后自然验收。",
       "title": "热点接口大字段、轮询重叠与超时误报",
       "priority": "P0",
       "status": "in_progress",
@@ -292,6 +294,7 @@
     {
       "key": "REGRESSION-ACCEPTANCE-INTEGRITY",
       "daily_2026_09_04": "重开08-18巡检误报记录：逐行解析漏掉无时间戳traceback，导致真实15s断连被报0。完整日志块解析、链式/跨文件episode去重和独立traceback SQL流已落地，23项通过，真实回放server_closed1/traceback1；完整unit1593项通过。下一窗必须三源对账，不以专用SQL logger0代表全库0。",
+      "daily_2026_09_05": "固定窗app/backend/scheduler/Celery、publication专用SQL和PgBouncer三源对账：结构化SQL error0、traceback episode0、六类PgBouncer错误0。分析器合同与完整unit1607项通过；本窗没有自然错误可验证分类，保持OBSERVING，下一episode继续按来源/进程/request/task跨文件去重。",
       "title": "回归覆盖完整性与验收假绿",
       "priority": "P0",
       "status": "in_progress",
@@ -391,6 +394,7 @@
     {
       "key": "RUNTIME-TOPOLOGY-RELOAD",
       "daily_2026_09_04": "自然发布9、upload-only8、MP3 delivery50均成功且目标ImportError0；DB新建publisher16/MP3父4均completed。获得上轮最小app factory真实运行正向证据，仍待后续完整窗口。",
+      "daily_2026_09_05": "固定窗Publisher12、MP3 delivery54、ZSXQ publish7及内容清洗7次成功；目标ImportError0。最终dec217e晚于backend38129及worker启动时间约12.5小时，完整unit1607与app-factory门禁通过但自动审批拒绝标准重启。现有服务健康，最终补强状态CODE_VERIFIED/WAITING_RUNTIME_REPLACEMENT。",
       "title": "Worker/调度器注册、队列拓扑与代码重载",
       "priority": "P0",
       "status": "in_progress",

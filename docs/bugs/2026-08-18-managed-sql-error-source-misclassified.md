@@ -49,3 +49,10 @@ connection-held只认日志头的lifecycle logger，避免traceback栈中的同�
 ## 2026-08-19 来源文件优先级过度修正
 
 本轮唯一 server-closed SQL 明确带 `role=unknown process=- origin=unknown`，是 stdin 诊断进程，但因共享 logger 落入 `scheduler.log`，旧规则又把它升级为 application error。回归现规定：显式 shell 进程 `-/-c/python/python3` 且 role/origin 全未知时优先归 ad-hoc；只有缺 process 元数据且来自 app/backend/scheduler/celery 的记录才由来源文件补全为托管。测试先红后绿，分析器 20 tests 通过；重跑窗口由 application error 1 / ad-hoc 0 修正为 application 0 / ad-hoc 1。状态继续 OBSERVING，因为共享文件仍无法替代生产 role/process/origin。
+
+## 2026-09-05 后续窗口
+
+新日志块分析器对 2026-09-04 06:00–2026-09-05 06:00 的 app/backend/scheduler/Celery、
+publication 专用 SQL 与 PgBouncer 三源对账均为 0 个 SQL error/traceback episode，六类 PgBouncer
+错误也为 0。完整 unit 1607 项通过。该窗口没有自然错误可验证新分类，因此保持 `OBSERVING`；下一条错误
+仍需按发生时间、来源、进程、request/task 与 PgBouncer episode 关联，禁止将镜像日志重复相加。

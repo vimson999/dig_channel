@@ -375,3 +375,14 @@ EXPLAIN 对新等价条件 execution 0.201ms、planning 0.289ms、3 行、48 sha
 重启到 PID `82858` 后，真实 request `54fde6f1`/`7571d127` 为 459.39/370.30ms，各仅一条任务
 SELECT 318.51/119.96ms；真实终态页面 26 秒仅请求一次，未再产生长 hold。该结果只证明应用放大器已
 `RUNTIME_REPLACED / OBSERVING`；底层网络仍 `OPEN / REPEATED`，完整 24 小时与后续窗口验收条件不变。
+
+### 2026-09-05 无 timeout 但网络尾延迟继续放大
+
+固定窗六类 PgBouncer 错误、应用 SQL error 与 traceback 均为 0，较上一窗一次
+`query_wait_timeout` 改善；但 103 条应用慢 SQL 累计 181.964 秒、P95/max 3.720/9.386 秒，分别较前窗
+显著恶化。PgBouncer wait/query P95 也从 56.41/112.74ms 升至 137.56/239.98ms。慢点同时出现在
+点查、通知、后台修复与 chart，而对应 executor 仅 0.02–3.14ms，仍不能用索引解释共同尾部。
+
+现场 `SHOW POOLS` 为 transaction mode、`cl_waiting=0`、`sv_login=0`、`maxwait=0`，6 条 server
+均为 used；这是事后恢复快照，不代表 18–20 时峰值。状态保持 `OPEN / REPEATED / OBSERVING`。
+下一次尖峰必须同期保存 pool/server socket、路由与远端 activity；一个无错误窗口不足以关闭。
