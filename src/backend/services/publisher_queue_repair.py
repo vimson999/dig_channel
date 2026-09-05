@@ -441,6 +441,7 @@ def maybe_requeue_stale_publisher_child(
     queue: str = "render",
     log: Optional[logging.Logger] = None,
     upload_projection: Optional[PublicationTaskBilibiliUpload] = None,
+    repair_outcome: Optional[Dict[str, str]] = None,
 ) -> Tuple[PublicationTask, bool]:
     """Requeue a stale publisher child if DB says queued but Celery cannot see it.
 
@@ -484,14 +485,6 @@ def maybe_requeue_stale_publisher_child(
     )
     requeue_limit = _int_env("PUBLISHER_CHILD_ORPHAN_REQUEUE_LIMIT", DEFAULT_ORPHAN_REQUEUE_LIMIT, 1)
     requeue_count = int(repair_state.get("count") or 0)
-    if requeue_count >= requeue_limit:
-        active_logger.warning(
-            "Publisher child queue repair skipped after limit: child=%s count=%s limit=%s",
-            snapshot.id,
-            requeue_count,
-            requeue_limit,
-        )
-        return snapshot, False
 
     requeue_target, target_queue = _publisher_child_repair_target(
         snapshot,
@@ -517,6 +510,45 @@ def maybe_requeue_stale_publisher_child(
     else:
         worker_visible = False
         queue_visible = False
+
+    if requeue_count >= requeue_limit:
+        # A missing Celery message at the repair limit is a terminal recovery
+        # condition.  Leaving the child pending makes its parent wait forever
+        # and turns every watchdog tick into the same warning.  Reload the
+        # narrow task state after broker inspection so a concurrent worker or
+        # cancellation wins over this close operation.
+        current = _load_repair_task(snapshot.id, *PUBLISHER_REPAIR_SCAN_COLUMNS)
+        if (
+            not current
+            or current.status != "pending"
+            or current.celery_task_id != snapshot.celery_task_id
+            or current.current_step != snapshot.current_step
+        ):
+            return snapshot, False
+        closed = _mark_business_task_queue_repair_limit_failed(
+            current,
+            queue=target_queue,
+            feature="publisher",
+            requeue_count=requeue_count,
+            requeue_limit=requeue_limit,
+        )
+        updated = _load_repair_task(snapshot.id, *PUBLISHER_REPAIR_SCAN_COLUMNS)
+        updated_snapshot = (
+            _detached_repair_task_snapshot(updated)
+            if updated is not None
+            else snapshot
+        )
+        if not closed:
+            return updated_snapshot, False
+        if repair_outcome is not None:
+            repair_outcome["action"] = "closed"
+        active_logger.warning(
+            "Closed orphan publisher child after queue repair limit: child=%s count=%s limit=%s",
+            snapshot.id,
+            requeue_count,
+            requeue_limit,
+        )
+        return updated_snapshot, False
 
     reason = (
         "pending_message_not_active_but_queue_visible"
@@ -692,6 +724,7 @@ def repair_stale_publisher_pending_tasks_once(
 
     items = []
     requeued = 0
+    closed = 0
     for row in rows:
         previous_celery_id = row.celery_task_id
         previous_step = row.current_step
@@ -707,10 +740,12 @@ def repair_stale_publisher_pending_tasks_once(
         if not task:
             continue
         try:
+            repair_outcome = {}
             updated, did_requeue = maybe_requeue_stale_publisher_child(
                 task,
                 log=active_logger,
                 upload_projection=upload_projection,
+                repair_outcome=repair_outcome,
             )
         except Exception as exc:
             db.session.rollback()
@@ -719,6 +754,22 @@ def repair_stale_publisher_pending_tasks_once(
                 "task_id": getattr(row, "id", None),
                 "requeued": False,
                 "error": str(exc),
+            })
+            continue
+        if repair_outcome.get("action") == "closed":
+            closed += 1
+            _target, target_queue = _publisher_child_repair_target(
+                updated,
+                default_queue="render",
+                upload_projection=upload_projection,
+            )
+            items.append({
+                "task_id": updated.id,
+                "queue": target_queue,
+                "previous_celery_id": previous_celery_id,
+                "previous_step": previous_step,
+                "action": "closed",
+                "requeued": False,
             })
             continue
         if not did_requeue:
@@ -742,6 +793,7 @@ def repair_stale_publisher_pending_tasks_once(
         "enabled": True,
         "checked": len(rows),
         "requeued": requeued,
+        "closed": closed,
         "items": items,
     }
 
@@ -1224,13 +1276,20 @@ def maybe_requeue_stale_publication_task(
             or current.celery_task_id != snapshot.celery_task_id
         ):
             return snapshot, False
-        _mark_business_task_queue_repair_limit_failed(
+        closed = _mark_business_task_queue_repair_limit_failed(
             current,
             queue=queue,
             feature=feature,
             requeue_count=requeue_count,
             requeue_limit=requeue_limit,
         )
+        updated = _load_repair_task(snapshot.id, *PUBLISHER_REPAIR_SCAN_COLUMNS)
+        if not closed or updated is None:
+            return (
+                _detached_repair_task_snapshot(updated)
+                if updated is not None
+                else snapshot
+            ), False
         active_logger.warning(
             "Closed orphan business task after queue repair limit: task=%s feature=%s count=%s limit=%s",
             snapshot.id,
@@ -1238,7 +1297,7 @@ def maybe_requeue_stale_publication_task(
             requeue_count,
             requeue_limit,
         )
-        return _detached_repair_task_snapshot(current), False
+        return _detached_repair_task_snapshot(updated), False
 
     celery_callable = _repair_target_for_feature(feature)
     if celery_callable is None:
@@ -1844,7 +1903,7 @@ def _mark_business_task_queue_repair_limit_failed(
     feature: str,
     requeue_count: int,
     requeue_limit: int,
-) -> None:
+) -> bool:
     now = datetime.utcnow()
     previous_result = dict(task.result or {})
     repair_state = dict(previous_result.get(REPAIR_RESULT_KEY) or {})
@@ -1864,14 +1923,28 @@ def _mark_business_task_queue_repair_limit_failed(
     previous_result["error_type"] = "queue_repair_limit_reached"
     previous_result["completed_at"] = now.isoformat() + "Z"
 
-    task.status = "failed"
-    task.current_step = "failed"
-    task.progress = task.progress or 0
-    task.error_message = "任务入队修复已达到上限，Celery 中也找不到对应消息，已自动标记失败。"
-    task.completed_at = now
-    task.result = previous_result
-    flag_modified(task, "result")
+    compare_and_swap = PublicationTask.query.filter(
+        PublicationTask.id == task.id,
+        PublicationTask.feature == feature,
+        PublicationTask.status == task.status,
+        PublicationTask.celery_task_id == task.celery_task_id,
+        PublicationTask.current_step == task.current_step,
+        PublicationTask.updated_at == task.updated_at,
+    )
+    updated = compare_and_swap.update({
+        PublicationTask.status: "failed",
+        PublicationTask.current_step: "failed",
+        PublicationTask.progress: task.progress or 0,
+        PublicationTask.error_message: "任务入队修复已达到上限，Celery 中也找不到对应消息，已自动标记失败。",
+        PublicationTask.completed_at: now,
+        PublicationTask.result: previous_result,
+        PublicationTask.updated_at: now,
+    }, synchronize_session=False)
+    if updated != 1:
+        db.session.rollback()
+        return False
     db.session.commit()
+    return True
 
 
 def _publisher_child_parent_id(child: PublicationTask) -> Optional[str]:

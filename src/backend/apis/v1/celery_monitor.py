@@ -1189,7 +1189,8 @@ def _watchdog_repair_stale_business_tasks(config):
             + (business_processing_repair_result.get("demoted") or 0)
         )
         repair_result["closed"] = (
-            (processing_repair_result.get("closed") or 0)
+            (publisher_pending_repair_result.get("closed") or 0)
+            + (processing_repair_result.get("closed") or 0)
             + (business_processing_repair_result.get("closed") or 0)
         )
         repair_result["child_cleanup"] = cleanup_result
@@ -1220,7 +1221,7 @@ def run_watchdog_once():
                 f"已自动重投 {repair_result.get('requeued') or 0} 个业务孤儿任务，"
                 f"降回排队 {demoted_count} 个 processing 孤儿任务，"
                 f"收口 {cleanup_count} 个父任务已终止的子任务，"
-                f"关闭 {closed_count} 个消失的 processing 任务。"
+                f"关闭 {closed_count} 个无法恢复的孤儿任务。"
             ),
             {"repair": repair_result},
         )

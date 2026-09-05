@@ -416,6 +416,139 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(task.celery_task_id, "new-celery-id")
         self.assertIsNone(task.error_message)
 
+    def test_closes_pending_publisher_child_when_repair_limit_is_reached(self):
+        _parent, child = self._parent_with_publisher_child(parent_status="processing")
+        child_id = child.id
+        child.result = {
+            "video_path": None,
+            "queue_repair": {"count": 3},
+        }
+        child.updated_at = datetime.utcnow() - timedelta(minutes=20)
+        db.session.commit()
+
+        with patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_workers",
+            return_value=(False, True),
+        ), patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_queue",
+            return_value=(False, True),
+        ):
+            updated, requeued = publisher_queue_repair.maybe_requeue_stale_publisher_child(child)
+
+        self.assertFalse(requeued)
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(updated.current_step, "failed")
+        self.assertIn("修复已达到上限", updated.error_message)
+        self.assertEqual(
+            updated.result["queue_repair"]["reason"],
+            "queue_repair_limit_reached",
+        )
+        self.assertEqual(updated.result["error_type"], "queue_repair_limit_reached")
+
+        stored = db.session.get(PublicationTask, child_id)
+        self.assertEqual(stored.status, "failed")
+        self.assertEqual(stored.current_step, "failed")
+
+    def test_pending_repair_reports_publisher_child_closure_at_limit(self):
+        _parent, child = self._parent_with_publisher_child(parent_status="processing")
+        child.result = {
+            "video_path": None,
+            "queue_repair": {"count": 3},
+        }
+        child.updated_at = datetime.utcnow() - timedelta(minutes=20)
+        db.session.commit()
+
+        with patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_workers",
+            return_value=(False, True),
+        ), patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_queue",
+            return_value=(False, True),
+        ):
+            result = publisher_queue_repair.repair_stale_publisher_pending_tasks_once()
+
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["requeued"], 0)
+        self.assertEqual(result["closed"], 1)
+        self.assertEqual(result["items"][0]["action"], "closed")
+        self.assertFalse(result["items"][0]["requeued"])
+
+    def test_publisher_limit_closure_uses_compare_and_swap_guards(self):
+        _parent, child = self._parent_with_publisher_child(parent_status="processing")
+        child.result = {
+            "video_path": None,
+            "queue_repair": {"count": 3},
+        }
+        child.updated_at = datetime.utcnow() - timedelta(minutes=20)
+        db.session.commit()
+        statements = []
+
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            normalized = " ".join(statement.lower().split())
+            if normalized.startswith("update publication_tasks"):
+                statements.append(normalized)
+
+        event.listen(db.engine, "before_cursor_execute", capture)
+        try:
+            with patch.object(
+                publisher_queue_repair,
+                "_message_visible_in_workers",
+                return_value=(False, True),
+            ), patch.object(
+                publisher_queue_repair,
+                "_message_visible_in_queue",
+                return_value=(False, True),
+            ):
+                updated, requeued = (
+                    publisher_queue_repair.maybe_requeue_stale_publisher_child(child)
+                )
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture)
+
+        self.assertFalse(requeued)
+        self.assertEqual(updated.status, "failed")
+        closure_updates = [
+            statement for statement in statements
+            if "status" in statement.partition(" where ")[0]
+        ]
+        self.assertTrue(closure_updates, statements)
+        where_clause = closure_updates[-1].partition(" where ")[2]
+        self.assertIn("publication_tasks.status", where_clause)
+        self.assertIn("publication_tasks.celery_task_id", where_clause)
+        self.assertIn("publication_tasks.current_step", where_clause)
+        self.assertIn("publication_tasks.updated_at", where_clause)
+
+    def test_pending_repair_does_not_count_an_unrelated_failure_as_closure(self):
+        _parent, child = self._parent_with_publisher_child(parent_status="processing")
+        child.updated_at = datetime.utcnow() - timedelta(minutes=20)
+        db.session.commit()
+
+        unrelated_failure = SimpleNamespace(
+            id=child.id,
+            feature="publisher",
+            status="failed",
+            current_step="failed",
+            celery_task_id=child.celery_task_id,
+            params={},
+            result={},
+            parent_task_id=child.parent_task_id,
+            source_task_id=child.source_task_id,
+        )
+        with patch.object(
+            publisher_queue_repair,
+            "maybe_requeue_stale_publisher_child",
+            return_value=(unrelated_failure, False),
+        ):
+            result = publisher_queue_repair.repair_stale_publisher_pending_tasks_once()
+
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["closed"], 0)
+        self.assertEqual(result["items"], [])
+
     def test_publisher_pending_repair_releases_transaction_before_external_checks(self):
         task = self._pending_publisher_task(step="deferred_capacity")
         dummy = DummyCeleryTask()
