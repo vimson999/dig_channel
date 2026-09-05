@@ -117,6 +117,7 @@ youtube-analytics/
 
 - [项目上下文地图](PROJECT_CONTEXT_MAP.md)
 - [生产级演进路线图](PRODUCTION_EVOLUTION_ROADMAP.md)
+- [共享 Redis 逻辑库分配契约](operations/REDIS_DB_ALLOCATION.md)
 - [知识星球统一投递历史接口与多租户调用方凭据](api/ZSXQ_BROWSER_IMPORT.md)
 - [今日研报 Top10 编排 MVP 设计](planning/report_top10_workflow_plan_20260624.md)
 - [研报基础文案物料独立队列](planning/report_script_material_workflow_queue_20260625.md)
