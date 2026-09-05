@@ -64,12 +64,23 @@ class PdfMergeWorkflowWorkbench {
         this.polling.stop();
     }
 
+    apiRoot() {
+        const configured = window.API_BASE_URL || window.CONFIG?.API_BASE_URL || '';
+        if (configured) {
+            return configured.replace(/\/api\/v1\/?$/, '').replace(/\/$/, '');
+        }
+        if (['localhost', '127.0.0.1'].includes(window.location.hostname)) {
+            return `${window.location.protocol}//${window.location.hostname}:5001`;
+        }
+        return '';
+    }
+
     async request(path, options = {}) {
         const token = window.localStorage?.getItem('access_token') || '';
         const headers = new Headers(options.headers || {});
         headers.set('Accept', 'application/json');
         if (token) headers.set('Authorization', `Bearer ${token}`);
-        const response = await fetch(path, {
+        const response = await fetch(`${this.apiRoot()}${path}`, {
             credentials: 'include',
             ...options,
             headers,
@@ -359,7 +370,7 @@ class PdfMergeWorkflowWorkbench {
     }
 
     downloadJob(jobId) {
-        window.location.assign(`/api/pdf-merge-workflows/jobs/${encodeURIComponent(jobId)}/download`);
+        window.location.assign(`${this.apiRoot()}/api/pdf-merge-workflows/jobs/${encodeURIComponent(jobId)}/download`);
     }
 
     jobSummary(job) {
