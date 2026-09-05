@@ -699,7 +699,13 @@ def repair_stale_publisher_pending_tasks_once(
     """Scan and requeue stale pending publisher tasks when their message vanished."""
     active_logger = log or logger
     if not _truthy_env("PUBLISHER_CHILD_QUEUE_REPAIR_ENABLED", True):
-        return {"enabled": False, "checked": 0, "requeued": 0, "items": []}
+        return {
+            "enabled": False,
+            "checked": 0,
+            "requeued": 0,
+            "closed": 0,
+            "items": [],
+        }
 
     scan_limit = limit or _int_env("PUBLISHER_PENDING_QUEUE_REPAIR_SCAN_LIMIT", 50, 1)
     grace_seconds = _int_env(

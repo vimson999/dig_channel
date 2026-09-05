@@ -54,6 +54,21 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         PublicationTask.__table__.drop(bind=db.engine)
         self.ctx.pop()
 
+    def test_disabled_pending_repair_keeps_the_full_result_shape(self):
+        with patch.dict(
+            os.environ,
+            {"PUBLISHER_CHILD_QUEUE_REPAIR_ENABLED": "0"},
+        ):
+            result = publisher_queue_repair.repair_stale_publisher_pending_tasks_once()
+
+        self.assertEqual(result, {
+            "enabled": False,
+            "checked": 0,
+            "requeued": 0,
+            "closed": 0,
+            "items": [],
+        })
+
     def _task(self, *, feature="content_audio_clean", step="init", minutes_old=10):
         now = datetime.utcnow()
         task = PublicationTask(
