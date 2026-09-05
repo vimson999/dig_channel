@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>知识星球清单分析 - Shioa</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+    <link rel="stylesheet" href="css/zsxq-lab.css?v=20260902-shared-utility">
+    <link rel="stylesheet" href="css/zsxq-analysis.css?v=20260902-structured-history">
+</head>
+<body class="zsxq-analysis-page">
+    <main class="analysis-page">
+        <section class="analysis-hero" aria-labelledby="analysis-page-title">
+            <div>
+                <span class="analysis-kicker"><i class="fa-solid fa-chart-pie" aria-hidden="true"></i>知识星球 · 清单分析</span>
+                <h2 id="analysis-page-title">把一次导出，变成一份可追溯的分析</h2>
+                <p id="analysis-page-description">上传一次 JSON，就得到结构化的热度、主题、关键词和时间分布。每次分析单独入库，历史不会互相覆盖。</p>
+            </div>
+            <div class="analysis-contract-note">
+                <span><i class="fa-solid fa-shield-halved" aria-hidden="true"></i> 用户隔离</span>
+                <span><i class="fa-solid fa-database" aria-hidden="true"></i> 结构化入库</span>
+                <span><i class="fa-solid fa-file-circle-check" aria-hidden="true"></i> 原文件可追溯</span>
+            </div>
+        </section>
+
+        <nav class="analysis-tabs" aria-label="分析类型">
+            <button type="button" class="is-active" data-analysis-kind="pdf" aria-selected="true">
+                <i class="fa-regular fa-file-pdf" aria-hidden="true"></i>
+                <span><strong>PDF 资料</strong><small>热度 · 主题 · 研究结构</small></span>
+            </button>
+            <button type="button" data-analysis-kind="audio" aria-selected="false">
+                <i class="fa-solid fa-headphones" aria-hidden="true"></i>
+                <span><strong>音频资料</strong><small>热度 · 时长 · 处理优先级</small></span>
+            </button>
+        </nav>
+
+        <section class="analysis-upload-card" aria-labelledby="upload-title">
+            <div class="section-heading">
+                <div>
+                    <span class="eyebrow" id="active-kind-label">PDF 资料</span>
+                    <h3 id="upload-title">上传当前 Tab 的 JSON</h3>
+                    <p id="upload-hint">支持 zsxq-list-export/v1。当前只分析清单元数据，不读取 PDF 正文。</p>
+                </div>
+                <span class="limit-note"><i class="fa-solid fa-weight-hanging" aria-hidden="true"></i> 单次 ≤ 5 MiB / 5,000 条</span>
+            </div>
+            <form id="analysis-upload-form" class="upload-form">
+                <label class="file-dropzone" for="analysis-file-input">
+                    <i class="fa-solid fa-cloud-arrow-up" aria-hidden="true"></i>
+                    <strong id="file-selection-title">选择 JSON 文件</strong>
+                    <span id="file-selection-meta">或将文件拖到这里；文件类型会再次由服务端校验</span>
+                    <input id="analysis-file-input" type="file" accept=".json,application/json" required>
+                </label>
+                <div class="upload-actions">
+                    <div class="upload-safety-copy"><i class="fa-solid fa-circle-info" aria-hidden="true"></i><span>上传后会生成新的独立批次，已有历史不会被覆盖。</span></div>
+                    <button id="analysis-submit-button" class="primary-button" type="submit"><i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i>开始分析并入库</button>
+                </div>
+            </form>
+            <div id="analysis-status" class="analysis-status" role="status" aria-live="polite"></div>
+        </section>
+
+        <section id="analysis-current-section" class="analysis-current-section" aria-labelledby="current-analysis-title">
+            <div class="section-heading section-heading--tight">
+                <div>
+                    <span class="eyebrow">当前批次</span>
+                    <h3 id="current-analysis-title">还没有打开分析结果</h3>
+                    <p id="current-analysis-meta">上传文件或从历史中选择一个批次。</p>
+                </div>
+                <button id="download-source-button" class="secondary-button" type="button" disabled><i class="fa-solid fa-download" aria-hidden="true"></i>下载原始 JSON</button>
+            </div>
+
+            <div id="analysis-metric-grid" class="analysis-metric-grid" aria-label="分析汇总指标"></div>
+
+            <div class="analysis-visual-grid">
+                <section class="analysis-panel keyword-panel" aria-labelledby="keyword-title">
+                    <div class="panel-title-row"><div><span class="eyebrow">文件名词汇</span><h4 id="keyword-title">关键词云</h4></div><span class="panel-note">确定性提取</span></div>
+                    <div id="analysis-keyword-cloud" class="keyword-cloud" aria-live="polite"></div>
+                    <div id="analysis-keyword-list" class="keyword-list"></div>
+                </section>
+                <section class="analysis-panel trend-panel" aria-labelledby="trend-title">
+                    <div class="panel-title-row"><div><span class="eyebrow">时间结构</span><h4 id="trend-title">上传趋势</h4></div><span id="trend-unit-note" class="panel-note">按日</span></div>
+                    <div class="chart-container"><canvas id="analysis-trend-chart" role="img" aria-label="当前分析的上传趋势"></canvas></div>
+                </section>
+            </div>
+
+            <div class="analysis-lower-grid">
+                <section class="analysis-panel" aria-labelledby="topic-title">
+                    <div class="panel-title-row"><div><span class="eyebrow">聚合视角</span><h4 id="topic-title">主题排行</h4></div><span class="panel-note">topicId</span></div>
+                    <div id="analysis-topic-table" class="table-wrap"></div>
+                </section>
+                <section class="analysis-panel" aria-labelledby="top-item-title">
+                    <div class="panel-title-row"><div><span class="eyebrow">代表样本</span><h4 id="top-item-title">热度排行</h4></div><button id="load-items-button" class="table-action-button" type="button">查看前 50 条文件</button></div>
+                    <div id="analysis-top-item-table" class="table-wrap"></div>
+                </section>
+            </div>
+
+            <div class="analysis-audit">
+                <div><span>批次 ID</span><code id="analysis-run-id">-</code></div>
+                <div><span>输入 SHA-256</span><code id="analysis-run-hash">-</code></div>
+                <div><span>分析版本</span><code id="analysis-run-version">-</code></div>
+            </div>
+        </section>
+
+        <section class="analysis-history-section" aria-labelledby="history-title">
+            <div class="section-heading section-heading--tight">
+                <div>
+                    <span class="eyebrow">可追溯历史</span>
+                    <h3 id="history-title">当前 Tab 的分析批次</h3>
+                    <p>列表只读取批次摘要；打开某个批次后，才读取对应的结构化明细。</p>
+                </div>
+                <span id="history-count" class="history-count">0 个批次</span>
+            </div>
+            <div id="analysis-history-list" class="analysis-history-list" aria-live="polite"></div>
+            <div class="history-pagination">
+                <button id="history-prev-button" class="pagination-button" type="button" disabled><i class="fa-solid fa-chevron-left" aria-hidden="true"></i>上一页</button>
+                <span id="history-pagination-label">第 1 页</span>
+                <button id="history-next-button" class="pagination-button" type="button" disabled>下一页<i class="fa-solid fa-chevron-right" aria-hidden="true"></i></button>
+            </div>
+        </section>
+    </main>
+
+    <script src="js/env.js"></script>
+    <script src="js/config.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script src="js/shared-navigation.js?v=20260902-analysis"></script>
+    <script src="js/zsxq-analysis.js?v=20260902-structured-history"></script>
+</body>
+</html>

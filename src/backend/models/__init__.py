@@ -45,6 +45,12 @@ from .zsxq_sync import (
     ZsxqTopicFavorite,
 )
 from .zsxq_workflow import ZsxqWorkflowRun
+from .zsxq_analysis import (
+    ZsxqAnalysisItem,
+    ZsxqAnalysisKeyword,
+    ZsxqAnalysisRun,
+    ZsxqAnalysisTopic,
+)
 from .report_video import (
     ReportVideoTask,
     ReportVideoReport,
@@ -97,6 +103,10 @@ __all__ = [
     'ZsxqBrowserSubmission',
     'ZsxqSyncCursor',
     'ZsxqWorkflowRun',
+    'ZsxqAnalysisRun',
+    'ZsxqAnalysisItem',
+    'ZsxqAnalysisTopic',
+    'ZsxqAnalysisKeyword',
     'ReportVideoTask',
     'ReportVideoReport',
     'ReportVideoAnalysis',

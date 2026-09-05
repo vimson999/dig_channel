@@ -161,11 +161,14 @@ node_modules/
 runtime/browser_profiles/
 
 # Project Data
+/artifacts/
+/outputs/
 data/generated_thumbnails/
 data/cache/
 data/processed/
 data/uploads/
 data/zsxq/
+data/zsxq_analysis/
 data/tasks/
 # Legacy browser profile location; browser profiles are runtime state.
 data/browser_profiles/

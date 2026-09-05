@@ -97,6 +97,10 @@ def register_blueprints(app):
     from .zsxq_insights import bp as zsxq_insights_bp
     app.register_blueprint(zsxq_insights_bp)
 
+    # 注册知识星球清单分析与历史 API
+    from .zsxq_analysis import bp as zsxq_analysis_bp
+    app.register_blueprint(zsxq_analysis_bp)
+
     # 注册外链文档富化 API
     from .external_documents import bp as external_documents_bp
     app.register_blueprint(external_documents_bp)

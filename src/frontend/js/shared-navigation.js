@@ -138,6 +138,8 @@ class SharedNavigation {
             return 'zsxq-lab';
         } else if (filename === 'zsxq-insights.html') {
             return 'zsxq-insights';
+        } else if (filename === 'zsxq-analysis.html') {
+            return 'zsxq-analysis';
         } else if (filename === 'bilibili-intelligence.html') {
             return 'bilibili-intelligence';
         } else if (filename === 'zsxq-auto-publish.html') {
@@ -237,6 +239,7 @@ class SharedNavigation {
             'trending': '爆款视频搜索',
             'zsxq-lab': '知识星球内容分析',
             'zsxq-insights': '生财情报台',
+            'zsxq-analysis': '知识星球清单分析',
             'bilibili-intelligence': 'B站内容情报台',
             'zsxq-auto-publish': '知识星球任务策略',
             'document-converter': '文档转换工具',
@@ -463,6 +466,12 @@ class SharedNavigation {
                         name: '生财情报台',
                         icon: 'fas fa-chart-simple',
                         href: 'zsxq-insights.html'
+                    },
+                    {
+                        id: 'zsxq-analysis',
+                        name: '清单分析与历史',
+                        icon: 'fas fa-chart-pie',
+                        href: 'zsxq-analysis.html'
                     },
                     {
                         id: 'bilibili-intelligence',
