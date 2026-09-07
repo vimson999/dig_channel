@@ -7,6 +7,7 @@ from services.zsxq_insights_cache import (
     OVERVIEW_STALE_CACHE_TTL_SECONDS,
     OverviewCacheEntry,
     get_cached_overview,
+    request_overview_refresh,
     store_overview_payload,
 )
 from services.zsxq_insights_service import (
@@ -21,13 +22,20 @@ from utils.api_utils import handle_api_error
 bp = Blueprint("zsxq_insights", __name__, url_prefix="/api/v1/zsxq-insights")
 
 
-def _cached_response(entry: OverviewCacheEntry):
+def _cached_response(entry: OverviewCacheEntry, refresh_state: str | None = None):
     response = current_app.response_class(entry.raw, status=200, mimetype="application/json")
     response.headers["X-Insights-Cache"] = "STALE" if entry.stale else "HIT"
     response.headers["X-Insights-Cache-Tier"] = entry.tier
     response.headers["Cache-Control"] = "private, max-age=30"
     if entry.stale:
-        response.headers["Warning"] = '110 - "Response is stale; refreshing in background"'
+        refresh_state = refresh_state or "client-required"
+        response.headers["X-Insights-Refresh"] = refresh_state
+        if refresh_state in {"scheduled", "in-flight"}:
+            response.headers["Warning"] = (
+                '110 - "Response is stale; refreshing in background"'
+            )
+        else:
+            response.headers["Warning"] = '110 - "Response is stale"'
     return response
 
 
@@ -55,7 +63,10 @@ def overview():
         app = current_app._get_current_object()
         entry = None if force_refresh else get_cached_overview(app, params)
         if entry is not None:
-            return _cached_response(entry)
+            refresh_state = None
+            if entry.stale:
+                refresh_state = request_overview_refresh(app, params, reason="stale")
+            return _cached_response(entry, refresh_state)
 
         result = build_insights(**params)
         serialized = store_overview_payload(app, params, {"success": True, "data": result})
