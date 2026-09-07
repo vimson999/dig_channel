@@ -876,81 +876,250 @@ git commit -m "feat: prewarm the default insights page"
 ### Task 6: Bounded browser polling with force-refresh fallback
 
 **Files:**
+- Create: `src/frontend/js/zsxq-insights-refresh.js`
+- Create: `tests/frontend/zsxq-insights-refresh.test.cjs`
 - Modify: `src/frontend/js/zsxq-insights.js:246-360`
+- Modify: `src/frontend/zsxq-insights.html:210-215`
 - Modify: `tests/unit/test_zsxq_insights_frontend_contract.py:1-25`
 
 **Interfaces:**
 - Consumes: `X-Insights-Cache` and `X-Insights-Refresh` from Task 4.
-- Produces: `refreshInsightsInBackground(url, context, refreshState)`; server-owned refresh uses bounded ordinary GET polling, while `client-required` retains one `_refresh=1` request.
+- Produces: `window.ZsxqInsightsRefresh.refresh(options)` and the page adapter `refreshInsightsInBackground(url, context, refreshState)`; server-owned refresh uses bounded ordinary GET polling, while `client-required` retains one `_refresh=1` request.
 
-- [ ] **Step 1: Tighten the frontend source-contract test and verify RED**
+- [ ] **Step 1: Create a failing Node behavior test and Python runner**
 
-Replace the broad stale assertion with exact contracts:
+Create `tests/frontend/zsxq-insights-refresh.test.cjs`. Require the not-yet-created helper and exercise real asynchronous behavior with injected request and wait functions:
+
+```javascript
+const assert = require('node:assert/strict');
+const path = require('node:path');
+
+const helper = require(path.resolve(
+    __dirname,
+    '../../src/frontend/js/zsxq-insights-refresh.js',
+));
+
+async function main() {
+    const waits = [];
+    const urls = [];
+    const freshPayloads = [];
+    const responses = [
+        {ok: true, cacheState: 'STALE', payload: {success: true, data: {version: 1}}},
+        {ok: true, cacheState: 'STALE', payload: {success: true, data: {version: 1}}},
+        {ok: true, cacheState: 'HIT', payload: {success: true, data: {version: 2}}},
+    ];
+    const serverResult = await helper.refresh({
+        url: '/api/v1/zsxq-insights/overview?a=1',
+        refreshState: 'scheduled',
+        wait: async (delayMs) => { waits.push(delayMs); },
+        request: async (url) => { urls.push(url); return responses.shift(); },
+        isCurrent: () => true,
+        onFresh: (payload) => { freshPayloads.push(payload); },
+    });
+    assert.equal(serverResult, 'fresh');
+    assert.deepEqual(waits, [500, 1000, 2000]);
+    assert.deepEqual(urls, [
+        '/api/v1/zsxq-insights/overview?a=1',
+        '/api/v1/zsxq-insights/overview?a=1',
+        '/api/v1/zsxq-insights/overview?a=1',
+    ]);
+    assert.equal(freshPayloads.length, 1);
+    assert.equal(freshPayloads[0].data.version, 2);
+
+    const fallbackUrls = [];
+    await helper.refresh({
+        url: '/api/v1/zsxq-insights/overview?a=1',
+        refreshState: 'client-required',
+        request: async (url) => {
+            fallbackUrls.push(url);
+            return {ok: true, cacheState: 'MISS', payload: {success: true, data: {version: 3}}};
+        },
+        isCurrent: () => true,
+        onFresh: () => {},
+    });
+    assert.deepEqual(fallbackUrls, ['/api/v1/zsxq-insights/overview?a=1&_refresh=1']);
+
+    let stalePersisted = false;
+    const exhausted = await helper.refresh({
+        url: '/overview',
+        refreshState: 'in-flight',
+        wait: async () => {},
+        request: async () => ({ok: true, cacheState: 'STALE', payload: {success: true}}),
+        isCurrent: () => true,
+        onFresh: () => { stalePersisted = true; },
+    });
+    assert.equal(exhausted, 'stale');
+    assert.equal(stalePersisted, false);
+
+    let supersededRequests = 0;
+    const superseded = await helper.refresh({
+        url: '/overview',
+        refreshState: 'scheduled',
+        wait: async () => {},
+        request: async () => { supersededRequests += 1; },
+        isCurrent: () => false,
+        onFresh: () => {},
+    });
+    assert.equal(superseded, 'superseded');
+    assert.equal(supersededRequests, 0);
+}
+
+main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+});
+```
+
+Extend `tests/unit/test_zsxq_insights_frontend_contract.py` with a subprocess test so both pytest and the full Python unit discovery can invoke the Node contract:
 
 ```python
-assert "const REFRESH_POLL_DELAYS_MS = [500, 1000, 2000, 4000]" in javascript
-assert "response.headers.get('X-Insights-Refresh')" in javascript
-assert "pollInsightsRefresh" in javascript
-assert "for (const delayMs of REFRESH_POLL_DELAYS_MS)" in javascript
-assert "await delay(delayMs)" in javascript
-assert "X-Insights-Cache') === 'STALE'" in javascript
-assert "refreshState === 'client-required'" in javascript
-assert "_refresh=1" in javascript
+import subprocess
+
+def test_insights_stale_refresh_behavior():
+    contract = PROJECT_ROOT / "tests/frontend/zsxq-insights-refresh.test.cjs"
+    completed = subprocess.run(
+        ["node", str(contract)], cwd=PROJECT_ROOT,
+        check=False, capture_output=True, text=True,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+```
+
+Run:
+
+```bash
+node tests/frontend/zsxq-insights-refresh.test.cjs
+```
+
+Expected: `MODULE_NOT_FOUND` because `src/frontend/js/zsxq-insights-refresh.js` does not exist.
+
+- [ ] **Step 2: Implement the isolated refresh policy**
+
+Create a UMD helper matching existing frontend utility conventions:
+
+```javascript
+(function registerZsxqInsightsRefresh(root, factory) {
+    const helper = factory();
+    if (typeof module === 'object' && module.exports) module.exports = helper;
+    if (root) root.ZsxqInsightsRefresh = helper;
+}(typeof globalThis !== 'undefined' ? globalThis : this, () => {
+    const POLL_DELAYS_MS = Object.freeze([500, 1000, 2000, 4000]);
+    const defaultWait = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs));
+
+    async function refresh(options) {
+        const url = String(options.url || '');
+        const state = String(options.refreshState || 'client-required');
+        const request = options.request;
+        const wait = options.wait || defaultWait;
+        const isCurrent = options.isCurrent || (() => true);
+        const onFresh = options.onFresh || (() => {});
+        if (typeof request !== 'function') throw new TypeError('request is required');
+
+        if (!['scheduled', 'in-flight'].includes(state)) {
+            if (!isCurrent()) return 'superseded';
+            const separator = url.includes('?') ? '&' : '?';
+            const result = await request(`${url}${separator}_refresh=1`);
+            if (!result?.ok || !result.payload?.success) return 'failed';
+            if (!isCurrent()) return 'superseded';
+            onFresh(result.payload);
+            return 'fresh';
+        }
+
+        for (const delayMs of POLL_DELAYS_MS) {
+            await wait(delayMs);
+            if (!isCurrent()) return 'superseded';
+            const result = await request(url);
+            if (!result?.ok || !result.payload?.success) return 'failed';
+            if (result.cacheState === 'STALE') continue;
+            if (!isCurrent()) return 'superseded';
+            onFresh(result.payload);
+            return 'fresh';
+        }
+        return 'stale';
+    }
+
+    return {POLL_DELAYS_MS, refresh};
+}));
+```
+
+- [ ] **Step 3: Run the Node behavior test and verify GREEN**
+
+Run:
+
+```bash
+node tests/frontend/zsxq-insights-refresh.test.cjs
+```
+
+Expected: exit 0; server-owned polling uses three ordinary URLs before the fresh response, the fallback uses exactly one `_refresh=1`, four stale responses never invoke `onFresh`, and an obsolete request issues no fetch.
+
+- [ ] **Step 4: Add a failing page-adapter integration assertion**
+
+Update the existing Python contract to require the helper script before the page script and to run the Node behavior test. The HTML ordering assertion is a static asset-loading contract; polling correctness remains covered by real Node execution:
+
+```python
+html = (PROJECT_ROOT / "src/frontend/zsxq-insights.html").read_text(encoding="utf-8")
+helper_tag = 'js/zsxq-insights-refresh.js?v=20260907-server-refresh'
+page_tag = 'js/zsxq-insights.js?v=20260907-server-refresh'
+assert html.index(helper_tag) < html.index(page_tag)
 ```
 
 Run:
 
 ```bash
 PYTHONPATH=src/backend venv/bin/python -m pytest -q \
-  tests/unit/test_zsxq_insights_frontend_contract.py::test_insights_frontend_uses_bounded_server_pages_and_stale_while_refresh_cache
+  tests/unit/test_zsxq_insights_frontend_contract.py
 ```
 
-Expected: failure because polling constants and functions are absent.
+Expected: failure because the HTML does not load the helper and the page adapter still owns the old force-refresh-only implementation.
 
-- [ ] **Step 2: Add a bounded delay helper and route by refresh owner**
+- [ ] **Step 5: Wire the helper into the real page**
 
-Define:
-
-```javascript
-const REFRESH_POLL_DELAYS_MS = [500, 1000, 2000, 4000];
-const delay = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs));
-```
-
-When the initial response is stale, read `X-Insights-Refresh` and call:
+Load `js/zsxq-insights-refresh.js?v=20260907-server-refresh` immediately before the versioned main page script. When the initial response is stale, read the server owner and call:
 
 ```javascript
+const refreshState = response.headers.get('X-Insights-Refresh') || 'client-required';
 refreshInsightsInBackground(url, { append, page, requestId }, refreshState);
 ```
 
-The compatibility function uses the current `_refresh=1` request only when `refreshState` is `client-required` or missing. For `scheduled` and `in-flight`, call `pollInsightsRefresh`.
-
-- [ ] **Step 3: Implement ordinary-GET polling without extending stale age**
-
-Use this control flow:
+Replace the old function body with an adapter that turns Fetch responses into the helper's neutral result and persists only `onFresh` payloads:
 
 ```javascript
-async function pollInsightsRefresh(url, { append, page, requestId }) {
-    for (const delayMs of REFRESH_POLL_DELAYS_MS) {
-        await delay(delayMs);
-        if (requestId !== state.requestId) return;
-        const response = await fetch(url);
-        const payload = await readJsonResponse(response);
-        if (!response.ok || !payload.success) return;
-        if (response.headers.get('X-Insights-Cache') === 'STALE') continue;
-        storeCachedResponse(url, payload);
-        if (requestId === state.requestId) applyInsightsPayload(payload, { append, page });
-        return;
+async function refreshInsightsInBackground(url, { append, page, requestId }, refreshState) {
+    try {
+        await window.ZsxqInsightsRefresh.refresh({
+            url,
+            refreshState,
+            request: async (requestUrl) => {
+                const response = await fetch(requestUrl);
+                const payload = await readJsonResponse(response);
+                return {
+                    ok: response.ok,
+                    cacheState: response.headers.get('X-Insights-Cache'),
+                    payload,
+                };
+            },
+            isCurrent: () => requestId === state.requestId,
+            onFresh: (payload) => {
+                storeCachedResponse(url, payload);
+                if (requestId === state.requestId) {
+                    applyInsightsPayload(payload, { append, page });
+                }
+            },
+        });
+    } catch (error) {
+        console.warn('[ZSXQ_INSIGHTS] 静默刷新失败', error);
     }
 }
 ```
 
-Do not call `storeCachedResponse` for stale poll results. Catch once around the polling loop and emit one warning without clearing current data.
+The helper never invokes `onFresh` for stale poll results, so those responses cannot renew `savedAt`. The adapter has one catch boundary and never clears the current page.
 
-- [ ] **Step 4: Run all Insights frontend and backend tests**
+- [ ] **Step 6: Run all Insights frontend and backend tests**
 
 Run:
 
 ```bash
+node tests/frontend/zsxq-insights-refresh.test.cjs
+
 PYTHONPATH=src/backend venv/bin/python -m pytest -q \
   tests/unit/test_zsxq_insights_frontend_contract.py
 
@@ -963,10 +1132,15 @@ PYTHONPATH=src/backend venv/bin/python -m unittest \
 
 Expected: all pass; the legacy force-refresh string remains only in the fallback branch.
 
-- [ ] **Step 5: Commit Task 6 only**
+- [ ] **Step 7: Commit Task 6 only**
 
 ```bash
-git add src/frontend/js/zsxq-insights.js tests/unit/test_zsxq_insights_frontend_contract.py
+git add \
+  src/frontend/js/zsxq-insights-refresh.js \
+  src/frontend/js/zsxq-insights.js \
+  src/frontend/zsxq-insights.html \
+  tests/frontend/zsxq-insights-refresh.test.cjs \
+  tests/unit/test_zsxq_insights_frontend_contract.py
 git commit -m "feat: poll server-owned insights refreshes"
 ```
 
@@ -979,7 +1153,9 @@ git commit -m "feat: poll server-owned insights refreshes"
 - Verify: `src/backend/services/zsxq_insights_cache.py`
 - Verify: `src/backend/apis/v1/zsxq_insights.py`
 - Verify: `src/backend/app.py`
+- Verify: `src/frontend/js/zsxq-insights-refresh.js`
 - Verify: `src/frontend/js/zsxq-insights.js`
+- Verify: `src/frontend/zsxq-insights.html`
 - Verify: all tests changed in Tasks 1-6
 
 **Interfaces:**
@@ -1001,6 +1177,8 @@ PYTHONPATH=src/backend venv/bin/python -m unittest \
 
 PYTHONPATH=src/backend venv/bin/python -m pytest -q \
   tests/unit/test_zsxq_insights_frontend_contract.py
+
+node tests/frontend/zsxq-insights-refresh.test.cjs
 ```
 
 Expected: zero failures and zero errors.
