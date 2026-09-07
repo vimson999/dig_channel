@@ -6,9 +6,13 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import os
 import threading
 import time
+import uuid
+
+from services.zsxq_insights_service import build_insights
 
 
 OVERVIEW_CACHE_VERSION = "v5"
@@ -26,6 +30,15 @@ DEFAULT_FRESH_TTL_SECONDS = 1800
 DEFAULT_STALE_TTL_SECONDS = 86400
 MAX_FRESH_TTL_SECONDS = 21600
 MAX_STALE_TTL_SECONDS = 604800
+
+logger = logging.getLogger(__name__)
+
+_RELEASE_LOCK_LUA = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+end
+return 0
+"""
 
 
 def _bounded_ttl_seconds(env_name: str, default: int, maximum: int) -> int:
@@ -57,6 +70,7 @@ class OverviewCacheEntry:
 
 _overview_local_cache = OrderedDict()
 _overview_local_cache_lock = threading.Lock()
+_refresh_slot = threading.BoundedSemaphore(1)
 
 
 def overview_cache_digest(params) -> str:
@@ -76,6 +90,22 @@ def overview_cache_key(params, *, stale: bool = False) -> str:
         f"shioa:zsxq-insights:overview:{OVERVIEW_CACHE_VERSION}:"
         f"{overview_cache_digest(params)}{suffix}"
     )
+
+
+def overview_refresh_lock_key(params) -> str:
+    return (
+        f"shioa:zsxq-insights:refresh-lock:{OVERVIEW_CACHE_VERSION}:"
+        f"{overview_cache_digest(params)}"
+    )
+
+
+def _refresh_lock_ttl_seconds() -> int:
+    raw = os.environ.get("ZSXQ_INSIGHTS_REFRESH_LOCK_TTL_SECONDS", "120")
+    try:
+        value = int(raw or 120)
+    except (TypeError, ValueError):
+        value = 120
+    return max(61, min(value, 600))
 
 
 def _redis_client_for_app(app):
@@ -165,3 +195,162 @@ def store_overview_payload(app, params, payload) -> str:
         except Exception:
             pass
     return serialized
+
+
+def _remove_db_session() -> None:
+    try:
+        from models import db
+
+        db.session.remove()
+    except Exception:
+        pass
+
+
+def _release_refresh_lock(redis_client, lock_key: str, token: str) -> None:
+    try:
+        redis_client.eval(_RELEASE_LOCK_LUA, 1, lock_key, token)
+    except Exception:
+        pass
+
+
+def _run_overview_refresh(
+    app,
+    params,
+    reason: str,
+    redis_client,
+    lock_key: str,
+    token: str,
+    digest: str,
+) -> None:
+    started_at = time.monotonic()
+    logger.info(
+        "[ZSXQ_INSIGHTS_CACHE] event=refresh_started reason=%s digest=%s pid=%s",
+        reason,
+        digest,
+        os.getpid(),
+    )
+    try:
+        with app.app_context():
+            result = build_insights(**params)
+            store_overview_payload(
+                app,
+                params,
+                {"success": True, "data": result},
+            )
+        duration_ms = (time.monotonic() - started_at) * 1000
+        logger.info(
+            "[ZSXQ_INSIGHTS_CACHE] event=refresh_completed reason=%s digest=%s "
+            "pid=%s duration_ms=%.2f",
+            reason,
+            digest,
+            os.getpid(),
+            duration_ms,
+        )
+    except Exception as error:
+        duration_ms = (time.monotonic() - started_at) * 1000
+        logger.warning(
+            "[ZSXQ_INSIGHTS_CACHE] event=refresh_failed reason=%s digest=%s "
+            "pid=%s duration_ms=%.2f error_type=%s",
+            reason,
+            digest,
+            os.getpid(),
+            duration_ms,
+            type(error).__name__,
+        )
+    finally:
+        try:
+            _remove_db_session()
+        finally:
+            try:
+                _release_refresh_lock(redis_client, lock_key, token)
+            finally:
+                _refresh_slot.release()
+
+
+def request_overview_refresh(app, params, reason: str) -> str:
+    digest = overview_cache_digest(params)
+    pid = os.getpid()
+    if not _refresh_slot.acquire(blocking=False):
+        logger.info(
+            "[ZSXQ_INSIGHTS_CACHE] event=refresh_skipped result=local-busy "
+            "reason=%s digest=%s pid=%s",
+            reason,
+            digest,
+            pid,
+        )
+        return "in-flight"
+
+    redis_client = _redis_client_for_app(app)
+    if redis_client is None:
+        _refresh_slot.release()
+        logger.info(
+            "[ZSXQ_INSIGHTS_CACHE] event=refresh_skipped result=redis-unavailable "
+            "reason=%s digest=%s pid=%s",
+            reason,
+            digest,
+            pid,
+        )
+        return "client-required"
+
+    lock_key = overview_refresh_lock_key(params)
+    token = uuid.uuid4().hex
+    try:
+        acquired = redis_client.set(
+            lock_key,
+            token,
+            nx=True,
+            ex=_refresh_lock_ttl_seconds(),
+        )
+    except Exception as error:
+        _refresh_slot.release()
+        logger.warning(
+            "[ZSXQ_INSIGHTS_CACHE] event=refresh_skipped result=redis-error "
+            "reason=%s digest=%s pid=%s error_type=%s",
+            reason,
+            digest,
+            pid,
+            type(error).__name__,
+        )
+        return "client-required"
+    if not acquired:
+        _refresh_slot.release()
+        logger.info(
+            "[ZSXQ_INSIGHTS_CACHE] event=refresh_skipped result=redis-lock-held "
+            "reason=%s digest=%s pid=%s",
+            reason,
+            digest,
+            pid,
+        )
+        return "in-flight"
+
+    thread = threading.Thread(
+        target=_run_overview_refresh,
+        args=(
+            app,
+            dict(params),
+            str(reason),
+            redis_client,
+            lock_key,
+            token,
+            digest,
+        ),
+        name=f"zsxq-insights-refresh-{digest[:12]}",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception as error:
+        try:
+            _release_refresh_lock(redis_client, lock_key, token)
+        finally:
+            _refresh_slot.release()
+        logger.warning(
+            "[ZSXQ_INSIGHTS_CACHE] event=refresh_skipped result=thread-start-error "
+            "reason=%s digest=%s pid=%s error_type=%s",
+            reason,
+            digest,
+            pid,
+            type(error).__name__,
+        )
+        return "client-required"
+    return "scheduled"
