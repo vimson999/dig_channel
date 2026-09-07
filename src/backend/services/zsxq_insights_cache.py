@@ -34,6 +34,10 @@ DEFAULT_FRESH_TTL_SECONDS = 1800
 DEFAULT_STALE_TTL_SECONDS = 86400
 MAX_FRESH_TTL_SECONDS = 21600
 MAX_STALE_TTL_SECONDS = 604800
+MAX_REFRESH_LOCK_TTL_SECONDS = 600
+DEFAULT_DB_STATEMENT_TIMEOUT_MS = 120000
+OVERVIEW_QUERY_STATEMENT_COUNT = 4
+REFRESH_LOCK_MARGIN_SECONDS = 120
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,24 @@ if redis.call("get", KEYS[1]) == ARGV[1] then
     return redis.call("del", KEYS[1])
 end
 return 0
+"""
+
+_RENEW_LOCK_LUA = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("expire", KEYS[1], tonumber(ARGV[2]))
+end
+return 0
+"""
+
+_STORE_IF_LOCK_OWNED_LUA = """
+if redis.call("get", KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+redis.call("setex", KEYS[2], tonumber(ARGV[2]), ARGV[4])
+if tonumber(ARGV[3]) > 0 then
+    redis.call("setex", KEYS[3], tonumber(ARGV[3]), ARGV[4])
+end
+return 1
 """
 
 
@@ -75,6 +97,9 @@ class OverviewCacheEntry:
 _overview_local_cache = OrderedDict()
 _overview_local_cache_lock = threading.Lock()
 _refresh_slot = threading.BoundedSemaphore(1)
+_refresh_state_lock = threading.Lock()
+_active_refresh_digest = None
+_lease_thread_factory = threading.Thread
 _warmup_guard = threading.Lock()
 _warmup_pid = None
 _warmup_thread = None
@@ -107,12 +132,30 @@ def overview_refresh_lock_key(params) -> str:
 
 
 def _refresh_lock_ttl_seconds() -> int:
-    raw = os.environ.get("ZSXQ_INSIGHTS_REFRESH_LOCK_TTL_SECONDS", "120")
+    raw = os.environ.get("ZSXQ_INSIGHTS_REFRESH_LOCK_TTL_SECONDS", "600")
     try:
-        value = int(raw or 120)
+        requested = int(raw or 600)
     except (TypeError, ValueError):
-        value = 120
-    return max(61, min(value, 600))
+        requested = 600
+
+    raw_statement_timeout = os.environ.get(
+        "DB_STATEMENT_TIMEOUT_MS",
+        str(DEFAULT_DB_STATEMENT_TIMEOUT_MS),
+    )
+    try:
+        statement_timeout_ms = int(raw_statement_timeout)
+    except (TypeError, ValueError):
+        statement_timeout_ms = DEFAULT_DB_STATEMENT_TIMEOUT_MS
+    if statement_timeout_ms <= 0:
+        operation_budget = MAX_REFRESH_LOCK_TTL_SECONDS
+    else:
+        per_statement_seconds = (statement_timeout_ms + 999) // 1000
+        operation_budget = (
+            per_statement_seconds * OVERVIEW_QUERY_STATEMENT_COUNT
+            + REFRESH_LOCK_MARGIN_SECONDS
+        )
+    minimum = max(61, min(operation_budget, MAX_REFRESH_LOCK_TTL_SECONDS))
+    return max(minimum, min(max(61, requested), MAX_REFRESH_LOCK_TTL_SECONDS))
 
 
 def _redis_client_for_app(app):
@@ -204,6 +247,35 @@ def store_overview_payload(app, params, payload) -> str:
     return serialized
 
 
+def _store_refreshed_overview_payload(
+    app,
+    params,
+    payload,
+    redis_client,
+    lock_key: str,
+    token: str,
+) -> bool:
+    """Atomically fence a background write against an expired Redis lease."""
+    serialized = app.json.dumps(payload)
+    fresh_key = overview_cache_key(params)
+    stale_key = overview_cache_key(params, stale=True)
+    stored = redis_client.eval(
+        _STORE_IF_LOCK_OWNED_LUA,
+        3,
+        lock_key,
+        fresh_key,
+        stale_key,
+        token,
+        OVERVIEW_CACHE_TTL_SECONDS,
+        OVERVIEW_STALE_CACHE_TTL_SECONDS,
+        serialized,
+    )
+    if not stored:
+        return False
+    _store_local(fresh_key, serialized, app=app)
+    return True
+
+
 def _remove_db_session() -> None:
     try:
         from models import db
@@ -220,6 +292,117 @@ def _release_refresh_lock(redis_client, lock_key: str, token: str) -> None:
         pass
 
 
+def _renew_refresh_lock(
+    redis_client,
+    lock_key: str,
+    token: str,
+    ttl_seconds: int,
+) -> bool:
+    try:
+        return bool(
+            redis_client.eval(
+                _RENEW_LOCK_LUA,
+                1,
+                lock_key,
+                token,
+                ttl_seconds,
+            )
+        )
+    except Exception:
+        return False
+
+
+class _RefreshLockLease:
+    def __init__(
+        self,
+        redis_client,
+        lock_key: str,
+        token: str,
+        ttl_seconds: int,
+        digest: str,
+    ) -> None:
+        self._redis_client = redis_client
+        self._lock_key = lock_key
+        self._token = token
+        self._ttl_seconds = ttl_seconds
+        self._digest = digest
+        self._stop = threading.Event()
+        self._lost = threading.Event()
+        self._thread = None
+
+    @property
+    def lost(self) -> bool:
+        return self._lost.is_set()
+
+    def start(self) -> bool:
+        try:
+            thread = _lease_thread_factory(
+                target=self._run,
+                name=f"zsxq-insights-lease-{self._digest[:12]}",
+                daemon=True,
+            )
+            self._thread = thread
+            thread.start()
+        except Exception:
+            self._thread = None
+            self._lost.set()
+            return False
+        return True
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is None or thread is threading.current_thread():
+            return
+        try:
+            thread.join(timeout=1.0)
+        except Exception:
+            pass
+
+    def _run(self) -> None:
+        renewal_interval = max(1, self._ttl_seconds // 3)
+        while not self._stop.wait(renewal_interval):
+            if _renew_refresh_lock(
+                self._redis_client,
+                self._lock_key,
+                self._token,
+                self._ttl_seconds,
+            ):
+                continue
+            self._lost.set()
+            logger.warning(
+                "[ZSXQ_INSIGHTS_CACHE] event=lease_renewal_failed "
+                "digest=%s pid=%s",
+                self._digest,
+                os.getpid(),
+            )
+            return
+
+
+def _claim_local_refresh(digest: str) -> tuple[bool, str | None]:
+    global _active_refresh_digest
+
+    with _refresh_state_lock:
+        if not _refresh_slot.acquire(blocking=False):
+            result = (
+                "in-flight"
+                if _active_refresh_digest == digest
+                else "client-required"
+            )
+            return False, result
+        _active_refresh_digest = digest
+        return True, None
+
+
+def _release_local_refresh(digest: str) -> None:
+    global _active_refresh_digest
+
+    with _refresh_state_lock:
+        if _active_refresh_digest == digest:
+            _active_refresh_digest = None
+        _refresh_slot.release()
+
+
 def _run_overview_refresh(
     app,
     params,
@@ -228,8 +411,10 @@ def _run_overview_refresh(
     lock_key: str,
     token: str,
     digest: str,
+    lock_ttl_seconds: int,
 ) -> None:
     started_at = time.monotonic()
+    lease = None
     logger.info(
         "[ZSXQ_INSIGHTS_CACHE] event=refresh_started reason=%s digest=%s pid=%s",
         reason,
@@ -237,22 +422,54 @@ def _run_overview_refresh(
         os.getpid(),
     )
     try:
-        with app.app_context():
-            result = build_insights(**params)
-            store_overview_payload(
-                app,
-                params,
-                {"success": True, "data": result},
-            )
-        duration_ms = (time.monotonic() - started_at) * 1000
-        logger.info(
-            "[ZSXQ_INSIGHTS_CACHE] event=refresh_completed reason=%s digest=%s "
-            "pid=%s duration_ms=%.2f",
-            reason,
+        lease = _RefreshLockLease(
+            redis_client,
+            lock_key,
+            token,
+            lock_ttl_seconds,
             digest,
-            os.getpid(),
-            duration_ms,
         )
+        if not lease.start():
+            logger.warning(
+                "[ZSXQ_INSIGHTS_CACHE] event=refresh_discarded "
+                "result=lease-renewer-unavailable reason=%s digest=%s pid=%s",
+                reason,
+                digest,
+                os.getpid(),
+            )
+            return
+        with app.app_context():
+            try:
+                result = build_insights(**params)
+                stored = not lease.lost and _store_refreshed_overview_payload(
+                    app,
+                    params,
+                    {"success": True, "data": result},
+                    redis_client,
+                    lock_key,
+                    token,
+                )
+            finally:
+                _remove_db_session()
+        duration_ms = (time.monotonic() - started_at) * 1000
+        if stored:
+            logger.info(
+                "[ZSXQ_INSIGHTS_CACHE] event=refresh_completed reason=%s digest=%s "
+                "pid=%s duration_ms=%.2f",
+                reason,
+                digest,
+                os.getpid(),
+                duration_ms,
+            )
+        else:
+            logger.warning(
+                "[ZSXQ_INSIGHTS_CACHE] event=refresh_discarded result=lease-lost "
+                "reason=%s digest=%s pid=%s duration_ms=%.2f",
+                reason,
+                digest,
+                os.getpid(),
+                duration_ms,
+            )
     except Exception as error:
         duration_ms = (time.monotonic() - started_at) * 1000
         logger.warning(
@@ -266,30 +483,33 @@ def _run_overview_refresh(
         )
     finally:
         try:
-            _remove_db_session()
+            if lease is not None:
+                lease.stop()
         finally:
             try:
                 _release_refresh_lock(redis_client, lock_key, token)
             finally:
-                _refresh_slot.release()
+                _release_local_refresh(digest)
 
 
 def request_overview_refresh(app, params, reason: str) -> str:
     digest = overview_cache_digest(params)
     pid = os.getpid()
-    if not _refresh_slot.acquire(blocking=False):
+    claimed, result = _claim_local_refresh(digest)
+    if not claimed:
         logger.info(
-            "[ZSXQ_INSIGHTS_CACHE] event=refresh_skipped result=local-busy "
+            "[ZSXQ_INSIGHTS_CACHE] event=refresh_skipped result=%s "
             "reason=%s digest=%s pid=%s",
+            "local-busy-same" if result == "in-flight" else "local-busy-other",
             reason,
             digest,
             pid,
         )
-        return "in-flight"
+        return result
 
     redis_client = _redis_client_for_app(app)
     if redis_client is None:
-        _refresh_slot.release()
+        _release_local_refresh(digest)
         logger.info(
             "[ZSXQ_INSIGHTS_CACHE] event=refresh_skipped result=redis-unavailable "
             "reason=%s digest=%s pid=%s",
@@ -301,15 +521,16 @@ def request_overview_refresh(app, params, reason: str) -> str:
 
     lock_key = overview_refresh_lock_key(params)
     token = uuid.uuid4().hex
+    lock_ttl_seconds = _refresh_lock_ttl_seconds()
     try:
         acquired = redis_client.set(
             lock_key,
             token,
             nx=True,
-            ex=_refresh_lock_ttl_seconds(),
+            ex=lock_ttl_seconds,
         )
     except Exception as error:
-        _refresh_slot.release()
+        _release_local_refresh(digest)
         logger.warning(
             "[ZSXQ_INSIGHTS_CACHE] event=refresh_skipped result=redis-error "
             "reason=%s digest=%s pid=%s error_type=%s",
@@ -320,7 +541,7 @@ def request_overview_refresh(app, params, reason: str) -> str:
         )
         return "client-required"
     if not acquired:
-        _refresh_slot.release()
+        _release_local_refresh(digest)
         logger.info(
             "[ZSXQ_INSIGHTS_CACHE] event=refresh_skipped result=redis-lock-held "
             "reason=%s digest=%s pid=%s",
@@ -330,27 +551,31 @@ def request_overview_refresh(app, params, reason: str) -> str:
         )
         return "in-flight"
 
-    thread = threading.Thread(
-        target=_run_overview_refresh,
-        args=(
-            app,
-            dict(params),
-            str(reason),
-            redis_client,
-            lock_key,
-            token,
-            digest,
-        ),
-        name=f"zsxq-insights-refresh-{digest[:12]}",
-        daemon=True,
-    )
     try:
+        thread = threading.Thread(
+            target=_run_overview_refresh,
+            args=(
+                app,
+                dict(params),
+                str(reason),
+                redis_client,
+                lock_key,
+                token,
+                digest,
+                lock_ttl_seconds,
+            ),
+            name=f"zsxq-insights-refresh-{digest[:12]}",
+            daemon=True,
+        )
         thread.start()
     except Exception as error:
         try:
             _release_refresh_lock(redis_client, lock_key, token)
         finally:
-            _refresh_slot.release()
+            try:
+                _release_local_refresh(digest)
+            except Exception:
+                pass
         logger.warning(
             "[ZSXQ_INSIGHTS_CACHE] event=refresh_skipped result=thread-start-error "
             "reason=%s digest=%s pid=%s error_type=%s",
@@ -407,15 +632,15 @@ def schedule_default_overview_warmup(app) -> bool:
     with _warmup_guard:
         if _warmup_pid == pid and _warmup_thread is not None:
             return False
-        thread = threading.Thread(
-            target=_run_default_warmup,
-            args=(app,),
-            name="zsxq-insights-warmup",
-            daemon=True,
-        )
-        _warmup_pid = pid
-        _warmup_thread = thread
         try:
+            thread = threading.Thread(
+                target=_run_default_warmup,
+                args=(app,),
+                name="zsxq-insights-warmup",
+                daemon=True,
+            )
+            _warmup_pid = pid
+            _warmup_thread = thread
             thread.start()
         except Exception as error:
             _warmup_pid = None

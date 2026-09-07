@@ -42,7 +42,8 @@
 
 ### 3.1 已选：Web 后台刷新器 + Redis 单飞锁
 
-应用复用现有 `_start_web_background_threads(app)` 进程角色门禁，只在 Web 进程启动一个有界后台刷新入口。
+应用复用 `_start_web_background_threads(app)` 进程角色门禁，并将它收紧为对 `app.py`、Flask `run` 和已知 WSGI server
+命令的正向识别；迁移、维护脚本及未知进程均不预热。只有确认的 Web 进程才启动一个有界后台刷新入口。
 每个进程最多执行一个 Insights 刷新线程；Redis 原子锁保证多个 Web 进程对同一缓存身份只有一个刷新者。
 
 该方案不占用 ZSXQ 同步 worker，不新增队列和进程，能够同时处理启动预热与 stale 刷新，并让直接 API 客户端获得
@@ -100,6 +101,9 @@
 `Warning: 110 - "Response is stale; refreshing in background"`。`client-required` 使用不承诺后台行为的
 `Warning: 110 - "Response is stale"`，确保直接 API 客户端不会收到虚假声明。
 
+开发环境由 `localhost:8888` 跨域访问 API，因此 CORS 必须暴露 `X-Insights-Cache`、`X-Insights-Cache-Tier` 和
+`X-Insights-Refresh`；否则浏览器无法读取刷新状态并进入轮询。
+
 前端收到 `scheduled` 或 `in-flight` 时不再立即发起 `_refresh=1`。它按 500ms、1000ms、2000ms、4000ms 的有界间隔
 请求普通 URL；一旦得到非 stale 响应就更新当前页面并停止。四次后仍为 stale、请求失败或用户已切换筛选条件时，静默
 停止并保留当前数据。收到 `client-required` 或服务端没有新头时，继续使用现有强制刷新兼容路径。
@@ -149,13 +153,18 @@ daemon 线程，不等待 Redis 或数据库，也不改变 `/health`。线程�
 
 后台刷新同时满足两个门禁：
 
-1. 进程内非阻塞执行槽：每个 Web 进程最多一个刷新线程。槽已占用时不排队、不创建无限线程；后续 stale 请求可重试。
+1. 进程内非阻塞执行槽：每个 Web 进程最多一个刷新计算线程。获取执行槽与发布活动摘要在同一临界区完成，槽已占用时
+   不排队、不创建无限线程；仅当活动摘要与请求摘要相同才返回 `in-flight`，其他摘要返回 `client-required`，避免宣称
+   错误的键正在后台刷新。
 2. Redis 单飞锁：按 v5 缓存摘要加锁，使用随机 token、`SET NX EX` 和有界 TTL。释放时使用 compare-and-delete，禁止
    旧线程删除后来持有者的锁。进程崩溃时由 TTL 自动恢复。
 
-锁 TTL 必须大于当前数据库 statement timeout，并有安全上限；默认 120 秒。后台线程不得跨查询持有 ORM 对象或数据库
-连接，继续依赖 `build_insights` 内的 `_released_read_session()` 边界。无论成功、异常还是线程启动失败，均释放本地执行槽；
-获得 Redis 锁后还必须在 finally 中安全释放锁。
+锁 TTL 按四段聚合查询的 statement-timeout 总预算再加 120 秒清理余量计算，默认及上限为 600 秒；刷新存活期间由一个
+不访问数据库的 daemon lease keeper 每隔 TTL 的三分之一用 token-safe Lua 续期。后台写入再使用 token 校验与 fresh/stale
+写入同一段 Lua 原子操作：租约丢失后旧线程不得写入本地或 Redis 缓存。后台线程不得跨查询持有 ORM 对象或数据库连接，
+继续依赖 `build_insights` 内的 `_released_read_session()` 边界。无论成功、异常、线程或 lease keeper 构造失败还是线程启动
+失败，均释放本地执行槽；获得 Redis 锁后还必须在 finally 中安全释放锁。显式 `db.session.remove()` 在 Flask app context
+退出前执行。
 
 ## 7. 失败处理与可观测性
 

@@ -43,14 +43,55 @@ database_logger = DatabaseLoggerMiddleware()
 performance_monitor = PerformanceMonitor()
 
 
+def _flask_subcommand(arguments, start_index):
+    options_with_values = {"--app", "-a", "--env-file", "-e"}
+    index = start_index
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument in options_with_values:
+            index += 2
+            continue
+        if argument.startswith(("--app=", "--env-file=")):
+            index += 1
+            continue
+        if argument.startswith("-"):
+            index += 1
+            continue
+        return argument
+    return None
+
+
 def _start_web_background_threads(app):
     if app.config.get("TESTING"):
         return False
     role = str(os.environ.get("DB_PROCESS_ROLE") or os.environ.get("APP_PROCESS_ROLE") or "").strip().lower()
     if role in {"worker", "workers", "celery", "scheduler", "schedulers", "watchdog"}:
         return False
-    command = " ".join(str(item) for item in sys.argv).lower()
-    return not any(marker in command for marker in ("celery", "scheduler", "watchdog", "pytest", "unittest"))
+
+    arguments = [str(item).strip().lower() for item in sys.argv]
+    executable = os.path.basename(arguments[0]) if arguments else ""
+    if executable == "flask":
+        return _flask_subcommand(arguments, 1) == "run"
+    if (
+        len(arguments) >= 3
+        and arguments[1] == "-m"
+        and arguments[2] == "flask"
+    ):
+        return _flask_subcommand(arguments, 3) == "run"
+    if executable == "app.py" or (
+        executable.startswith("python")
+        and len(arguments) > 1
+        and os.path.basename(arguments[1]) == "app.py"
+    ):
+        return True
+    server_commands = ("gunicorn", "uwsgi", "waitress-serve", "hypercorn", "daphne")
+    if (
+        executable.startswith("python")
+        and len(arguments) >= 3
+        and arguments[1] == "-m"
+    ):
+        executable = os.path.basename(arguments[2])
+    return any(server in executable for server in server_commands)
 
 
 def _schedule_zsxq_insights_warmup(app, *, register_apis, start_background_threads):
@@ -127,6 +168,11 @@ def create_app(config_class=Config, *, register_apis=True):
                      "X-API-Key",
                      "X-Timestamp",
                      "X-Signature",
+                 ],
+                 expose_headers=[
+                     "X-Insights-Cache",
+                     "X-Insights-Cache-Tier",
+                     "X-Insights-Refresh",
                  ],
                  methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
                  supports_credentials=True)

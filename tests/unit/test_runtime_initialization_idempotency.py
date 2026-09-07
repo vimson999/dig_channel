@@ -1,4 +1,5 @@
 import os
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -361,6 +362,29 @@ class RuntimeInitializationIdempotencyTest(unittest.TestCase):
         app.config = {"TESTING": False}
         with patch.dict(os.environ, {"DB_PROCESS_ROLE": "worker"}, clear=False):
             self.assertFalse(_start_web_background_threads(app))
+
+    def test_web_background_threads_require_positive_server_command(self):
+        from app import _start_web_background_threads
+
+        app = MagicMock()
+        app.config = {"TESTING": False}
+        cases = (
+            (["app.py"], True),
+            (["gunicorn", "--bind", "127.0.0.1:5001", "app:create_app()"], True),
+            (["flask", "--app", "app:create_app", "run"], True),
+            (["flask", "--app", "app:create_app", "db", "upgrade"], False),
+            (["flask", "--app", "run", "db", "upgrade"], False),
+            (["python", "-m", "flask", "--app", "run", "db", "upgrade"], False),
+            (["scripts/check_recent_tasks.py"], False),
+            (["python", "scripts/check_recent_tasks.py"], False),
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            for argv, expected in cases:
+                with self.subTest(argv=argv), patch.object(sys, "argv", argv):
+                    self.assertEqual(
+                        _start_web_background_threads(app),
+                        expected,
+                    )
 
     def test_insights_warmup_requires_web_api_process(self):
         from app import _schedule_zsxq_insights_warmup

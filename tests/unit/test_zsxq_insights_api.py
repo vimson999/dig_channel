@@ -9,7 +9,6 @@ from apis.v1.zsxq_insights import (
     bp,
 )
 from services.zsxq_insights_cache import OverviewCacheEntry, overview_cache_key
-from services.zsxq_insights_service import normalize_insights_arguments
 
 
 class ZsxqInsightsApiTest(unittest.TestCase):
@@ -47,14 +46,26 @@ class ZsxqInsightsApiTest(unittest.TestCase):
             sort="signal",
         )
 
-    def test_refresh_flag_does_not_change_cache_identity(self):
-        normal_key = overview_cache_key(
-            normalize_insights_arguments(theme_id="ai-sales", page=1)
+    @patch("apis.v1.zsxq_insights.store_overview_payload", return_value='{"success":true}')
+    @patch("apis.v1.zsxq_insights.build_insights", return_value={"topics": []})
+    @patch("apis.v1.zsxq_insights.get_cached_overview", return_value=None)
+    def test_refresh_flag_does_not_change_route_cache_identity(
+        self,
+        _cached,
+        _build,
+        store,
+    ):
+        query = "?theme=AI-SALES&range_days=90&page=1&page_size=48&sort=LATEST"
+        normal = self.client.get(f"/api/v1/zsxq-insights/overview{query}")
+        forced = self.client.get(
+            f"/api/v1/zsxq-insights/overview{query}&_refresh=1"
         )
-        refresh_key = overview_cache_key(
-            normalize_insights_arguments(theme_id="ai-sales", page=1)
-        )
-        self.assertEqual(normal_key, refresh_key)
+
+        self.assertEqual(normal.status_code, 200)
+        self.assertEqual(forced.status_code, 200)
+        normal_params = store.call_args_list[0].args[1]
+        forced_params = store.call_args_list[1].args[1]
+        self.assertEqual(overview_cache_key(normal_params), overview_cache_key(forced_params))
         self.assertGreaterEqual(OVERVIEW_CACHE_TTL_SECONDS, 1800)
         self.assertGreaterEqual(OVERVIEW_STALE_CACHE_TTL_SECONDS, 86400)
 

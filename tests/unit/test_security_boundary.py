@@ -90,6 +90,29 @@ class ProductionBoundaryTests(unittest.TestCase):
     def test_business_api_is_hidden_without_authentication(self):
         self.assertEqual(self.app.test_client().get('/api/v1/channels').status_code, 404)
 
+    def test_allowed_origin_can_read_insights_cache_headers(self):
+        response = self.app.test_client().get(
+            '/health',
+            headers={'Origin': 'https://private.example.com'},
+        )
+
+        self.assertEqual(
+            response.headers.get('Access-Control-Allow-Origin'),
+            'https://private.example.com',
+        )
+        exposed = {
+            value.strip()
+            for value in response.headers.get('Access-Control-Expose-Headers', '').split(',')
+            if value.strip()
+        }
+        self.assertTrue(
+            {
+                'X-Insights-Cache',
+                'X-Insights-Cache-Tier',
+                'X-Insights-Refresh',
+            }.issubset(exposed)
+        )
+
     def test_signed_zsxq_history_request_bypasses_interactive_login(self):
         from unittest.mock import patch
 

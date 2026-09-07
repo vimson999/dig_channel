@@ -1246,3 +1246,19 @@ git commit -m "docs: add insights cache refresh implementation plan"
 ```
 
 Do not restart the backend or claim production latency acceptance. Report code/test completion separately from the later optional runtime rollout described by the specification.
+
+---
+
+### Post-review hardening addendum (2026-09-07)
+
+Independent review added these required acceptance checks before final verification:
+
+- [ ] Treat only positive Web-server commands (`app.py`, Flask `run`, or a known WSGI server) as eligible for startup warmup; Flask DB commands, maintenance scripts, workers, schedulers, watchdogs, and unknown commands remain ineligible.
+- [ ] Expose `X-Insights-Cache`, `X-Insights-Cache-Tier`, and `X-Insights-Refresh` through CORS and prove an allowed cross-origin response can read them.
+- [ ] Track the active local refresh digest. A busy slot returns `in-flight` only for the same digest and `client-required` for a different digest.
+- [ ] Catch both thread construction and `start()` failures, restoring every PID/thread guard, Redis lock, active digest, and local slot acquired by that path.
+- [ ] Budget the Redis lease for all four timeout-bounded reads plus cleanup margin, cap it at 600 seconds, renew it every one-third TTL with token-safe Lua while the refresh lives, and atomically fence fresh/stale writes on lock-token ownership so an expired worker cannot overwrite a newer owner.
+- [ ] Run explicit database-session cleanup before leaving the Flask app context.
+- [ ] Expand cache-identity tests across every semantic field and exercise `_refresh=1` at the route boundary.
+
+These items supersede the earlier 120-second single-statement lease assumption and the negative-only process-role gate in Tasks 3 and 5.
