@@ -13,6 +13,7 @@ from services.zsxq_insights_service import (
     _topic_item,
     _weekly_trend,
     matches_theme,
+    normalize_insights_arguments,
 )
 
 
@@ -30,6 +31,33 @@ class ZsxqInsightsClassifierTest(unittest.TestCase):
 
 
 class ZsxqInsightsContractTest(unittest.TestCase):
+    def test_insights_arguments_normalize_once_for_build_and_cache(self):
+        normalized = normalize_insights_arguments(
+            group_id=None,
+            theme_id="unknown-theme",
+            range_days="900",
+            query="  Ozon  ",
+            page="2",
+            page_size="99999",
+            sort="LATEST",
+        )
+        self.assertEqual(
+            normalized,
+            {
+                "group_id": "1824528822",
+                "theme_id": "ai-sales",
+                "range_days": 730,
+                "query": "ozon",
+                "page": 2,
+                "page_size": 100,
+                "sort": "latest",
+            },
+        )
+
+    def test_insights_arguments_reject_invalid_page_before_work(self):
+        with self.assertRaisesRegex(ValueError, "page 必须大于 0"):
+            normalize_insights_arguments(page=0)
+
     @patch("services.zsxq_insights_service.release_db_session_quietly")
     def test_released_read_session_preserves_caller_execute_boundary(self, release):
         with _released_read_session() as session:

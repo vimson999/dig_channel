@@ -234,6 +234,31 @@ def _normalize_sort(value) -> str:
     return sort
 
 
+def normalize_insights_arguments(
+    *,
+    group_id=GROUP_ID_SHENGCAI,
+    theme_id="ai-sales",
+    range_days=90,
+    query="",
+    page=1,
+    page_size=DEFAULT_PAGE_SIZE,
+    sort="latest",
+):
+    """Return the canonical arguments shared by computation and cache identity."""
+    normalized_theme = str(theme_id or "ai-sales").strip().lower()
+    if normalized_theme not in THEME_LOOKUP:
+        normalized_theme = "ai-sales"
+    return {
+        "group_id": str(group_id or GROUP_ID_SHENGCAI),
+        "theme_id": normalized_theme,
+        "range_days": _normalize_range_days(range_days),
+        "query": str(query or "").strip().lower(),
+        "page": _normalize_page(page),
+        "page_size": _normalize_page_size(page_size),
+        "sort": _normalize_sort(sort),
+    }
+
+
 def _cache_ttl(env_name: str, default: int) -> int:
     try:
         value = int(os.environ.get(env_name, default))
@@ -814,12 +839,22 @@ def build_insights(
     page_size=DEFAULT_PAGE_SIZE,
     sort="latest",
 ):
-    group_id = str(group_id)
-    range_days = _normalize_range_days(range_days)
-    page = _normalize_page(page)
-    page_size = _normalize_page_size(page_size)
-    sort = _normalize_sort(sort)
-    query = str(query or "").strip().lower()
+    arguments = normalize_insights_arguments(
+        group_id=group_id,
+        theme_id=theme_id,
+        range_days=range_days,
+        query=query,
+        page=page,
+        page_size=page_size,
+        sort=sort,
+    )
+    group_id = arguments["group_id"]
+    theme_id = arguments["theme_id"]
+    range_days = arguments["range_days"]
+    query = arguments["query"]
+    page = arguments["page"]
+    page_size = arguments["page_size"]
+    sort = arguments["sort"]
     aggregates = _aggregate_themes(group_id)
     if not aggregates:
         return {"group_id": str(group_id), "empty": True, "themes": [], "topics": []}
@@ -837,8 +872,6 @@ def build_insights(
             row["children"] = children
         theme_rows.append(row)
 
-    if theme_id not in THEME_LOOKUP:
-        theme_id = "ai-sales"
     selected_topics = _load_selected_topics(group_id, theme_id, range_days, newest, query=query)
     visible_topics = _sort_topics(selected_topics, sort)
     offset = (page - 1) * page_size
