@@ -12,7 +12,11 @@ import threading
 import time
 import uuid
 
-from services.zsxq_insights_service import build_insights
+from services.zsxq_insights_service import (
+    GROUP_ID_SHENGCAI,
+    build_insights,
+    normalize_insights_arguments,
+)
 
 
 OVERVIEW_CACHE_VERSION = "v5"
@@ -71,6 +75,9 @@ class OverviewCacheEntry:
 _overview_local_cache = OrderedDict()
 _overview_local_cache_lock = threading.Lock()
 _refresh_slot = threading.BoundedSemaphore(1)
+_warmup_guard = threading.Lock()
+_warmup_pid = None
+_warmup_thread = None
 
 
 def overview_cache_digest(params) -> str:
@@ -354,3 +361,74 @@ def request_overview_refresh(app, params, reason: str) -> str:
         )
         return "client-required"
     return "scheduled"
+
+
+def default_overview_params():
+    return normalize_insights_arguments(
+        group_id=GROUP_ID_SHENGCAI,
+        theme_id="ai-sales",
+        range_days=90,
+        query="",
+        page=1,
+        page_size=48,
+        sort="latest",
+    )
+
+
+def _run_default_warmup(app) -> None:
+    params = default_overview_params()
+    digest = overview_cache_digest(params)
+    try:
+        with app.app_context():
+            entry = get_cached_overview(app, params)
+            if entry is not None and not entry.stale:
+                logger.info(
+                    "[ZSXQ_INSIGHTS_CACHE] event=warmup_skipped result=fresh "
+                    "digest=%s pid=%s",
+                    digest,
+                    os.getpid(),
+                )
+                return
+            request_overview_refresh(app, params, reason="startup")
+    except Exception as error:
+        logger.warning(
+            "[ZSXQ_INSIGHTS_CACHE] event=warmup_skipped result=bootstrap-error "
+            "digest=%s pid=%s error_type=%s",
+            digest,
+            os.getpid(),
+            type(error).__name__,
+        )
+
+
+def schedule_default_overview_warmup(app) -> bool:
+    global _warmup_pid, _warmup_thread
+
+    pid = os.getpid()
+    with _warmup_guard:
+        if _warmup_pid == pid and _warmup_thread is not None:
+            return False
+        thread = threading.Thread(
+            target=_run_default_warmup,
+            args=(app,),
+            name="zsxq-insights-warmup",
+            daemon=True,
+        )
+        _warmup_pid = pid
+        _warmup_thread = thread
+        try:
+            thread.start()
+        except Exception as error:
+            _warmup_pid = None
+            _warmup_thread = None
+            logger.warning(
+                "[ZSXQ_INSIGHTS_CACHE] event=warmup_skipped result=thread-start-error "
+                "pid=%s error_type=%s",
+                pid,
+                type(error).__name__,
+            )
+            return False
+    logger.info(
+        "[ZSXQ_INSIGHTS_CACHE] event=warmup_scheduled pid=%s",
+        pid,
+    )
+    return True

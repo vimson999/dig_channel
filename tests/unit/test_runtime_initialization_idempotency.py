@@ -362,6 +362,37 @@ class RuntimeInitializationIdempotencyTest(unittest.TestCase):
         with patch.dict(os.environ, {"DB_PROCESS_ROLE": "worker"}, clear=False):
             self.assertFalse(_start_web_background_threads(app))
 
+    def test_insights_warmup_requires_web_api_process(self):
+        from app import _schedule_zsxq_insights_warmup
+
+        app = MagicMock()
+        with patch(
+            "services.zsxq_insights_cache.schedule_default_overview_warmup"
+        ) as schedule:
+            self.assertFalse(
+                _schedule_zsxq_insights_warmup(
+                    app,
+                    register_apis=False,
+                    start_background_threads=True,
+                )
+            )
+            self.assertFalse(
+                _schedule_zsxq_insights_warmup(
+                    app,
+                    register_apis=True,
+                    start_background_threads=False,
+                )
+            )
+            schedule.return_value = True
+            self.assertTrue(
+                _schedule_zsxq_insights_warmup(
+                    app,
+                    register_apis=True,
+                    start_background_threads=True,
+                )
+            )
+        schedule.assert_called_once_with(app)
+
 
 if __name__ == "__main__":
     unittest.main()

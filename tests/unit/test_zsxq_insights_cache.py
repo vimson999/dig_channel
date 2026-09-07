@@ -5,12 +5,14 @@ from flask import Flask
 
 from services import zsxq_insights_cache as cache_module
 from services.zsxq_insights_cache import (
+    OverviewCacheEntry,
     clear_local_overview_cache,
     get_cached_overview,
     overview_cache_digest,
     overview_cache_key,
     overview_refresh_lock_key,
     request_overview_refresh,
+    schedule_default_overview_warmup,
     store_overview_payload,
 )
 from services.zsxq_insights_service import normalize_insights_arguments
@@ -62,6 +64,51 @@ class ZsxqInsightsCacheTest(unittest.TestCase):
 
     def tearDown(self):
         clear_local_overview_cache()
+
+    def test_default_warmup_is_daemon_and_uses_real_page_identity(self):
+        created = []
+
+        class RecordedThread:
+            def __init__(self, **kwargs):
+                created.append(kwargs)
+
+            def start(self):
+                return None
+
+        with patch("services.zsxq_insights_cache.threading.Thread", RecordedThread):
+            self.assertTrue(schedule_default_overview_warmup(self.app))
+        self.assertEqual(len(created), 1)
+        self.assertTrue(created[0]["daemon"])
+        self.assertEqual(created[0]["name"], "zsxq-insights-warmup")
+
+    def test_default_warmup_target_skips_existing_fresh_entry(self):
+        fresh = OverviewCacheEntry('{"success":true}', "redis", False)
+        with patch.object(cache_module, "get_cached_overview", return_value=fresh), \
+             patch.object(cache_module, "request_overview_refresh") as refresh:
+            cache_module._run_default_warmup(self.app)
+        refresh.assert_not_called()
+
+    def test_default_warmup_target_refreshes_exact_real_page(self):
+        with patch.object(cache_module, "get_cached_overview", return_value=None), \
+             patch.object(
+                 cache_module,
+                 "request_overview_refresh",
+                 return_value="scheduled",
+             ) as refresh:
+            cache_module._run_default_warmup(self.app)
+        refresh.assert_called_once_with(
+            self.app,
+            {
+                "group_id": "1824528822",
+                "theme_id": "ai-sales",
+                "range_days": 90,
+                "query": "",
+                "page": 1,
+                "page_size": 48,
+                "sort": "latest",
+            },
+            reason="startup",
+        )
 
     def test_semantically_equivalent_arguments_share_v5_key(self):
         implicit = normalize_insights_arguments()

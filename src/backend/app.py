@@ -52,6 +52,15 @@ def _start_web_background_threads(app):
     command = " ".join(str(item) for item in sys.argv).lower()
     return not any(marker in command for marker in ("celery", "scheduler", "watchdog", "pytest", "unittest"))
 
+
+def _schedule_zsxq_insights_warmup(app, *, register_apis, start_background_threads):
+    if not register_apis or not start_background_threads:
+        return False
+    from services.zsxq_insights_cache import schedule_default_overview_warmup
+
+    return schedule_default_overview_warmup(app)
+
+
 def create_app(config_class=Config, *, register_apis=True):
     """应用工厂函数
     
@@ -248,6 +257,12 @@ def create_app(config_class=Config, *, register_apis=True):
             abort(403)
 
         g.current_user = current_user
+
+    _schedule_zsxq_insights_warmup(
+        app,
+        register_apis=register_apis,
+        start_background_threads=start_background_threads,
+    )
     
     return app
 
