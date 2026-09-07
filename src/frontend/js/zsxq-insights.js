@@ -278,7 +278,8 @@
             if (requestId !== state.requestId) return;
             applyInsightsPayload(payload, { append, page });
             if (response.headers.get('X-Insights-Cache') === 'STALE') {
-                refreshInsightsInBackground(url, { append, page, requestId });
+                const refreshState = response.headers.get('X-Insights-Refresh') || 'client-required';
+                refreshInsightsInBackground(url, { append, page, requestId }, refreshState);
             }
         } catch (error) {
             if (error.name === 'AbortError' || requestId !== state.requestId) return;
@@ -313,16 +314,28 @@
         }
     }
 
-    async function refreshInsightsInBackground(url, { append, page, requestId }) {
-        const separator = url.includes('?') ? '&' : '?';
+    async function refreshInsightsInBackground(url, { append, page, requestId }, refreshState) {
         try {
-            const response = await fetch(`${url}${separator}_refresh=1`);
-            const payload = await readJsonResponse(response);
-            if (!response.ok || !payload.success) return;
-            storeCachedResponse(url, payload);
-            if (requestId === state.requestId) {
-                applyInsightsPayload(payload, { append, page });
-            }
+            await window.ZsxqInsightsRefresh.refresh({
+                url,
+                refreshState,
+                request: async (requestUrl) => {
+                    const response = await fetch(requestUrl, { cache: 'no-store' });
+                    const payload = await readJsonResponse(response);
+                    return {
+                        ok: response.ok,
+                        cacheState: response.headers.get('X-Insights-Cache'),
+                        payload,
+                    };
+                },
+                isCurrent: () => requestId === state.requestId,
+                onFresh: (payload) => {
+                    storeCachedResponse(url, payload);
+                    if (requestId === state.requestId) {
+                        applyInsightsPayload(payload, { append, page });
+                    }
+                },
+            });
         } catch (error) {
             console.warn('[ZSXQ_INSIGHTS] 静默刷新失败', error);
         }
