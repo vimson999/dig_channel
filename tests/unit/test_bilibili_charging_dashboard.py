@@ -46,6 +46,16 @@ class BilibiliChargingDashboardTest(unittest.TestCase):
         db.session.add(row)
         return row
 
+    def _add_snapshot(self, account, snapshot_date, charger_count):
+        db.session.add(
+            BilibiliChargingSnapshot(
+                competitor_id=account.id,
+                snapshot_date=snapshot_date,
+                charger_count=charger_count,
+                fetched_at=datetime.combine(snapshot_date, datetime.min.time()),
+            )
+        )
+
     def test_dashboard_uses_per_uid_pricing_and_previous_day_delta(self):
         standard = self._add_account("standard", "100", "普通账号")
         us_stock = self._add_account("us-stock", "3546604889967195", "美股研报局")
@@ -92,6 +102,64 @@ class BilibiliChargingDashboardTest(unittest.TestCase):
         self.assertEqual(us_stock_latest["daily_revenue"], 150)
         self.assertEqual(us_stock_latest["daily_cash"], 60)
         self.assertEqual(us_stock_latest["monthly_income"], 2060)
+
+    def test_dashboard_returns_rankings_for_rolling_day_week_and_month(self):
+        alpha = self._add_account("alpha", "100", "甲账号")
+        beta = self._add_account("beta", "200", "乙账号")
+        insufficient = self._add_account("new", "300", "新账号")
+
+        for snapshot_date, count in [
+            (date(2026, 8, 8), 90),
+            (date(2026, 9, 1), 100),
+            (date(2026, 9, 7), 108),
+            (date(2026, 9, 8), 110),
+        ]:
+            self._add_snapshot(alpha, snapshot_date, count)
+        for snapshot_date, count in [
+            (date(2026, 8, 9), 50),
+            (date(2026, 9, 1), 70),
+            (date(2026, 9, 7), 75),
+            (date(2026, 9, 8), 77),
+        ]:
+            self._add_snapshot(beta, snapshot_date, count)
+        self._add_snapshot(insufficient, date(2026, 9, 8), 200)
+        db.session.commit()
+
+        with patch.object(service, "business_date", return_value=date(2026, 9, 8)):
+            payload = service.charging_dashboard_payload(days=31)
+
+        rankings = payload["growth_rankings"]
+        self.assertEqual(rankings["day"]["window_days"], 1)
+        self.assertEqual(
+            [(item["uid"], item["rank"], item["growth"]) for item in rankings["day"]["items"]],
+            [("100", 1, 2), ("200", 2, 2), ("300", None, None)],
+        )
+        self.assertEqual(
+            [(item["uid"], item["growth"]) for item in rankings["week"]["items"]],
+            [("100", 10), ("200", 7), ("300", None)],
+        )
+        self.assertEqual(
+            [(item["uid"], item["growth"]) for item in rankings["month"]["items"]],
+            [("200", 27), ("100", 20), ("300", None)],
+        )
+        self.assertEqual(rankings["month"]["items"][0]["baseline_date"], "2026-08-09")
+        self.assertEqual(rankings["month"]["items"][1]["baseline_date"], "2026-08-08")
+
+    def test_month_ranking_is_independent_of_chart_range_when_sync_is_stale(self):
+        account = self._add_account("stale", "400", "延迟账号")
+        self._add_snapshot(account, date(2026, 5, 29), 100)
+        self._add_snapshot(account, date(2026, 6, 30), 130)
+        db.session.commit()
+
+        with patch.object(service, "business_date", return_value=date(2026, 9, 8)):
+            month_items = [
+                service.charging_dashboard_payload(days=days)["growth_rankings"]["month"]["items"][0]
+                for days in (31, 90, 366)
+            ]
+
+        self.assertEqual([item["growth"] for item in month_items], [30, 30, 30])
+        self.assertEqual([item["latest_date"] for item in month_items], ["2026-06-30"] * 3)
+        self.assertEqual([item["baseline_date"] for item in month_items], ["2026-05-29"] * 3)
 
     def test_same_day_collection_is_an_idempotent_upsert(self):
         account = self._add_account("one", "100", "账号")

@@ -8,6 +8,8 @@
             this.chart = null;
             this.days = 31;
             this.loading = false;
+            this.rankingPeriod = 'day';
+            this.growthRankings = {};
             this.bindEvents();
             this.load();
         }
@@ -18,6 +20,14 @@
                 this.load();
             });
             document.getElementById('bilibili-charging-sync')?.addEventListener('click', () => this.sync());
+            const rankingTabs = document.getElementById('bilibili-charging-growth-ranking-tabs');
+            rankingTabs?.addEventListener('click', (event) => {
+                const button = event.target?.closest?.('[data-bilibili-charging-ranking-period]');
+                if (button) {
+                    this.selectGrowthRankingPeriod(button.dataset.bilibiliChargingRankingPeriod);
+                }
+            });
+            rankingTabs?.addEventListener('keydown', (event) => this.handleGrowthRankingKeydown(event));
             window.addEventListener('resize', () => this.chart?.resize());
         }
 
@@ -67,6 +77,10 @@
             const dates = Array.isArray(payload.dates) ? payload.dates : [];
             this.renderChart(accounts, dates);
             this.renderSummary(accounts);
+            this.growthRankings = payload.growth_rankings && typeof payload.growth_rankings === 'object'
+                ? payload.growth_rankings
+                : {};
+            this.selectGrowthRankingPeriod(this.rankingPeriod);
 
             const updated = payload.last_fetched_at ? this.formatDateTime(payload.last_fetched_at) : '';
             const updatedElement = document.getElementById('bilibili-charging-updated-at');
@@ -78,6 +92,92 @@
             } else {
                 this.setStatus('尚无快照，点击“立即同步”生成今天的第一份数据');
             }
+        }
+
+        selectGrowthRankingPeriod(period) {
+            if (!['day', 'week', 'month'].includes(period)) return;
+            this.rankingPeriod = period;
+            let activeButton = null;
+            document.querySelectorAll('[data-bilibili-charging-ranking-period]').forEach((button) => {
+                const active = button.dataset.bilibiliChargingRankingPeriod === period;
+                button.setAttribute('aria-selected', active ? 'true' : 'false');
+                button.setAttribute('tabindex', active ? '0' : '-1');
+                button.classList.toggle('bg-white', active);
+                button.classList.toggle('text-pink-600', active);
+                button.classList.toggle('shadow-sm', active);
+                button.classList.toggle('text-slate-500', !active);
+                if (active) activeButton = button;
+            });
+            const panel = document.getElementById('bilibili-charging-growth-ranking-panel');
+            if (panel && activeButton?.id) {
+                panel.setAttribute('aria-labelledby', activeButton.id);
+            }
+            this.renderGrowthRankings();
+        }
+
+        handleGrowthRankingKeydown(event) {
+            const current = event.target?.closest?.('[data-bilibili-charging-ranking-period]');
+            if (!current) return;
+            const buttons = Array.from(
+                document.querySelectorAll('[data-bilibili-charging-ranking-period]')
+            );
+            const currentIndex = buttons.indexOf(current);
+            if (currentIndex < 0) return;
+            let nextIndex = null;
+            if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % buttons.length;
+            if (event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + buttons.length) % buttons.length;
+            if (event.key === 'Home') nextIndex = 0;
+            if (event.key === 'End') nextIndex = buttons.length - 1;
+            if (nextIndex === null) return;
+            event.preventDefault();
+            const next = buttons[nextIndex];
+            this.selectGrowthRankingPeriod(next.dataset.bilibiliChargingRankingPeriod);
+            next.focus();
+        }
+
+        renderGrowthRankings() {
+            const panel = document.getElementById('bilibili-charging-growth-ranking-panel');
+            if (!panel) return;
+            const items = this.growthRankings?.[this.rankingPeriod]?.items;
+            if (!Array.isArray(items) || !items.length) {
+                panel.innerHTML = '<div class="rounded-lg border border-slate-200 bg-white px-4 py-5 text-center text-sm text-slate-400 lg:col-span-2">暂无可排行数据</div>';
+                return;
+            }
+            const rankStyles = [
+                'bg-pink-500 text-white',
+                'bg-blue-600 text-white',
+                'bg-amber-500 text-white',
+            ];
+            panel.innerHTML = items.map((item, index) => {
+                const hasGrowth = item.growth !== null
+                    && item.growth !== undefined
+                    && Number.isFinite(Number(item.growth));
+                const growth = hasGrowth ? Number(item.growth) : null;
+                const growthClass = growth > 0
+                    ? 'text-emerald-600'
+                    : (growth < 0 ? 'text-rose-600' : 'text-slate-600');
+                const rank = hasGrowth ? (item.rank || index + 1) : '—';
+                const rankStyle = hasGrowth && Number(rank) <= 3
+                    ? rankStyles[Number(rank) - 1]
+                    : 'bg-slate-200 text-slate-600';
+                const dateNote = hasGrowth
+                    ? `${String(item.baseline_date || '').slice(5)} → ${String(item.latest_date || '').slice(5)}`
+                    : '缺少历史基准快照';
+                const sourceUrl = this.profileUrl(item.source_url, item.uid);
+                return `
+                    <div class="flex items-center gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                        <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold ${rankStyle}">${rank}</span>
+                        <a href="${sourceUrl}" target="_blank" rel="noopener noreferrer" class="min-w-0 flex-1 group">
+                            <span class="block truncate font-semibold text-gray-800 group-hover:text-pink-600">${this.escape(item.name)}</span>
+                            <span class="block text-xs text-slate-400">${this.escape(dateNote)}</span>
+                        </a>
+                        <span class="shrink-0 text-right">
+                            <span class="block font-bold ${hasGrowth ? growthClass : 'text-slate-400'}">${hasGrowth ? `${this.signed(growth)} 人` : '数据不足'}</span>
+                            <span class="block text-xs text-slate-400">${item.latest_count == null ? '-' : `当前 ${this.number(item.latest_count)} 人`}</span>
+                        </span>
+                    </div>
+                `;
+            }).join('');
         }
 
         renderChart(accounts, dates) {
@@ -171,6 +271,11 @@
 
         renderEmpty(message) {
             this.chart?.clear();
+            this.growthRankings = {};
+            const rankingPanel = document.getElementById('bilibili-charging-growth-ranking-panel');
+            if (rankingPanel) {
+                rankingPanel.innerHTML = `<div class="rounded-lg border border-slate-200 bg-white px-4 py-5 text-center text-sm text-slate-400 lg:col-span-2">${this.escape(message)}</div>`;
+            }
             const body = document.getElementById('bilibili-charging-summary');
             if (body) {
                 body.innerHTML = `<tr><td colspan="6" class="px-6 py-8 text-center text-gray-400">${this.escape(message)}</td></tr>`;
@@ -200,6 +305,12 @@
         formatDateTime(value) {
             const parsed = new Date(value);
             return Number.isNaN(parsed.getTime()) ? '' : parsed.toLocaleString('zh-CN', { hour12: false });
+        }
+
+        profileUrl(value, uid) {
+            const fallback = `https://space.bilibili.com/${encodeURIComponent(String(uid || ''))}`;
+            const candidate = String(value || fallback).trim();
+            return this.escape(/^https?:\/\/[^\s]+$/i.test(candidate) ? candidate : fallback);
         }
 
         escape(value) {

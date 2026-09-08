@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List
 from zoneinfo import ZoneInfo
 
 from bilibili_api import user
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
 
 from models import BilibiliChargingSnapshot, BilibiliCompetitor, SystemConfig, db
 from services.bilibili_intelligence_service import _credential_from_auth
@@ -47,6 +47,11 @@ DEFAULT_SCHEDULE = {
     "daily_at": "00:00",
     "timezone": "Asia/Shanghai",
     "notify_milestones": True,
+}
+GROWTH_RANKING_WINDOWS = {
+    "day": 1,
+    "week": 7,
+    "month": 30,
 }
 
 
@@ -357,6 +362,103 @@ def _snapshot_rows(start_date, end_date) -> Iterable[Any]:
     return [*previous_rows, *current_rows]
 
 
+def _nearest_snapshot_rows(cutoffs):
+    if not cutoffs:
+        return {}
+    nearest = (
+        db.session.query(
+            BilibiliChargingSnapshot.competitor_id,
+            db.func.max(BilibiliChargingSnapshot.snapshot_date).label("snapshot_date"),
+        )
+        .filter(or_(*[
+            and_(
+                BilibiliChargingSnapshot.competitor_id == competitor_id,
+                BilibiliChargingSnapshot.snapshot_date <= cutoff,
+            )
+            for competitor_id, cutoff in cutoffs.items()
+        ]))
+        .group_by(BilibiliChargingSnapshot.competitor_id)
+        .subquery()
+    )
+    rows = (
+        db.session.query(
+            BilibiliChargingSnapshot.competitor_id,
+            BilibiliChargingSnapshot.snapshot_date,
+            BilibiliChargingSnapshot.charger_count,
+            BilibiliChargingSnapshot.fetched_at,
+        )
+        .join(
+            nearest,
+            and_(
+                nearest.c.competitor_id == BilibiliChargingSnapshot.competitor_id,
+                nearest.c.snapshot_date == BilibiliChargingSnapshot.snapshot_date,
+            ),
+        )
+        .all()
+    )
+    return {row.competitor_id: row for row in rows}
+
+
+def _growth_ranking_item(account, latest, baseline):
+    growth = (
+        latest.charger_count - baseline.charger_count
+        if latest is not None and baseline is not None
+        else None
+    )
+    return {
+        "rank": None,
+        "competitor_id": account["id"],
+        "uid": account["uid"],
+        "name": account["name"],
+        "source_url": account["source_url"],
+        "growth": growth,
+        "latest_count": latest.charger_count if latest is not None else None,
+        "latest_date": latest.snapshot_date.isoformat() if latest is not None else None,
+        "baseline_count": baseline.charger_count if baseline is not None else None,
+        "baseline_date": baseline.snapshot_date.isoformat() if baseline is not None else None,
+    }
+
+
+def _growth_rankings(accounts, end_date):
+    latest_by_account = _nearest_snapshot_rows({
+        account["id"]: end_date
+        for account in accounts
+    })
+    rankings = {}
+    for period, window_days in GROWTH_RANKING_WINDOWS.items():
+        baseline_by_account = _nearest_snapshot_rows({
+            competitor_id: latest.snapshot_date - timedelta(days=window_days)
+            for competitor_id, latest in latest_by_account.items()
+        })
+        items = [
+            _growth_ranking_item(
+                account,
+                latest_by_account.get(account["id"]),
+                baseline_by_account.get(account["id"]),
+            )
+            for account in accounts
+        ]
+        items.sort(
+            key=lambda item: (
+                item["growth"] is None,
+                -(item["growth"] or 0),
+                -(item["latest_count"] or 0),
+                item["name"],
+                item["uid"],
+            )
+        )
+        next_rank = 1
+        for item in items:
+            if item["growth"] is not None:
+                item["rank"] = next_rank
+                next_rank += 1
+        rankings[period] = {
+            "window_days": window_days,
+            "items": items,
+        }
+    return rankings
+
+
 def charging_dashboard_payload(*, days=31) -> Dict[str, Any]:
     days = _bounded_int(days, 31, 2, 366)
     end_date = business_date()
@@ -447,6 +549,7 @@ def charging_dashboard_payload(*, days=31) -> Dict[str, Any]:
         },
         "dates": all_dates,
         "accounts": output_accounts,
+        "growth_rankings": _growth_rankings(accounts, end_date),
         "last_fetched_at": max(latest_times) if latest_times else None,
         "has_data": any(item.get("points") for item in output_accounts),
     }

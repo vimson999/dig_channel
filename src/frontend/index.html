@@ -459,6 +459,22 @@ margin: 0;
     </div>
     <div id="bilibili-charging-status" class="px-6 pt-5 text-sm text-gray-500">正在加载充电人数...</div>
     <div id="bilibili-charging-chart" class="w-full h-[360px] px-3"></div>
+    <div class="border-t border-gray-100 bg-slate-50/60 px-6 py-5">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+            <div>
+                <h4 class="font-bold text-gray-800">充电增量排行榜</h4>
+                <p class="text-xs text-gray-500 mt-1">按最新快照对比对应周期的最近历史快照</p>
+            </div>
+            <div id="bilibili-charging-growth-ranking-tabs" role="tablist" aria-label="充电人数增长周期" class="inline-flex self-start rounded-lg bg-slate-200/70 p-1 text-sm font-medium">
+                <button id="bilibili-charging-growth-ranking-tab-day" type="button" role="tab" tabindex="0" aria-selected="true" aria-controls="bilibili-charging-growth-ranking-panel" data-bilibili-charging-ranking-period="day" class="rounded-md bg-white px-3 py-1.5 text-pink-600 shadow-sm transition-colors">日增</button>
+                <button id="bilibili-charging-growth-ranking-tab-week" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="bilibili-charging-growth-ranking-panel" data-bilibili-charging-ranking-period="week" class="rounded-md px-3 py-1.5 text-slate-500 transition-colors">近 7 天</button>
+                <button id="bilibili-charging-growth-ranking-tab-month" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="bilibili-charging-growth-ranking-panel" data-bilibili-charging-ranking-period="month" class="rounded-md px-3 py-1.5 text-slate-500 transition-colors">近 30 天</button>
+            </div>
+        </div>
+        <div id="bilibili-charging-growth-ranking-panel" role="tabpanel" aria-labelledby="bilibili-charging-growth-ranking-tab-day" aria-live="polite" class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <div class="rounded-lg border border-slate-200 bg-white px-4 py-5 text-center text-sm text-slate-400 lg:col-span-2">正在加载排行榜...</div>
+        </div>
+    </div>
     <div class="overflow-x-auto border-t border-gray-100">
         <table class="w-full min-w-[900px]">
             <thead>
@@ -1142,7 +1158,7 @@ window.DEFER_DATA_TABLE_INIT = true;
 <script src="js/api.js?v=20250110-002"></script>
 <script src="js/data-table.js?v=20260516-002"></script>
 <script src="js/dashboard.js?v=20250110-001"></script>
-<script src="js/bilibili-charging-dashboard.js?v=20260727-001"></script>
+<script src="js/bilibili-charging-dashboard.js?v=20260908-growth-rankings"></script>
 <script src="js/new-main.js?v=20260516-002"></script>
 <script src="js/channel-management.js?v=20250110-003"></script>
 <script src="js/shared-navigation.js?v=20260516-003"></script>
