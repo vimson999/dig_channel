@@ -17,12 +17,8 @@ app = Flask(__name__)
 CORS(app)
 
 # 配置数据库
-import os
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-db_path = os.path.join(project_root, 'instance', 'youtube_tracker.db')
-app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SECRET_KEY'] = 'dev-secret-key'
+from config.base import BaseConfig
+app.config.from_object(BaseConfig)
 
 # 初始化数据库
 from models import db

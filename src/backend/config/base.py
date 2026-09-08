@@ -7,7 +7,7 @@
 
 import os
 import sys
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from sqlalchemy.pool import NullPool
 
 # 加载环境变量
@@ -152,7 +152,7 @@ def _postgres_engine_options(
 
 class BaseConfig:
     """基础配置类"""
-    
+
     # 应用基本配置
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-production'
     AUTH_MODE = os.environ.get('AUTH_MODE', 'production').strip().lower()
@@ -163,13 +163,33 @@ class BaseConfig:
     LOGIN_PORTAL_TOKEN = os.environ.get('LOGIN_PORTAL_TOKEN', '').strip()
     LOGIN_PORTAL_TTL_SECONDS = _int_env('LOGIN_PORTAL_TTL_SECONDS', 600, 60)
     PASSWORD_MIN_LENGTH = _int_env('PASSWORD_MIN_LENGTH', 14, 12)
-    
+
     # 数据库配置
     basedir = os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))  # 回到项目根目录
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or f'sqlite:///{os.path.join(basedir, "instance", "youtube_tracker.db")}'
+
+    # PostgreSQL配置
+    POSTGRES_USER = os.environ.get('POSTGRES_USER', 'postgres')
+    POSTGRES_PASSWORD = os.environ.get('POSTGRES_PASSWORD', 'password')
+    POSTGRES_HOST = os.environ.get('POSTGRES_HOST', 'localhost')
+    POSTGRES_PORT = os.environ.get('POSTGRES_PORT', '5432')
+    POSTGRES_DB = os.environ.get('POSTGRES_DB', 'youtube_analytics')
+    USE_POSTGRESQL = _bool_env('USE_POSTGRESQL', False)
+
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL')
+    if not SQLALCHEMY_DATABASE_URI:
+        if USE_POSTGRESQL:
+            SQLALCHEMY_DATABASE_URI = (
+                f'postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@'
+                f'{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}'
+            )
+        else:
+            SQLALCHEMY_DATABASE_URI = (
+                f'sqlite:///{os.path.join(basedir, "instance", "youtube_tracker.db")}'
+            )
+
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ECHO = False
-    
+
     # 数据库连接池配置。每个 Flask/Celery/scheduler 进程都有独立连接池，默认值要克制。
     SQLALCHEMY_ENGINE_OPTIONS = _postgres_engine_options(
         SQLALCHEMY_DATABASE_URI,
@@ -181,29 +201,39 @@ class BaseConfig:
         statement_timeout_ms=os.environ.get('DB_STATEMENT_TIMEOUT_MS'),
         pool_mode=_db_text_env('POOL_MODE', _db_pool_mode_default()),
     )
-    
+
     # Redis配置
     REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
     REDIS_PORT = int(os.environ.get('REDIS_PORT', 6379))
     REDIS_DB = int(os.environ.get('REDIS_DB', 0))
     REDIS_URL = os.environ.get('REDIS_URL') or f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
-    
+
     # YouTube API配置
     YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY')
+
+    # 自动修正: 如果检测到 YOUTUBE_API_KEY 是 Client Secret (以 GOCSPX 开头),
+    # 则尝试从 .env 文件重新读取
+    if YOUTUBE_API_KEY and YOUTUBE_API_KEY.startswith('GOCSPX'):
+        _env_path = os.path.join(basedir, '.env')
+        if os.path.exists(_env_path):
+            _env_vals = dotenv_values(_env_path)
+            if _env_vals.get('YOUTUBE_API_KEY') and not _env_vals.get('YOUTUBE_API_KEY').startswith('GOCSPX'):
+                YOUTUBE_API_KEY = _env_vals.get('YOUTUBE_API_KEY')
+
     GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
     GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
     GOOGLE_OAUTH_CONFIG_FILE = os.environ.get('GOOGLE_OAUTH_CONFIG_FILE')
     GOOGLE_API_KEYS = os.environ.get('GOOGLE_API_KEYS')
-    
+
     # Gemini API配置 (默认回退到 GOOGLE_API_KEYS)
     GOOGLE_GEMINI_KEYS = os.environ.get('GOOGLE_GEMINI_KEYS') or GOOGLE_API_KEYS
-    
+
     # Bilibili配置
     BILI_SESSDATA = os.environ.get('BILI_SESSDATA')
     BILI_BILI_JCT = os.environ.get('BILI_BILI_JCT')
     BILI_BUVID3 = os.environ.get('BILI_BUVID3')
     BILI_DEDEUSERID = os.environ.get('BILI_DEDEUSERID')
-    
+
     # JWT配置
     JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY') or SECRET_KEY
     JWT_ACCESS_TOKEN_EXPIRES = _int_env('JWT_ACCESS_TOKEN_EXPIRES', 900, 300)
@@ -217,11 +247,11 @@ class BaseConfig:
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = os.environ.get('SESSION_COOKIE_SAMESITE', 'Strict')
     SESSION_COOKIE_PATH = '/'
-    
+
     # 日志配置
     LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
     LOG_DIR = os.path.join(basedir, 'logs')
-    
+
     # 确保日志目录存在
     os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -229,7 +259,7 @@ class BaseConfig:
     _truthy = {'1', 'true', 'yes', 'on'}
     ENABLE_TTS_API = os.environ.get('ENABLE_TTS_API', 'false').lower() in _truthy
     ENABLE_MHTML_API = os.environ.get('ENABLE_MHTML_API', 'false').lower() in _truthy
-    
+
     # API限流配置
     RATELIMIT_STORAGE_URL = (
         os.environ.get('RATELIMIT_STORAGE_URL')
@@ -244,7 +274,7 @@ class BaseConfig:
     # 生产只允许显式同源列表。开发配置会覆盖为本机来源。
     CORS_ORIGINS = _csv_env('CORS_ORIGINS', '')
     TRUST_PROXY_HOPS = _int_env('TRUST_PROXY_HOPS', 1, 0)
-    
+
     # 调试配置
     DEBUG = False
     TESTING = False

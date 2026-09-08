@@ -82,6 +82,8 @@ celerybeat-schedule
 !.env.production.example
 .env.bak
 .secrets/
+config.yaml
+config.yml
 .venv
 env/
 venv/
@@ -201,3 +203,4 @@ src/backend/**/*.webp
 youtube_token.pickle
 client_secrets.json
 data/models/
+asset/
