@@ -75,6 +75,34 @@ class Video(db.Model):
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
             'url': f'https://www.youtube.com/watch?v={self.video_id}'
         }
+
+    def to_card_dict(self):
+        """Return only the fields rendered by the paginated video card list."""
+        import json
+
+        tags_list = []
+        if self.tags:
+            try:
+                tags_list = json.loads(self.tags)
+            except (TypeError, ValueError):
+                tags_list = []
+
+        return {
+            'id': self.id,
+            'video_id': self.video_id,
+            'channel_id': self.channel_id,
+            'channel_name': self.channel.name if self.channel else None,
+            'title': self.title,
+            'published_at': self.published_at.isoformat() if self.published_at else None,
+            'duration': self.duration,
+            'view_count': self.view_count,
+            'like_count': self.like_count,
+            'comment_count': self.comment_count,
+            'tags': tags_list,
+            'thumbnail_url': self.thumbnail_url,
+            'category_name': self.category_name,
+            'url': f'https://www.youtube.com/watch?v={self.video_id}',
+        }
     
     def get_engagement_rate(self):
         """计算互动率"""

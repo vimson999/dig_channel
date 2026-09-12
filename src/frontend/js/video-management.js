@@ -150,13 +150,34 @@ class VideoManager {
 
         // 收藏状态缓存
         this.favoriteStatus = new Map();
+        this.videoRequestGate = VideoPageUtils.createLatestRequestGate();
         
         this.init();
     }
     
     init() {
         this.setupEventListeners();
+        this.setupSearchableFilters();
         this.loadInitialData();
+    }
+
+    setupSearchableFilters() {
+        this.categoryCombobox = new SearchableCombobox(
+            document.getElementById('filter-category'),
+            {
+                searchPlaceholder: '搜索频道分类',
+                searchLabel: '搜索频道分类',
+                emptyText: '没有匹配的频道分类',
+            },
+        );
+        this.channelCombobox = new SearchableCombobox(
+            document.getElementById('filter-channel'),
+            {
+                searchPlaceholder: '搜索频道名称',
+                searchLabel: '搜索频道名称',
+                emptyText: '没有匹配的频道',
+            },
+        );
     }
     
     setupEventListeners() {
@@ -170,7 +191,7 @@ class VideoManager {
                     this.currentFilters.search = e.target.value.trim();
                     this.currentPage = 1;
                     this.loadVideos();
-                }, 500);
+                }, 250);
             });
         }
         
@@ -224,18 +245,18 @@ class VideoManager {
             // 先解析URL参数，设置初始筛选条件
             this.parseUrlParams();
             
-            // 并行加载数据
-            await Promise.all([
-                this.loadVideoStats(),
+            // 列表优先渲染；筛选元数据并行加载但不阻塞首屏卡片。
+            const filterDataPromise = Promise.all([
                 this.loadChannels(),
                 this.loadCategories(),
-                this.loadVideos()
             ]);
-            
+
+            await this.loadVideos();
+            hideStatusBar();
+            await filterDataPromise;
+
             // 如果有URL参数指定的频道，设置相应的UI状态
             this.applyUrlParams();
-            
-            hideStatusBar();
         } catch (error) {
             console.error('加载初始数据失败:', error);
             hideStatusBar();
@@ -273,6 +294,7 @@ class VideoManager {
             const filterCategory = document.getElementById('filter-category');
             if (filterCategory) {
                 filterCategory.value = this.currentFilters.category;
+                this.categoryCombobox.refresh();
                 this.handleCategoryChange(this.currentFilters.category, { triggerLoad: false, preserveChannel: true });
             }
         } else {
@@ -285,6 +307,7 @@ class VideoManager {
             const filterChannel = document.getElementById('filter-channel');
             if (filterChannel) {
                 filterChannel.value = this.currentFilters.channel;
+                this.channelCombobox.refresh();
             }
         }
     }
@@ -405,6 +428,7 @@ class VideoManager {
         if (currentValue) {
             select.value = currentValue;
         }
+        this.categoryCombobox?.refresh();
     }
 
     populateChannelOptions() {
@@ -443,6 +467,7 @@ class VideoManager {
                 this.currentFilters.channel = '';
             }
         }
+        this.channelCombobox?.refresh();
     }
 
     async loadChannels() {
@@ -470,6 +495,10 @@ class VideoManager {
     }
     
     async loadVideos() {
+        const requestId = this.videoRequestGate.next();
+        const container = document.getElementById('videos-grid');
+        container?.classList.add('is-loading');
+        container?.setAttribute('aria-busy', 'true');
         try {
             console.log('🔍 [VideoManager] 当前筛选条件:', this.currentFilters);
             
@@ -508,6 +537,8 @@ class VideoManager {
             const response = this.currentFilters.search 
                 ? await api.searchVideos(params)
                 : await api.getVideos(params);
+
+            if (!this.videoRequestGate.isCurrent(requestId)) return;
             
             if (response.success) {
                 // 调试输出
@@ -523,9 +554,15 @@ class VideoManager {
                 throw new Error(response.message);
             }
         } catch (error) {
+            if (!this.videoRequestGate.isCurrent(requestId)) return;
             console.error('加载视频列表失败:', error);
             this.renderErrorState();
             showToast('加载视频列表失败：' + error.message, 'error');
+        } finally {
+            if (this.videoRequestGate.isCurrent(requestId)) {
+                container?.classList.remove('is-loading');
+                container?.setAttribute('aria-busy', 'false');
+            }
         }
     }
     
@@ -587,17 +624,14 @@ class VideoManager {
                 const videoData = this.findVideoDataById(videoId);
                 console.log('找到的视频数据:', videoData);
                 if (videoData) {
-                    // 适配字段名称以匹配收藏模型
-                    const favoriteData = {
-                        ...videoData,
-                        channel_title: videoData.channel_name || videoData.channel_title || '',
-                        channel_id: videoData.channel_id || '',
-                        channel_subscriber_count: videoData.channel_subscriber_count || 0,
-                        channel_video_count: videoData.channel_video_count || 0,
-                        channel_view_count: videoData.channel_view_count || 0,
-                        channel_thumbnail_url: videoData.channel_thumbnail_url || '',
-                        channel_published_at: videoData.channel_published_at || null
-                    };
+                    // 列表使用轻量卡片载荷；收藏时按需补取完整描述等冷字段。
+                    let detailData = {};
+                    if (!Object.prototype.hasOwnProperty.call(videoData, 'description')) {
+                        const detailResponse = await api.getVideo(videoData.id);
+                        if (!detailResponse.success) throw new Error(detailResponse.message);
+                        detailData = detailResponse.data.video || {};
+                    }
+                    const favoriteData = VideoPageUtils.buildFavoritePayload(videoData, detailData);
                     
                     console.log('发送收藏数据:', favoriteData);
                     const response = await api.addFavorite(favoriteData);
@@ -664,7 +698,7 @@ class VideoManager {
         
         container.innerHTML = `
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                ${videos.map(video => this.renderVideoCard(video)).join('')}
+                ${videos.map((video, index) => this.renderVideoCard(video, index)).join('')}
             </div>
         `;
         
@@ -673,7 +707,7 @@ class VideoManager {
         this.loadFavoriteStatus(videoIds);
     }
     
-    renderVideoCard(video) {
+    renderVideoCard(video, index = 0) {
         const publishedDate = new Date(video.published_at);
         const formattedDate = publishedDate.toLocaleDateString('zh-CN', {
             year: 'numeric',
@@ -687,6 +721,11 @@ class VideoManager {
                 <div class="relative">
                     <img src="${video.thumbnail_url || '/images/video-placeholder.jpg'}" 
                          alt="${video.title}" 
+                         width="480"
+                         height="270"
+                         loading="${index < 4 ? 'eager' : 'lazy'}"
+                         decoding="async"
+                         fetchpriority="${index < 4 ? 'high' : 'low'}"
                          class="w-full h-48 object-cover">
                     <div class="absolute bottom-2 right-2 bg-black/80 text-white px-2 py-1 rounded text-xs font-medium">
                         ${this.formatDuration(video.duration)}
@@ -1075,6 +1114,7 @@ function clearFilters() {
         order: 'desc'
     };
     videoManager.currentPage = 1;
+    videoManager.categoryCombobox?.refresh();
     // 重新渲染频道选项，恢复“所有频道”视图
     videoManager.handleCategoryChange('', { triggerLoad: false });
     videoManager.loadVideos();
@@ -1110,7 +1150,6 @@ async function cleanShortVideos() {
             // 刷新视频列表
             setTimeout(() => {
                 videoManager.loadVideos();
-                videoManager.loadVideoStats();
             }, 1000);
         } else {
             showToast('清理失败: ' + response.message, 'error');
@@ -1252,7 +1291,6 @@ async function startVideoSync() {
             // 刷新视频列表
             setTimeout(() => {
                 videoManager.loadVideos();
-                videoManager.loadVideoStats();
             }, 1000);
             
         } else {

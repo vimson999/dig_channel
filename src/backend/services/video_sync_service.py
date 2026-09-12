@@ -35,6 +35,21 @@ VIDEO_UPDATE_COLUMNS = (
     Video.description,
 )
 
+VIDEO_CARD_COLUMNS = (
+    Video.id,
+    Video.video_id,
+    Video.channel_id,
+    Video.title,
+    Video.published_at,
+    Video.duration,
+    Video.view_count,
+    Video.like_count,
+    Video.comment_count,
+    Video.tags,
+    Video.thumbnail_url,
+    Video.category_name,
+)
+
 class VideoSyncService:
     def __init__(self):
         self.youtube_api = YouTubeAPI()
@@ -539,7 +554,10 @@ class VideoSyncService:
                         'data': {}
                     }
             
-            query = Video.query.options(joinedload(Video.channel)).filter_by(channel_id=channel_id, is_active=True)
+            query = Video.query.options(
+                load_only(*VIDEO_CARD_COLUMNS),
+                joinedload(Video.channel).load_only(Channel.id, Channel.name),
+            ).filter_by(channel_id=channel_id, is_active=True)
             
             # 搜索条件
             if search:
@@ -572,7 +590,7 @@ class VideoSyncService:
                 error_out=False
             )
             
-            videos = [video.to_dict() for video in pagination.items]
+            videos = [video.to_card_dict() for video in pagination.items]
             
             return {
                 'success': True,
@@ -604,7 +622,10 @@ class VideoSyncService:
         """搜索视频"""
         try:
             # 构建查询
-            query = Video.query.options(joinedload(Video.channel)).join(Channel).filter(Video.is_active == True)
+            query = Video.query.options(
+                load_only(*VIDEO_CARD_COLUMNS),
+                joinedload(Video.channel).load_only(Channel.id, Channel.name),
+            ).join(Channel).filter(Video.is_active == True)
             
             # 用户数据隔离
             if user_id is not None:
@@ -650,7 +671,7 @@ class VideoSyncService:
                 error_out=False
             )
             
-            videos = [video.to_dict() for video in pagination.items]
+            videos = [video.to_card_dict() for video in pagination.items]
             
             return {
                 'success': True,

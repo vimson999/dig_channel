@@ -2,6 +2,7 @@
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timedelta
 import logging
+from sqlalchemy.orm import load_only
 
 from services.video_sync_service import VideoSyncService
 from services.optimized_video_sync_service import OptimizedVideoSyncService
@@ -394,16 +395,16 @@ def get_channels_with_video_count():
             query = query.filter_by(is_active=True)
         
         # 查询频道及其视频数量
-        channels = query.outerjoin(Video)\
+        channels = query.options(
+            load_only(Channel.id, Channel.name, Channel.category)
+        ).outerjoin(Video)\
             .add_columns(func.count(Video.id).label('video_count'))\
             .group_by(Channel.id)\
             .all()
         
         channels_data = []
         for channel, video_count in channels:
-            channel_dict = channel.to_dict()
-            channel_dict['video_count'] = video_count
-            channels_data.append(channel_dict)
+            channels_data.append(channel.to_video_filter_dict(video_count=video_count))
         
         return jsonify({
             'success': True,
