@@ -305,11 +305,13 @@ class ContentPipelineSubmissionQueryDisciplineTest(unittest.TestCase):
                 output_dir=str(output_dir),
                 options={"enabled": True},
                 source_task_id="clean-task-redelivery",
+                user_id="user-1",
             )
 
         self.assertEqual(second["id"], first["id"])
         self.assertTrue(second["result"]["reused_existing"])
         self.assertEqual(dispatch_mock.call_count, 1)
+        self.assertEqual(db.session.get(PublicationTask, first["id"]).user_id, "user-1")
         self.assertEqual(
             PublicationTask.query.filter_by(
                 feature="zsxq_clean_output_publish",

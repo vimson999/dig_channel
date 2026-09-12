@@ -128,6 +128,9 @@ class PublicationTask(db.Model):
     content_clean_success_count = db.Column(db.Integer, nullable=True)
     content_clean_failed_count = db.Column(db.Integer, nullable=True)
     content_clean_message = db.Column(db.Text, nullable=True)
+    content_submission_channel = db.Column(db.String(40), nullable=True)
+    content_web_submission_id = db.Column(db.String(36), nullable=True)
+    content_submission_input_mode = db.Column(db.String(16), nullable=True)
 
     # Publisher vertical-video and Doubao TTS child projections. These fields
     # keep child polling, cache matching, and artifact lookup off params/result.
@@ -279,6 +282,8 @@ class PublicationTask(db.Model):
         )
         if result_loaded:
             self._sync_content_clean_projection(result)
+        if params_loaded:
+            self._sync_content_submission_projection(params)
         if result_loaded:
             self._sync_workflow_state_projection(result)
         return self
@@ -517,6 +522,24 @@ class PublicationTask(db.Model):
         )
         self.content_clean_failed_count = _non_negative_int(failed_count)
         self.content_clean_message = _compact_text(result.get('message'))
+
+    def _sync_content_submission_projection(self, params):
+        if _loaded_model_attr(self, 'feature') not in {'content_pdf_clean', 'content_audio_clean'}:
+            return
+        pipeline = params.get('content_pipeline') if isinstance(params.get('content_pipeline'), dict) else {}
+        metadata = pipeline.get('metadata') if isinstance(pipeline.get('metadata'), dict) else {}
+        self.content_submission_channel = _compact_text(
+            metadata.get('submission_channel'),
+            40,
+        )
+        self.content_web_submission_id = _compact_text(
+            metadata.get('web_submission_id'),
+            36,
+        )
+        self.content_submission_input_mode = _compact_text(
+            metadata.get('input_mode'),
+            16,
+        )
 
     def _sync_workflow_state_projection(self, result):
         waiting_child = result.get('waiting_child') if isinstance(result.get('waiting_child'), dict) else {}

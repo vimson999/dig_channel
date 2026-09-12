@@ -413,3 +413,42 @@ final result: passed
 - 单元测试：`tests/unit/test_report_audio_workflow_frontend_contract.py` 共 11 项通过。
 
 final result: passed
+
+---
+
+# Design QA: 网页内容投递历史
+
+- source path: `/var/folders/dd/51s7f6gs6vz30qy285xd_b_80000gn/T/codex-clipboard-04b9fde8-51cb-4b76-bfd2-1cafff641388.png`
+- implementation screenshot path/artifact: Codex in-app browser deliverable at `http://127.0.0.1:8891/content-pipeline-submit-qa.html`
+- viewport: desktop `1456 x 991`; responsive check `390 x 844`; side-by-side comparison canvas `2400 x 820`
+- dimensions/density: reference `1456 x 991`; implementation uses the same `1456 x 991` viewport at 1x CSS density
+- same-state comparison evidence: `http://127.0.0.1:8891/__compare.html` renders the reference (browser chrome cropped) and implementation side by side at the same scale, both showing the successful-submission state
+- focused region: right rail below “本次结果”, including “投递历史”, status chips, progress, PDF/MP3 child rows, refresh, and progressive loading
+
+## Findings
+
+- The existing header, page width, two-column grid, card radius, border color, spacing, and success-result state remain aligned with the supplied screenshot.
+- The new history card stays inside the existing right rail and does not shift or resize the left submission workflow.
+- Pending, processing, completed, partial-failure, and failed states are visually distinct without introducing a new color language.
+- Per-media success/failure counts remain readable in the narrow desktop rail and in the stacked mobile layout.
+- Mobile layout stays single-column with no horizontal clipping at `390 x 844`.
+
+## Iteration history
+
+1. Added the right-rail history card with compact grouped submissions and status markers.
+2. Added paging, manual refresh, and automatic refresh for active submissions.
+3. Preserved already loaded pages during refresh and hid “加载更多” once the full list had been fetched.
+4. Added per-media success/failure counts and a visible partial-failure state after backend review.
+
+## Primary interactions
+
+- Manual refresh: passed.
+- Load more: passed; list expanded from 4 to 6 records.
+- Refresh after loading all: passed; 6 records remained and “加载更多” stayed hidden.
+- Automatic refresh eligibility for pending/processing records: covered by active-state contract and browser state.
+
+## Console errors
+
+- No new errors were emitted by the feature during the final desktop/mobile verification. The browser log only retained three earlier shared-navigation `MutationObserver` errors from before the final verification run.
+
+final result: passed

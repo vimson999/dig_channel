@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import case, text
+from sqlalchemy import case, or_, text
 
 from models import db
 from models.task import PublicationTask
@@ -58,7 +58,7 @@ def submit_publish_clean_output_task(
         file_type=normalized_type,
     )
 
-    existing = _existing_publish_child(source_task_id)
+    existing = _existing_publish_child(source_task_id, user_id=user_id)
     if existing is not None:
         # The caller may be a clean-task redelivery after the child insert or
         # broker dispatch committed but the parent acknowledgement was lost.
@@ -190,7 +190,7 @@ def submit_publish_clean_output_task(
     return task_snapshot
 
 
-def _existing_publish_child(source_task_id):
+def _existing_publish_child(source_task_id, *, user_id=None):
     source_key = str(source_task_id or "").strip()
     if not source_key:
         return None
@@ -210,7 +210,7 @@ def _existing_publish_child(source_task_id):
             {"lock_key": lock_key},
         )
 
-    row = (
+    query = (
         db.session.query(
             PublicationTask.id,
             PublicationTask.celery_task_id,
@@ -218,6 +218,7 @@ def _existing_publish_child(source_task_id):
             PublicationTask.current_step,
             PublicationTask.progress,
             PublicationTask.error_message,
+            PublicationTask.user_id,
             PublicationTask.created_at,
             PublicationTask.completed_at,
         )
@@ -225,7 +226,18 @@ def _existing_publish_child(source_task_id):
             PublicationTask.feature == "zsxq_clean_output_publish",
             PublicationTask.source_task_id == source_key,
         )
-        .order_by(
+    )
+    owner_id = str(user_id or "").strip()
+    if owner_id:
+        query = query.filter(
+            or_(
+                PublicationTask.user_id == owner_id,
+                PublicationTask.user_id.is_(None),
+            )
+        )
+
+    row = (
+        query.order_by(
             case(
                 (
                     PublicationTask.status.in_(("pending", "processing", "completed")),
@@ -240,6 +252,15 @@ def _existing_publish_child(source_task_id):
     )
     if row is None:
         return None
+
+    if owner_id and not row.user_id:
+        PublicationTask.query.filter(
+            PublicationTask.id == str(row.id),
+            PublicationTask.user_id.is_(None),
+        ).update(
+            {PublicationTask.user_id: owner_id},
+            synchronize_session=False,
+        )
 
     status = str(row.status or "pending")
     queued = status not in {"failed", "canceled", "cancelled"}

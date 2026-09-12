@@ -1597,8 +1597,17 @@ class DbProjectionDisciplineTest(unittest.TestCase):
         )[0]
         self.assertIn("task_id", enqueue)
         self.assertIn("source_task_id=task_key", enqueue)
+        self.assertIn("user_id=user_id", enqueue)
         self.assertNotIn("task.result", enqueue)
         self.assertNotIn("task.id", enqueue)
+
+        for function_name, next_name in (
+            ("_run_pdf_clean_task_impl_guarded", "run_audio_clean_task"),
+            ("_run_audio_clean_task_impl_guarded", "_run_content_pipeline_task_with_guard"),
+        ):
+            body = text.split(f"def {function_name}(", 1)[1].split(f"def {next_name}(", 1)[0]
+            self.assertIn("task_user_id = task.user_id", body)
+            self.assertIn("user_id=task_user_id", body)
 
     def test_browser_progress_callbacks_do_not_rewrite_result_json(self):
         for relative in ("tasks/doubao_browser_tts.py", "tasks/gemini_browser.py"):

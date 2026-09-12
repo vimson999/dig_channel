@@ -5,8 +5,10 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from flask import Blueprint, current_app, jsonify, request
+from sqlalchemy import func
 from sqlalchemy.orm import load_only
 
+from models import db
 from models.task import PublicationTask
 from services.content_pipeline.audio_clean_task_service import submit_audio_clean_task as enqueue_audio_clean_task
 from services.content_pipeline.pdf_cleaner_adapter import PdfCleanerAdapter
@@ -58,6 +60,39 @@ TASK_PAYLOAD_COLUMNS = (
     PublicationTask.result,
     PublicationTask.error_message,
     PublicationTask.feature,
+    PublicationTask.created_at,
+    PublicationTask.updated_at,
+    PublicationTask.completed_at,
+)
+
+WEB_SUBMISSION_HISTORY_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.error_message,
+    PublicationTask.feature,
+    PublicationTask.user_id,
+    PublicationTask.task_title,
+    PublicationTask.content_clean_files_count,
+    PublicationTask.content_clean_success_count,
+    PublicationTask.content_clean_failed_count,
+    PublicationTask.content_submission_channel,
+    PublicationTask.content_web_submission_id,
+    PublicationTask.content_submission_input_mode,
+    PublicationTask.created_at,
+    PublicationTask.updated_at,
+    PublicationTask.completed_at,
+)
+
+PUBLISH_HISTORY_COLUMNS = (
+    PublicationTask.id,
+    PublicationTask.status,
+    PublicationTask.current_step,
+    PublicationTask.progress,
+    PublicationTask.error_message,
+    PublicationTask.feature,
+    PublicationTask.source_task_id,
     PublicationTask.created_at,
     PublicationTask.updated_at,
     PublicationTask.completed_at,
@@ -198,6 +233,14 @@ def submit_web_content_pipeline(current_user):
             tasks[kind] = _web_submission_task_summary(task)
         except Exception as exc:
             logger.exception("网页投递 %s 清洗任务提交失败 | submission=%s", kind, submission_id)
+            _record_failed_web_submission_task(
+                kind=kind,
+                title=task_titles[kind],
+                user_id=getattr(current_user, "id", None),
+                metadata=metadata,
+                files_count=len(files),
+                error=exc,
+            )
             errors.append({"kind": kind, "error": str(exc)})
 
     response_data = {
@@ -224,6 +267,305 @@ def submit_web_content_pipeline(current_user):
             "data": response_data,
         }
     ), 500
+
+
+@bp.route("/web-submissions", methods=["GET"])
+@require_login
+def list_web_content_pipeline_submissions(current_user):
+    """Return recent browser submissions grouped across PDF and MP3 tasks."""
+    try:
+        limit = int(request.args.get("limit") or 20)
+    except (TypeError, ValueError):
+        limit = 20
+    limit = max(1, min(50, limit))
+    try:
+        offset = int(request.args.get("offset") or 0)
+    except (TypeError, ValueError):
+        offset = 0
+    offset = max(0, offset)
+    user_id = str(getattr(current_user, "id", "") or "").strip()
+
+    latest_created = func.max(PublicationTask.created_at)
+    submission_rows = (
+        db.session.query(
+            PublicationTask.content_web_submission_id.label("submission_id"),
+            latest_created.label("submitted_at"),
+        )
+        .filter(
+            PublicationTask.content_submission_channel == WEB_SUBMISSION_CHANNEL,
+            PublicationTask.content_web_submission_id.isnot(None),
+            PublicationTask.user_id == user_id,
+        )
+        .group_by(PublicationTask.content_web_submission_id)
+        .order_by(
+            latest_created.desc(),
+            PublicationTask.content_web_submission_id.desc(),
+        )
+        .offset(offset)
+        .limit(limit + 1)
+        .all()
+    )
+    has_more = len(submission_rows) > limit
+    submission_rows = submission_rows[:limit]
+    submission_ids = [str(row.submission_id) for row in submission_rows]
+    if not submission_ids:
+        return jsonify(
+            {
+                "success": True,
+                "data": {
+                    "items": [],
+                    "has_more": False,
+                    "limit": limit,
+                    "next_offset": None,
+                },
+            }
+        )
+
+    clean_tasks = (
+        PublicationTask.query.options(load_only(*WEB_SUBMISSION_HISTORY_COLUMNS))
+        .filter(
+            PublicationTask.content_web_submission_id.in_(submission_ids),
+            PublicationTask.content_submission_channel == WEB_SUBMISSION_CHANNEL,
+            PublicationTask.user_id == user_id,
+        )
+        .order_by(PublicationTask.created_at.desc(), PublicationTask.id.desc())
+        .all()
+    )
+    clean_task_ids = [str(task.id) for task in clean_tasks]
+    publish_tasks = (
+        PublicationTask.query.options(load_only(*PUBLISH_HISTORY_COLUMNS))
+        .filter(
+            PublicationTask.feature == "zsxq_clean_output_publish",
+            PublicationTask.source_task_id.in_(clean_task_ids),
+            PublicationTask.user_id == user_id,
+        )
+        .order_by(PublicationTask.created_at.desc(), PublicationTask.id.desc())
+        .all()
+    )
+    publish_by_source = {}
+    for task in publish_tasks:
+        publish_by_source.setdefault(str(task.source_task_id), task)
+
+    tasks_by_submission = {submission_id: [] for submission_id in submission_ids}
+    for task in clean_tasks:
+        submission_id = str(task.content_web_submission_id or "")
+        if submission_id in tasks_by_submission:
+            tasks_by_submission[submission_id].append(task)
+
+    items = []
+    for row in submission_rows:
+        submission_id = str(row.submission_id)
+        items.append(
+            _web_submission_history_item(
+                submission_id,
+                row.submitted_at,
+                tasks_by_submission.get(submission_id) or [],
+                publish_by_source,
+            )
+        )
+    return jsonify(
+        {
+            "success": True,
+            "data": {
+                "items": items,
+                "has_more": has_more,
+                "limit": limit,
+                "next_offset": offset + len(submission_rows) if has_more else None,
+            },
+        }
+    )
+
+
+def _web_submission_history_item(
+    submission_id,
+    submitted_at,
+    clean_tasks,
+    publish_by_source,
+):
+    kind_by_feature = {
+        "content_pdf_clean": "pdf",
+        "content_audio_clean": "mp3",
+    }
+    task_items = []
+    for clean_task in clean_tasks:
+        kind = kind_by_feature.get(str(clean_task.feature or ""))
+        if not kind:
+            continue
+        publish_task = publish_by_source.get(str(clean_task.id))
+        status_source = (
+            publish_task
+            if str(clean_task.status or "").lower() == "completed" and publish_task
+            else clean_task
+        )
+        item_status = _web_submission_task_status(clean_task, publish_task)
+        task_items.append(
+            {
+                "task_id": str(clean_task.id),
+                "kind": kind,
+                "status": item_status,
+                "progress": max(0, min(100, int(status_source.progress or 0))),
+                "current_step": str(status_source.current_step or ""),
+                "publish_task_id": str(publish_task.id) if publish_task else None,
+                "clean_status": _normalized_history_status(clean_task.status),
+                "publish_status": (
+                    _normalized_history_status(publish_task.status)
+                    if publish_task
+                    else None
+                ),
+                "files_count": int(clean_task.content_clean_files_count or 0),
+                "success_count": int(clean_task.content_clean_success_count or 0),
+                "failed_count": int(clean_task.content_clean_failed_count or 0),
+                "error": str(status_source.error_message or "") or None,
+                "updated_at": _history_datetime(status_source.updated_at),
+            }
+        )
+
+    task_items.sort(key=lambda item: 0 if item["kind"] == "pdf" else 1)
+    statuses = [item["status"] for item in task_items]
+    return {
+        "submission_id": str(submission_id),
+        "submitted_at": _history_datetime(submitted_at),
+        "input_mode": str(
+            next(
+                (
+                    task.content_submission_input_mode
+                    for task in clean_tasks
+                    if task.content_submission_input_mode
+                ),
+                "upload",
+            )
+        ),
+        "media_types": [item["kind"] for item in task_items],
+        "status": _aggregate_history_status(statuses),
+        "progress": (
+            round(sum(item["progress"] for item in task_items) / len(task_items))
+            if task_items
+            else 0
+        ),
+        "tasks": task_items,
+    }
+
+
+def _normalized_history_status(value):
+    status = str(value or "pending").strip().lower()
+    if status in {"cancelled", "canceled"}:
+        return "failed"
+    if status in {"pending", "processing", "completed", "partial_failed", "failed"}:
+        return status
+    return "processing"
+
+
+def _web_submission_task_status(clean_task, publish_task):
+    clean_status = _normalized_history_status(clean_task.status)
+    failed_count = max(0, int(clean_task.content_clean_failed_count or 0))
+    if clean_status != "completed":
+        return clean_status
+
+    if publish_task is not None:
+        publish_status = _normalized_history_status(publish_task.status)
+        if publish_status in {"pending", "processing", "failed"}:
+            return publish_status
+    return "partial_failed" if failed_count else "completed"
+
+
+def _aggregate_history_status(statuses):
+    if not statuses:
+        return "pending"
+    if all(status == "completed" for status in statuses):
+        return "completed"
+    if all(status == "failed" for status in statuses):
+        return "failed"
+    if "processing" in statuses:
+        return "processing"
+    if "pending" in statuses:
+        return "pending"
+    if "failed" in statuses or "partial_failed" in statuses:
+        return "partial_failed"
+    return "pending"
+
+
+def _record_failed_web_submission_task(
+    *,
+    kind,
+    title,
+    user_id,
+    metadata,
+    files_count,
+    error,
+):
+    """Persist a compact receipt when task creation or broker handoff raises."""
+    feature_by_kind = {
+        "pdf": "content_pdf_clean",
+        "mp3": "content_audio_clean",
+    }
+    feature = feature_by_kind.get(str(kind or "").lower())
+    submission_id = str((metadata or {}).get("web_submission_id") or "").strip()
+    owner_id = str(user_id or "").strip()
+    if not feature or not submission_id or not owner_id:
+        return None
+
+    db.session.rollback()
+    try:
+        existing = (
+            PublicationTask.query.options(load_only(*WEB_SUBMISSION_HISTORY_COLUMNS))
+            .filter(
+                PublicationTask.feature == feature,
+                PublicationTask.user_id == owner_id,
+                PublicationTask.content_submission_channel == WEB_SUBMISSION_CHANNEL,
+                PublicationTask.content_web_submission_id == submission_id,
+            )
+            .order_by(PublicationTask.created_at.desc(), PublicationTask.id.desc())
+            .first()
+        )
+        if existing is not None:
+            return existing
+
+        count = max(0, int(files_count or 0))
+        clean_key = "pdf_clean" if kind == "pdf" else "audio_clean"
+        message = str(error or "清洗任务提交失败")
+        task = PublicationTask(
+            status="failed",
+            current_step="submit_failed",
+            progress=0,
+            completed_at=datetime.utcnow(),
+            error_message=message,
+            params={
+                "feature": feature,
+                "user_id": owner_id,
+                "content_pipeline": {
+                    "title": title,
+                    "trigger": "web_upload",
+                    "metadata": dict(metadata or {}),
+                    "auto_publish": {"enabled": True},
+                    clean_key: {"files": [], "source_root": None},
+                },
+            },
+            result={
+                "files_count": count,
+                "success_count": 0,
+                "failed_count": count,
+                "message": "网页投递任务创建失败",
+            },
+        )
+        db.session.add(task)
+        db.session.commit()
+        return task
+    except Exception:
+        db.session.rollback()
+        logger.exception(
+            "网页投递失败回执持久化失败 | submission=%s kind=%s",
+            submission_id,
+            kind,
+        )
+        return None
+
+
+def _history_datetime(value):
+    if not value:
+        return None
+    if value.tzinfo is None:
+        return f"{value.isoformat()}Z"
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _stage_web_submission_files(

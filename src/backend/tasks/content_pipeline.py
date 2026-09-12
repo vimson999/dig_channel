@@ -164,6 +164,7 @@ def _run_pdf_clean_task_impl_guarded(task_id, celery_task=None):
             logger.error("PDF clean task not found: %s", task_id)
             return False
         task_key = str(task.id)
+        task_user_id = task.user_id
         if celery_task is not None:
             guard_publication_task_start(
                 celery_task,
@@ -275,6 +276,7 @@ def _run_pdf_clean_task_impl_guarded(task_id, celery_task=None):
                 result=merged_result,
                 options=pipeline.get("auto_publish") or {},
                 pipeline=pipeline,
+                user_id=task_user_id,
                 source_refs=source_refs,
                 registered_output_paths=_registered_cleaned_paths(merged_result),
             )
@@ -374,6 +376,7 @@ def _run_audio_clean_task_impl_guarded(task_id, celery_task=None):
             logger.error("Audio clean task not found: %s", task_id)
             return False
         task_key = str(task.id)
+        task_user_id = task.user_id
         if celery_task is not None:
             guard_publication_task_start(
                 celery_task,
@@ -464,6 +467,7 @@ def _run_audio_clean_task_impl_guarded(task_id, celery_task=None):
                 result=merged_result,
                 options=pipeline.get("auto_publish") or {},
                 pipeline=pipeline,
+                user_id=task_user_id,
                 source_refs=source_refs,
                 registered_output_paths=_registered_cleaned_paths(merged_result),
             )
@@ -783,6 +787,7 @@ def _enqueue_auto_publish_task(
     result,
     options,
     pipeline,
+    user_id=None,
     source_refs=None,
     registered_output_paths=None,
 ):
@@ -804,6 +809,7 @@ def _enqueue_auto_publish_task(
             approved_paths=list(registered_output_paths or []),
             options=options,
             source_task_id=task_key,
+            user_id=user_id,
             trigger=options.get("trigger") or "content_pipeline_clean_complete",
             metadata={
                 "content_pipeline_task_id": task_key,

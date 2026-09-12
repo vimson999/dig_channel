@@ -4,12 +4,23 @@
         ['.mp3', 'mp3'],
     ]);
     const WEB_SUBMIT_ENDPOINT = '/content-pipeline/web-submit';
+    const WEB_SUBMISSION_HISTORY_ENDPOINT = '/content-pipeline/web-submissions';
+    const HISTORY_PAGE_SIZE = 20;
+    const HISTORY_REFRESH_INTERVAL_MS = 10000;
 
     const state = {
         mode: 'folder',
         files: [],
         skipped: [],
         submitting: false,
+        history: {
+            items: [],
+            limit: HISTORY_PAGE_SIZE,
+            nextOffset: 0,
+            hasMore: false,
+            loading: false,
+            error: '',
+        },
     };
 
     const els = {};
@@ -18,6 +29,11 @@
         bindElements();
         bindEvents();
         render();
+        renderSubmissionHistory();
+        loadSubmissionHistory();
+        window.setInterval(() => {
+            if (!document.hidden && hasActiveSubmission()) loadSubmissionHistory();
+        }, HISTORY_REFRESH_INTERVAL_MS);
     });
 
     function bindElements() {
@@ -26,6 +42,8 @@
             'folder-picker-panel', 'file-picker-panel', 'folder-input', 'file-input',
             'include-subdirectories', 'selection-badge', 'preview-summary', 'file-preview',
             'clear-selection-btn', 'submit-btn', 'submit-help', 'result-panel',
+            'submission-history', 'history-summary', 'history-refresh-btn',
+            'history-load-more-btn',
         ].forEach((id) => {
             els[toCamel(id)] = document.getElementById(id);
         });
@@ -39,6 +57,8 @@
         els.includeSubdirectories?.addEventListener('change', render);
         els.clearSelectionBtn?.addEventListener('click', clearSelection);
         els.submitBtn?.addEventListener('click', submitSelection);
+        els.historyRefreshBtn?.addEventListener('click', () => loadSubmissionHistory());
+        els.historyLoadMoreBtn?.addEventListener('click', () => loadSubmissionHistory({ append: true }));
     }
 
     function setMode(mode) {
@@ -185,6 +205,7 @@
             renderResult(payload.data || {});
             showNotice(payload.data?.errors?.length ? 'warning' : 'success', '投递已提交', payload.message || '文件已进入统一清洗发布链路。');
             clearSelection();
+            loadSubmissionHistory();
         } catch (error) {
             showNotice('error', '投递失败', error.message || String(error));
             els.resultPanel.innerHTML = `<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-700">${escapeHtml(error.message || String(error))}</div>`;
@@ -212,6 +233,175 @@
                 ${errors.map((item) => `<div class="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">${escapeHtml(item.kind || '未知类型')}：${escapeHtml(item.error || '提交失败')}</div>`).join('')}
             </div>
         `;
+    }
+
+    async function loadSubmissionHistory({ append = false } = {}) {
+        if (state.history.loading) return;
+        const hadHistoryItems = state.history.items.length > 0;
+        const previousHasMore = state.history.hasMore;
+        state.history.loading = true;
+        state.history.error = '';
+        renderSubmissionHistory();
+        try {
+            const offset = append ? state.history.nextOffset : 0;
+            const response = await fetch(`${apiBaseUrl()}${WEB_SUBMISSION_HISTORY_ENDPOINT}?limit=${state.history.limit}&offset=${offset}`, {
+                credentials: 'include',
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok || payload.success === false) {
+                throw new Error(payload.message || `HTTP ${response.status}`);
+            }
+            const fetchedItems = Array.isArray(payload.data?.items) ? payload.data.items : [];
+            const combinedItems = append
+                ? [...state.history.items, ...fetchedItems]
+                : [...fetchedItems, ...state.history.items];
+            state.history.items = combinedItems.filter((item, index, items) => (
+                items.findIndex((candidate) => candidate?.submission_id === item?.submission_id) === index
+            ));
+            state.history.hasMore = append || !hadHistoryItems
+                ? Boolean(payload.data?.has_more)
+                : previousHasMore && Boolean(payload.data?.has_more);
+            const responseNextOffset = Number(payload.data?.next_offset || 0);
+            state.history.nextOffset = append
+                ? responseNextOffset
+                : Math.max(state.history.items.length, responseNextOffset);
+        } catch (error) {
+            state.history.error = error.message || String(error);
+        } finally {
+            state.history.loading = false;
+            renderSubmissionHistory();
+        }
+    }
+
+    function renderSubmissionHistory() {
+        if (!els.submissionHistory) return;
+        const history = state.history;
+        const activeCount = history.items.filter((item) => ['pending', 'processing'].includes(item?.status)).length;
+        els.historyRefreshBtn.disabled = history.loading;
+        els.historyLoadMoreBtn.disabled = history.loading;
+        els.historyLoadMoreBtn.classList.toggle('hidden', !history.hasMore);
+        els.historySummary.textContent = activeCount
+            ? `${activeCount} 条处理中，将自动刷新`
+            : `仅显示通过本页面提交的记录${history.items.length ? ` · 最近 ${history.items.length} 条` : ''}`;
+
+        if (history.loading && !history.items.length) {
+            els.submissionHistory.innerHTML = `<div class="animate-pulse space-y-3" aria-label="正在加载投递历史">
+                <div class="h-28 rounded-xl bg-slate-100"></div>
+                <div class="h-28 rounded-xl bg-slate-100"></div>
+            </div>`;
+            return;
+        }
+        if (history.error && !history.items.length) {
+            els.submissionHistory.innerHTML = `<div class="rounded-xl border border-amber-200 bg-amber-50 p-4 text-center text-xs leading-5 text-amber-800">
+                <i class="fas fa-triangle-exclamation mr-1.5"></i>暂时无法加载投递历史<br>
+                <span class="text-amber-700">${escapeHtml(history.error)}</span>
+            </div>`;
+            return;
+        }
+        if (!history.items.length) {
+            els.submissionHistory.innerHTML = `<div class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center">
+                <i class="fas fa-clock-rotate-left text-xl text-slate-300"></i>
+                <div class="mt-2 text-sm font-bold text-slate-600">暂无投递记录</div>
+                <div class="mt-1 text-xs text-slate-400">从左侧提交 PDF 或 MP3 后会出现在这里。</div>
+            </div>`;
+            return;
+        }
+
+        const warning = history.error
+            ? `<div class="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">刷新失败，当前显示上次结果。</div>`
+            : '';
+        els.submissionHistory.innerHTML = `${warning}${history.items.map(renderHistoryItem).join('')}`;
+    }
+
+    function renderHistoryItem(item) {
+        const status = historyStatusMeta(item?.status);
+        const inputMode = item?.input_mode === 'folder' ? '文件夹投递' : '文件上传';
+        const inputIcon = item?.input_mode === 'folder' ? 'fa-folder-tree' : 'fa-cloud-arrow-up';
+        const tasks = Array.isArray(item?.tasks) ? item.tasks : [];
+        const progress = Math.max(0, Math.min(100, Number(item?.progress || 0)));
+        const taskRows = tasks.map((task) => {
+            const taskStatus = historyStatusMeta(task?.status);
+            const kind = task?.kind === 'pdf' ? 'PDF' : 'MP3';
+            const kindTone = task?.kind === 'pdf'
+                ? 'border-red-100 bg-red-50 text-red-700'
+                : 'border-indigo-100 bg-indigo-50 text-indigo-700';
+            const filesCount = Math.max(0, Number(task?.files_count || 0));
+            const successCount = Math.max(0, Number(task?.success_count || 0));
+            const failedCount = Math.max(0, Number(task?.failed_count || 0));
+            const countLabel = filesCount || failedCount
+                ? `<div class="mt-0.5 text-[10px] font-medium text-slate-400">成功 ${successCount} · 失败 ${failedCount}</div>`
+                : '';
+            return `<div class="flex items-start gap-2 text-[11px]">
+                <span class="inline-flex min-w-10 justify-center rounded-md border px-1.5 py-0.5 font-black ${kindTone}">${kind}</span>
+                <span class="min-w-0 flex-1"><span class="block truncate font-bold ${taskStatus.textClass}">${taskStatus.label}</span>${countLabel}</span>
+                <span class="font-bold tabular-nums text-slate-500">${Math.max(0, Math.min(100, Number(task?.progress || 0)))}%</span>
+            </div>`;
+        }).join('');
+        const mediaLabel = (Array.isArray(item?.media_types) ? item.media_types : [])
+            .map((kind) => kind === 'pdf' ? 'PDF' : 'MP3')
+            .join(' + ') || '内容';
+
+        return `<article class="rounded-xl border border-slate-200 bg-white p-3.5 transition hover:border-slate-300">
+            <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                    <div class="flex items-center gap-2">
+                        <span class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-xs text-slate-500"><i class="fas ${inputIcon}"></i></span>
+                        <div class="min-w-0">
+                            <div class="truncate text-sm font-black text-slate-800">${escapeHtml(mediaLabel)}</div>
+                            <div class="mt-0.5 text-[11px] text-slate-400">${escapeHtml(inputMode)} · ${escapeHtml(formatHistoryTime(item?.submitted_at))}</div>
+                        </div>
+                    </div>
+                </div>
+                <span class="inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-black ${status.pillClass}">
+                    <i class="fas ${status.icon}${item?.status === 'processing' ? ' fa-spin' : ''}"></i>${status.label}
+                </span>
+            </div>
+            <div class="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-100" aria-label="投递进度 ${progress}%">
+                <div class="h-full rounded-full ${status.barClass}" style="width:${progress}%"></div>
+            </div>
+            <div class="mt-2.5 space-y-1.5">${taskRows}</div>
+        </article>`;
+    }
+
+    function historyStatusMeta(value) {
+        return {
+            pending: {
+                label: '排队中', icon: 'fa-clock',
+                pillClass: 'bg-slate-100 text-slate-600', textClass: 'text-slate-600', barClass: 'bg-slate-400',
+            },
+            processing: {
+                label: '处理中', icon: 'fa-spinner',
+                pillClass: 'bg-blue-50 text-blue-700', textClass: 'text-blue-700', barClass: 'bg-blue-500',
+            },
+            completed: {
+                label: '已完成', icon: 'fa-circle-check',
+                pillClass: 'bg-emerald-50 text-emerald-700', textClass: 'text-emerald-700', barClass: 'bg-emerald-500',
+            },
+            partial_failed: {
+                label: '部分失败', icon: 'fa-triangle-exclamation',
+                pillClass: 'bg-amber-50 text-amber-700', textClass: 'text-amber-700', barClass: 'bg-amber-500',
+            },
+            failed: {
+                label: '失败', icon: 'fa-circle-xmark',
+                pillClass: 'bg-red-50 text-red-700', textClass: 'text-red-700', barClass: 'bg-red-500',
+            },
+        }[String(value || '')] || {
+            label: '处理中', icon: 'fa-spinner',
+            pillClass: 'bg-blue-50 text-blue-700', textClass: 'text-blue-700', barClass: 'bg-blue-500',
+        };
+    }
+
+    function hasActiveSubmission() {
+        return state.history.items.some((item) => ['pending', 'processing'].includes(item?.status));
+    }
+
+    function formatHistoryTime(value) {
+        if (!value) return '时间未知';
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return '时间未知';
+        return new Intl.DateTimeFormat('zh-CN', {
+            month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+        }).format(date);
     }
 
     function showNotice(type, title, message) {
