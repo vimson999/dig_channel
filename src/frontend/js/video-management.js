@@ -176,6 +176,11 @@ class VideoManager {
                 searchPlaceholder: '搜索频道名称',
                 searchLabel: '搜索频道名称',
                 emptyText: '没有匹配的频道',
+                idleMode: 'recent',
+                idleHint: '最近使用与热门频道，输入名称搜索其他频道',
+                maxRecentItems: 5,
+                maxResults: 8,
+                recentStorageKey: 'video-page-recent-channel-filters',
             },
         );
     }
@@ -451,6 +456,7 @@ class VideoManager {
             option.value = channel.id;
             option.dataset.category = channel.category || '';
             const videoCount = channel.video_count != null ? channel.video_count : channel.video_total;
+            option.dataset.videoCount = String(videoCount || 0);
             const suffix = videoCount != null ? ` (${videoCount}个视频)` : '';
             option.textContent = `${channel.name}${suffix}`;
             select.appendChild(option);

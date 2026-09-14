@@ -26,6 +26,69 @@
         });
     }
 
+    function updateRecentOptionValues(values, selectedValue, limit = 5) {
+        const normalizedValue = String(selectedValue || '');
+        const uniqueValues = Array.from(new Set(
+            (values || []).map((value) => String(value || '')).filter(Boolean),
+        ));
+        if (!normalizedValue) return uniqueValues.slice(0, limit);
+        return [normalizedValue, ...uniqueValues.filter((value) => value !== normalizedValue)]
+            .slice(0, limit);
+    }
+
+    function buildVisibleOptionSet(options, query, config = {}) {
+        const normalizedQuery = normalizeSearchText(query);
+        const matches = filterSearchableOptions(options, query);
+
+        if (!normalizedQuery && config.showAll) {
+            return {
+                items: matches,
+                total: matches.length,
+                hiddenCount: 0,
+            };
+        }
+
+        if (!normalizedQuery && config.idleMode === 'recent') {
+            const defaultItem = options.find((item) => !item.value);
+            const optionByValue = new Map(options.map((item) => [String(item.value), item]));
+            const maxRecentItems = config.maxRecentItems || 5;
+            const recentItems = updateRecentOptionValues(
+                config.recentValues,
+                config.selectedValue,
+                maxRecentItems,
+            )
+                .map((value) => optionByValue.get(value))
+                .filter(Boolean);
+            const recentValueSet = new Set(recentItems.map((item) => String(item.value)));
+            const fallbackItems = options
+                .map((item, index) => ({item, index}))
+                .filter(({item}) => item.value && !recentValueSet.has(String(item.value)))
+                .sort((left, right) => {
+                    const popularityDifference = Number(right.item.popularity || 0)
+                        - Number(left.item.popularity || 0);
+                    return popularityDifference || left.index - right.index;
+                })
+                .slice(0, Math.max(0, maxRecentItems - recentItems.length))
+                .map(({item}) => item);
+            const items = [defaultItem, ...recentItems, ...fallbackItems].filter(Boolean);
+            return {
+                items,
+                total: matches.length,
+                hiddenCount: Math.max(0, matches.length - items.length),
+            };
+        }
+
+        const maxResults = Number.isFinite(config.maxResults)
+            ? Math.max(1, config.maxResults)
+            : matches.length;
+        const items = matches.slice(0, maxResults);
+        return {
+            items,
+            total: matches.length,
+            hiddenCount: Math.max(0, matches.length - items.length),
+        };
+    }
+
     function createLatestRequestGate() {
         let current = 0;
         return {
@@ -63,6 +126,7 @@
             this.filteredItems = [];
             this.activeIndex = -1;
             this.isOpen = false;
+            this.showAllOptions = false;
             this.uid = `${select.id || 'searchable-select'}-combobox`;
             this.build();
             this.bind();
@@ -118,7 +182,21 @@
             empty.textContent = this.options.emptyText || '没有匹配结果';
             empty.hidden = true;
 
-            panel.append(searchWrap, list, empty);
+            const summary = document.createElement('div');
+            summary.className = 'searchable-combobox__summary';
+            summary.setAttribute('aria-live', 'polite');
+            summary.hidden = true;
+
+            const summaryText = document.createElement('span');
+            summaryText.className = 'searchable-combobox__summary-text';
+
+            const summaryAction = document.createElement('button');
+            summaryAction.type = 'button';
+            summaryAction.className = 'searchable-combobox__summary-action';
+            summaryAction.hidden = true;
+            summary.append(summaryText, summaryAction);
+
+            panel.append(searchWrap, list, empty, summary);
             wrapper.append(trigger, panel);
             this.select.insertAdjacentElement('afterend', wrapper);
             this.select.classList.add('searchable-combobox__native');
@@ -132,6 +210,9 @@
             this.search = search;
             this.list = list;
             this.empty = empty;
+            this.summary = summary;
+            this.summaryText = summaryText;
+            this.summaryAction = summaryAction;
         }
 
         bind() {
@@ -146,6 +227,12 @@
                 this.render(this.search.value);
             });
             this.search.addEventListener('keydown', (event) => this.handleSearchKeydown(event));
+            this.summaryAction.addEventListener('click', () => {
+                this.showAllOptions = !this.showAllOptions;
+                this.render('');
+                this.list.scrollTop = 0;
+                this.search.focus();
+            });
             document.addEventListener('pointerdown', (event) => {
                 if (this.isOpen && !this.wrapper.contains(event.target)) this.close();
             });
@@ -156,6 +243,7 @@
                 value: option.value,
                 label: option.textContent.trim(),
                 keywords: option.dataset.category || '',
+                popularity: Number(option.dataset.videoCount || 0),
                 disabled: option.disabled,
             }));
             const selected = this.select.options[this.select.selectedIndex] || this.select.options[0];
@@ -165,9 +253,19 @@
         }
 
         render(query) {
-            this.filteredItems = filterSearchableOptions(this.items, query);
+            const recentValues = this.loadRecentValues();
+            const visibleSet = buildVisibleOptionSet(this.items, query, {
+                idleMode: this.options.idleMode,
+                maxRecentItems: this.options.maxRecentItems,
+                maxResults: this.options.maxResults,
+                recentValues,
+                selectedValue: this.select.value,
+                showAll: this.showAllOptions,
+            });
+            this.filteredItems = visibleSet.items;
             this.list.replaceChildren();
             this.empty.hidden = this.filteredItems.length > 0;
+            this.updateSummary(query, visibleSet);
             const selectedIndex = this.filteredItems.findIndex(
                 (item) => !item.disabled && item.value === this.select.value,
             );
@@ -199,6 +297,63 @@
                 this.list.appendChild(option);
             });
             this.updateActiveOption();
+        }
+
+        loadRecentValues() {
+            if (!this.options.recentStorageKey || typeof localStorage === 'undefined') return [];
+            try {
+                const values = JSON.parse(localStorage.getItem(this.options.recentStorageKey) || '[]');
+                return Array.isArray(values) ? values : [];
+            } catch (_) {
+                return [];
+            }
+        }
+
+        rememberRecentValue(value) {
+            if (!value || !this.options.recentStorageKey || typeof localStorage === 'undefined') return;
+            const values = updateRecentOptionValues(
+                this.loadRecentValues(),
+                value,
+                this.options.maxRecentItems || 5,
+            );
+            try {
+                localStorage.setItem(this.options.recentStorageKey, JSON.stringify(values));
+            } catch (_) {
+                // Storage may be unavailable in private or restricted browser contexts.
+            }
+        }
+
+        updateSummary(query, visibleSet) {
+            const hasQuery = Boolean(normalizeSearchText(query));
+            const isBrowseMode = !hasQuery && this.options.idleMode === 'recent';
+            const totalChannels = this.items.filter((item) => item.value).length;
+
+            if (isBrowseMode && totalChannels > (this.options.maxRecentItems || 5)) {
+                this.summary.hidden = false;
+                this.summaryText.hidden = true;
+                this.summaryText.textContent = '';
+                this.summaryAction.hidden = false;
+                this.summaryAction.textContent = this.showAllOptions
+                    ? '收起为常用频道'
+                    : `查看全部频道（${totalChannels}）`;
+                return;
+            }
+
+            this.summaryAction.hidden = true;
+            this.summaryAction.textContent = '';
+            this.summaryText.hidden = false;
+            if (visibleSet.hiddenCount <= 0) {
+                this.summary.hidden = true;
+                this.summaryText.textContent = '';
+                return;
+            }
+            this.summary.hidden = false;
+            if (hasQuery) {
+                this.summaryText.textContent = `另有 ${visibleSet.hiddenCount} 个结果，请继续输入缩小范围`;
+            } else {
+                this.summaryText.textContent = this.options.idleHint
+                    || `输入名称搜索其余 ${visibleSet.hiddenCount} 个选项`;
+            }
         }
 
         handleSearchKeydown(event) {
@@ -258,6 +413,7 @@
         selectItem(item) {
             if (!item || item.disabled) return;
             this.select.value = item.value;
+            this.rememberRecentValue(item.value);
             this.refresh();
             this.select.dispatchEvent(new Event('change', {bubbles: true}));
             this.close({restoreFocus: true});
@@ -274,6 +430,7 @@
                 if (node !== this.wrapper) node.querySelector('.searchable-combobox__trigger')?.click();
             });
             this.isOpen = true;
+            this.showAllOptions = false;
             this.wrapper.classList.add('is-open');
             this.panel.hidden = false;
             this.trigger.setAttribute('aria-expanded', 'true');
@@ -285,6 +442,7 @@
         close(options = {}) {
             if (!this.isOpen) return;
             this.isOpen = false;
+            this.showAllOptions = false;
             this.wrapper.classList.remove('is-open');
             this.panel.hidden = true;
             this.trigger.setAttribute('aria-expanded', 'false');
@@ -295,8 +453,10 @@
 
     return {
         SearchableCombobox,
+        buildVisibleOptionSet,
         buildFavoritePayload,
         createLatestRequestGate,
         filterSearchableOptions,
+        updateRecentOptionValues,
     };
 });
