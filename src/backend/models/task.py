@@ -290,6 +290,7 @@ class PublicationTask(db.Model):
 
     def _derive_task_title(self, params, result):
         candidates = [
+            _nested(params, 'audio_transcription', 'original_filename'),
             _nested(params, 'bilibili', 'title'),
             _nested(params, 'thumbnail', 'main_title'),
             _nested(params, 'content_pipeline', 'title'),

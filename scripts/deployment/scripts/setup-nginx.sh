@@ -106,6 +106,19 @@ server {
     }
 
     # API代理到后端
+    location = /api/audio-transcriptions/jobs {
+        client_max_body_size 2050M;
+        proxy_request_buffering off;
+        proxy_pass http://youtube_analytics_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_send_timeout 3600s;
+        proxy_read_timeout 3600s;
+    }
+
     location /api/ {
         proxy_pass http://youtube_analytics_backend;
         proxy_http_version 1.1;

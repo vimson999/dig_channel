@@ -1,6 +1,6 @@
 # 音频转文字页面设计
 
-**状态：** 产品设计已确认，等待书面设计审阅
+**状态：** 产品设计已确认，功能已实现；独立代码评审发现的数据库断连恢复问题已修复并复核。运行验收记录见 `docs/operations/audio-transcription.md`。
 
 ## 目标
 
@@ -109,7 +109,7 @@ API 响应不返回 `source_path`、输出绝对路径、完整 `params` 或完�
 
 服务端不能调用 `read()` 把整个文件载入内存。上传使用 Werkzeug 文件流落盘，并在写入/落盘过程中完成有界大小检查和 SHA-256 计算。扩展名只是第一道检查；入队前使用现有 FFmpeg/ffprobe 能力验证文件包含可解码音轨。校验失败不创建可运行任务，也不保留孤立文件。
 
-当前 Nginx 模板的全局上传上限为 10–100 MiB，因此实现必须同步修改以下部署来源，为创建任务的精确路由增加 `client_max_body_size 2048M`，而不是放大全站上传上限：
+当前 Nginx 模板的全局上传上限为 10–100 MiB，因此实现必须同步修改以下部署来源，为创建任务的精确路由增加 `client_max_body_size 2050M`（2048 MiB 文件加 multipart 开销），而不是放大全站上传上限：
 
 - `scripts/deployment/nginx/youtube-analytics.conf`
 - `scripts/deployment/docker/nginx.conf`
@@ -187,7 +187,7 @@ TXT 和 SRT 先写入任务目录中的随机临时文件，完成 fsync/关闭�
    - 轮询单飞、有界，只处理活动任务，并在隐藏页暂停。
    - 用户文件名和错误消息使用安全 DOM 写入，不通过未转义 `innerHTML` 注入。
 5. **部署配置测试**
-   - 三个 Nginx 配置来源都只对创建任务路由声明 2048M 上限，并保留鉴权。
+   - 三个 Nginx 配置来源都只对创建任务路由声明 2050M 请求上限，应用限制实际文件为 2048 MiB，并保留既有鉴权。
    - Celery include 和 task route 与运行 Worker 使用的队列一致。
 
 ## 验收标准

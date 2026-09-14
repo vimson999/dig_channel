@@ -9,6 +9,8 @@ def register_all_apis(app):
     """
     # 注册v1 API
     register_v1_blueprints(app)
+    from api.audio_transcription import bp as audio_transcription_bp
+    app.register_blueprint(audio_transcription_bp)
 
     # 注册水印工具 (独立模块)
     from .watermark import watermark_bp

@@ -214,6 +214,8 @@ class SharedNavigation {
             return 'publisher';
         } else if (filename === 'video-editor.html') {
             return 'video-editor';
+        } else if (filename === 'audio-transcription.html') {
+            return 'audio-transcription';
         } else if (filename === 'batch-transcription.html') {
             return 'batch-transcription';
         } else if (filename === 'downloads.html') {
@@ -278,6 +280,7 @@ class SharedNavigation {
             'publisher': '一键智能发布台',
             'external-batch': '批量任务台',
             'video-editor': '高级剪辑工作台',
+            'audio-transcription': '音频转文字',
             'batch-transcription': '批量音频转文案',
             'downloads': '素材下载中心',
             'content-retention-cleanup': '历史文件清理',
@@ -538,6 +541,12 @@ class SharedNavigation {
                 icon: 'fas fa-wand-magic-sparkles',
                 dropdown: true,
                 items: [
+                    {
+                        id: 'audio-transcription',
+                        name: '音频转文字',
+                        icon: 'fas fa-file-audio',
+                        href: 'audio-transcription.html'
+                    },
                     {
                         id: 'batch-transcription',
                         name: '音频转文案',

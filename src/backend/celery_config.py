@@ -51,6 +51,7 @@ def make_celery(app_name=__name__):
         backend=backend_url,
         broker=broker_url,
         include=[
+            'tasks.audio_transcription',
             'tasks.publisher',
             'tasks.downloader',
             'tasks.podcast_visualizer',
@@ -136,6 +137,7 @@ def make_celery(app_name=__name__):
             Queue('content_pipeline', Exchange('content_pipeline'), routing_key='content_pipeline'),
         ),
         task_routes={
+            'tasks.audio_transcription.process_job': {'queue': 'report_audio_workflow'},
             'tts.process_doubao_publication': {'queue': 'cloud_tts'},
             'tts.process_article': {'queue': 'cloud_tts'},
             'tasks.doubao_browser_tts.process_job': {'queue': 'doubao_browser_tts'},
