@@ -67,3 +67,12 @@ PDF/音频入口继承只读事务与 pending-write fail-closed 的最终加固�
 自动审批以服务中断风险拒绝；状态保持 `OBSERVING`，最终加固为
 `CODE_VERIFIED / WAITING_RUNTIME_REPLACEMENT`。下一自然批次必须直接证明哈希及暂存期间
 `in_transaction=false`，同时核对 O(1) canonical、request hold 与最终任务状态。
+
+## 2026-09-10 后窗复核
+
+四个自然 Web submit 共 83 个资产，canonical SQL 均为 1 次 SELECT + 1 次多行 INSERT，全部 202；
+窗口内 84 个清洗资产最终均 `cleaned`，没有 Web 长连接持有事件。上述时序和终态与旧 6.1 秒哈希事务
+空档不再出现一致，但生产仍未输出哈希入口 `in_transaction=false` 的直接结构化事件。
+
+因此 O(1) canonical 可独立接受，本记录仍保持 `RUNTIME_REPLACED / OBSERVING`。后续只有捕获直接事务
+边界标记后才允许关闭；不因“没有慢 SQL”或“任务最终成功”替代 Session 边界证明。

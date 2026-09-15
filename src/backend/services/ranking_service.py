@@ -2,7 +2,7 @@
 """
 排行榜相关的业务逻辑服务
 
-提供4个排行榜的数据查询和计算功能
+提供日、月、年三个周期的收入与新增订阅排行榜查询和计算功能
 """
 
 from datetime import datetime, date, timedelta
@@ -12,9 +12,24 @@ from models import db, Channel, ChannelData
 
 class RankingService:
     """排行榜服务类"""
+
+    @staticmethod
+    def _page(query, limit: int, page: int):
+        """Return one SQL-backed page plus stable global-rank metadata."""
+        per_page = max(1, int(limit))
+        current_page = max(1, int(page))
+        total = query.order_by(None).count()
+        offset = (current_page - 1) * per_page
+        rows = query.offset(offset).limit(per_page).all()
+        return rows, offset, {
+            'page': current_page,
+            'per_page': per_page,
+            'total': total,
+            'total_pages': (total + per_page - 1) // per_page,
+        }
     
     @staticmethod
-    def get_daily_revenue_ranking(limit: int = 10, target_date: date = None, user_id: int = None) -> Dict[str, Any]:
+    def get_daily_revenue_ranking(limit: int = 10, target_date: date = None, user_id: int = None, page: int = 1) -> Dict[str, Any]:
         """获取日收入排行榜
         
         Args:
@@ -34,6 +49,8 @@ class RankingService:
                 Channel.id,
                 Channel.name,
                 Channel.channel_id,
+                Channel.cpm,
+                Channel.category,
                 ChannelData.estimated_revenue
             ).join(ChannelData).filter(
                 ChannelData.date == target_date,
@@ -44,16 +61,22 @@ class RankingService:
             if user_id is not None:
                 query = query.filter(Channel.user_id == user_id)
                 
-            ranking_data = query.order_by(desc(ChannelData.estimated_revenue)).limit(limit).all()
+            ranking_data, rank_offset, pagination = RankingService._page(
+                query.order_by(desc(ChannelData.estimated_revenue), Channel.id.asc()),
+                limit,
+                page,
+            )
             
             # 格式化结果
             rankings = []
-            for rank, (channel_id, name, youtube_id, revenue) in enumerate(ranking_data, 1):
+            for rank, (channel_id, name, youtube_id, cpm, category, revenue) in enumerate(ranking_data, rank_offset + 1):
                 rankings.append({
                     'rank': rank,
                     'channel_id': channel_id,
                     'channel_name': name,
                     'youtube_id': youtube_id,
+                    'cpm': float(cpm),
+                    'category': category,
                     'revenue': float(revenue),
                     'formatted_revenue': f'${revenue:.2f}'
                 })
@@ -64,7 +87,8 @@ class RankingService:
                     'type': 'daily_revenue',
                     'date': target_date.isoformat(),
                     'rankings': rankings,
-                    'total_count': len(rankings)
+                    'total_count': pagination['total'],
+                    'pagination': pagination
                 }
             }
             
@@ -76,7 +100,7 @@ class RankingService:
             }
     
     @staticmethod
-    def get_monthly_revenue_ranking(limit: int = 10, target_date: date = None, user_id: int = None) -> Dict[str, Any]:
+    def get_monthly_revenue_ranking(limit: int = 10, target_date: date = None, user_id: int = None, page: int = 1) -> Dict[str, Any]:
         """获取月收入排行榜
         
         Args:
@@ -107,6 +131,8 @@ class RankingService:
                 Channel.id,
                 Channel.name,
                 Channel.channel_id,
+                Channel.cpm,
+                Channel.category,
                 func.sum(ChannelData.estimated_revenue).label('total_revenue')
             ).join(ChannelData).filter(
                 ChannelData.date >= month_start,
@@ -118,18 +144,23 @@ class RankingService:
             if user_id is not None:
                 query = query.filter(Channel.user_id == user_id)
                 
-            ranking_data = query.group_by(
-                Channel.id, Channel.name, Channel.channel_id
-            ).order_by(desc('total_revenue')).limit(limit).all()
+            grouped_query = query.group_by(
+                Channel.id, Channel.name, Channel.channel_id, Channel.cpm, Channel.category
+            ).order_by(desc('total_revenue'), Channel.id.asc())
+            ranking_data, rank_offset, pagination = RankingService._page(
+                grouped_query, limit, page
+            )
             
             # 格式化结果
             rankings = []
-            for rank, (channel_id, name, youtube_id, total_revenue) in enumerate(ranking_data, 1):
+            for rank, (channel_id, name, youtube_id, cpm, category, total_revenue) in enumerate(ranking_data, rank_offset + 1):
                 rankings.append({
                     'rank': rank,
                     'channel_id': channel_id,
                     'channel_name': name,
                     'youtube_id': youtube_id,
+                    'cpm': float(cpm),
+                    'category': category,
                     'total_revenue': float(total_revenue),
                     'formatted_revenue': f'${total_revenue:.2f}'
                 })
@@ -143,7 +174,8 @@ class RankingService:
                         'end_date': month_end.isoformat()
                     },
                     'rankings': rankings,
-                    'total_count': len(rankings)
+                    'total_count': pagination['total'],
+                    'pagination': pagination
                 }
             }
             
@@ -153,9 +185,61 @@ class RankingService:
                 'message': f'获取月收入排行榜失败: {str(e)}',
                 'data': None
             }
+
+    @staticmethod
+    def get_yearly_revenue_ranking(limit: int = 10, target_year: int = None, user_id: int = None, page: int = 1) -> Dict[str, Any]:
+        """获取指定自然年的累计收入排行榜。"""
+        try:
+            target_year = target_year or date.today().year
+            year_start = date(target_year, 1, 1)
+            year_end = date(target_year, 12, 31)
+            if target_year == date.today().year:
+                year_end = date.today()
+
+            query = db.session.query(
+                Channel.id,
+                Channel.name,
+                Channel.channel_id,
+                Channel.cpm,
+                Channel.category,
+                func.sum(ChannelData.estimated_revenue).label('total_revenue')
+            ).join(ChannelData).filter(
+                ChannelData.date >= year_start,
+                ChannelData.date <= year_end,
+                Channel.is_active == True
+            )
+            if user_id is not None:
+                query = query.filter(Channel.user_id == user_id)
+
+            grouped_query = query.group_by(
+                Channel.id, Channel.name, Channel.channel_id, Channel.cpm, Channel.category
+            ).order_by(desc('total_revenue'), Channel.id.asc())
+            ranking_data, rank_offset, pagination = RankingService._page(grouped_query, limit, page)
+            rankings = [{
+                'rank': rank,
+                'channel_id': channel_id,
+                'channel_name': name,
+                'youtube_id': youtube_id,
+                'cpm': float(cpm),
+                'category': category,
+                'total_revenue': float(total_revenue),
+                'formatted_revenue': f'${total_revenue:.2f}'
+            } for rank, (channel_id, name, youtube_id, cpm, category, total_revenue) in enumerate(ranking_data, rank_offset + 1)]
+            return {
+                'success': True,
+                'data': {
+                    'type': 'yearly_revenue',
+                    'period': {'start_date': year_start.isoformat(), 'end_date': year_end.isoformat()},
+                    'rankings': rankings,
+                    'total_count': pagination['total'],
+                    'pagination': pagination,
+                }
+            }
+        except Exception as e:
+            return {'success': False, 'message': f'获取年收入排行榜失败: {str(e)}', 'data': None}
     
     @staticmethod
-    def get_daily_subscriber_ranking(limit: int = 10, target_date: date = None, user_id: int = None) -> Dict[str, Any]:
+    def get_daily_subscriber_ranking(limit: int = 10, target_date: date = None, user_id: int = None, page: int = 1) -> Dict[str, Any]:
         """获取日新增订阅排行榜
         
         Args:
@@ -175,6 +259,8 @@ class RankingService:
                 Channel.id,
                 Channel.name,
                 Channel.channel_id,
+                Channel.cpm,
+                Channel.category,
                 ChannelData.subscriber_change
             ).join(ChannelData).filter(
                 ChannelData.date == target_date,
@@ -185,16 +271,22 @@ class RankingService:
             if user_id is not None:
                 query = query.filter(Channel.user_id == user_id)
                 
-            ranking_data = query.order_by(desc(ChannelData.subscriber_change)).limit(limit).all()
+            ranking_data, rank_offset, pagination = RankingService._page(
+                query.order_by(desc(ChannelData.subscriber_change), Channel.id.asc()),
+                limit,
+                page,
+            )
             
             # 格式化结果
             rankings = []
-            for rank, (channel_id, name, youtube_id, subscriber_change) in enumerate(ranking_data, 1):
+            for rank, (channel_id, name, youtube_id, cpm, category, subscriber_change) in enumerate(ranking_data, rank_offset + 1):
                 rankings.append({
                     'rank': rank,
                     'channel_id': channel_id,
                     'channel_name': name,
                     'youtube_id': youtube_id,
+                    'cpm': float(cpm),
+                    'category': category,
                     'subscriber_change': subscriber_change,
                     'formatted_change': f'+{subscriber_change:,}' if subscriber_change > 0 else f'{subscriber_change:,}'
                 })
@@ -205,7 +297,8 @@ class RankingService:
                     'type': 'daily_subscriber',
                     'date': target_date.isoformat(),
                     'rankings': rankings,
-                    'total_count': len(rankings)
+                    'total_count': pagination['total'],
+                    'pagination': pagination
                 }
             }
             
@@ -217,7 +310,7 @@ class RankingService:
             }
     
     @staticmethod
-    def get_monthly_subscriber_ranking(limit: int = 10, target_date: date = None, user_id: int = None) -> Dict[str, Any]:
+    def get_monthly_subscriber_ranking(limit: int = 10, target_date: date = None, user_id: int = None, page: int = 1) -> Dict[str, Any]:
         """获取月新增订阅排行榜
         
         Args:
@@ -248,6 +341,8 @@ class RankingService:
                 Channel.id,
                 Channel.name,
                 Channel.channel_id,
+                Channel.cpm,
+                Channel.category,
                 func.sum(ChannelData.subscriber_change).label('total_subscriber_change')
             ).join(ChannelData).filter(
                 ChannelData.date >= month_start,
@@ -259,18 +354,23 @@ class RankingService:
             if user_id is not None:
                 query = query.filter(Channel.user_id == user_id)
                 
-            ranking_data = query.group_by(
-                Channel.id, Channel.name, Channel.channel_id
-            ).order_by(desc('total_subscriber_change')).limit(limit).all()
+            grouped_query = query.group_by(
+                Channel.id, Channel.name, Channel.channel_id, Channel.cpm, Channel.category
+            ).order_by(desc('total_subscriber_change'), Channel.id.asc())
+            ranking_data, rank_offset, pagination = RankingService._page(
+                grouped_query, limit, page
+            )
             
             # 格式化结果
             rankings = []
-            for rank, (channel_id, name, youtube_id, total_change) in enumerate(ranking_data, 1):
+            for rank, (channel_id, name, youtube_id, cpm, category, total_change) in enumerate(ranking_data, rank_offset + 1):
                 rankings.append({
                     'rank': rank,
                     'channel_id': channel_id,
                     'channel_name': name,
                     'youtube_id': youtube_id,
+                    'cpm': float(cpm),
+                    'category': category,
                     'total_subscriber_change': total_change,
                     'formatted_change': f'+{total_change:,}' if total_change > 0 else f'{total_change:,}'
                 })
@@ -284,7 +384,8 @@ class RankingService:
                         'end_date': month_end.isoformat()
                     },
                     'rankings': rankings,
-                    'total_count': len(rankings)
+                    'total_count': pagination['total'],
+                    'pagination': pagination
                 }
             }
             
@@ -294,6 +395,58 @@ class RankingService:
                 'message': f'获取月订阅增长排行榜失败: {str(e)}',
                 'data': None
             }
+
+    @staticmethod
+    def get_yearly_subscriber_ranking(limit: int = 10, target_year: int = None, user_id: int = None, page: int = 1) -> Dict[str, Any]:
+        """获取指定自然年的累计新增订阅排行榜。"""
+        try:
+            target_year = target_year or date.today().year
+            year_start = date(target_year, 1, 1)
+            year_end = date(target_year, 12, 31)
+            if target_year == date.today().year:
+                year_end = date.today()
+
+            query = db.session.query(
+                Channel.id,
+                Channel.name,
+                Channel.channel_id,
+                Channel.cpm,
+                Channel.category,
+                func.sum(ChannelData.subscriber_change).label('total_subscriber_change')
+            ).join(ChannelData).filter(
+                ChannelData.date >= year_start,
+                ChannelData.date <= year_end,
+                Channel.is_active == True
+            )
+            if user_id is not None:
+                query = query.filter(Channel.user_id == user_id)
+
+            grouped_query = query.group_by(
+                Channel.id, Channel.name, Channel.channel_id, Channel.cpm, Channel.category
+            ).order_by(desc('total_subscriber_change'), Channel.id.asc())
+            ranking_data, rank_offset, pagination = RankingService._page(grouped_query, limit, page)
+            rankings = [{
+                'rank': rank,
+                'channel_id': channel_id,
+                'channel_name': name,
+                'youtube_id': youtube_id,
+                'cpm': float(cpm),
+                'category': category,
+                'total_subscriber_change': total_change,
+                'formatted_change': f'+{total_change:,}' if total_change > 0 else f'{total_change:,}'
+            } for rank, (channel_id, name, youtube_id, cpm, category, total_change) in enumerate(ranking_data, rank_offset + 1)]
+            return {
+                'success': True,
+                'data': {
+                    'type': 'yearly_subscriber',
+                    'period': {'start_date': year_start.isoformat(), 'end_date': year_end.isoformat()},
+                    'rankings': rankings,
+                    'total_count': pagination['total'],
+                    'pagination': pagination,
+                }
+            }
+        except Exception as e:
+            return {'success': False, 'message': f'获取年订阅增长排行榜失败: {str(e)}', 'data': None}
     
     @staticmethod
     def get_all_rankings(limit: int = 3, user_id: int = None) -> Dict[str, Any]:

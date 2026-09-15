@@ -98,6 +98,7 @@ opencv-python-headless>=4.8.0
 
 # 视频处理
 moviepy==2.2.1
+yt-dlp[default]==2026.8.19
 
 # 本地语音识别 (ASR)
 faster-whisper==1.0.3

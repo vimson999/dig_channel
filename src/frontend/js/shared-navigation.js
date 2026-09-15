@@ -130,6 +130,8 @@ class SharedNavigation {
             return 'channels';
         } else if (filename === 'videos.html') {
             return 'videos';
+        } else if (filename === 'rankings.html') {
+            return 'rankings';
         } else if (filename === 'trending-radar.html') {
             return 'trending-radar';
         } else if (filename === 'trending.html') {
@@ -237,6 +239,7 @@ class SharedNavigation {
             'dashboard': '智能数据分析平台',
             'channels': '频道管理',
             'videos': '视频管理中心',
+            'rankings': '频道完整排行榜',
             'trending-radar': '趋势雷达监控',
             'trending': '爆款视频搜索',
             'zsxq-lab': '知识星球内容分析',
@@ -431,6 +434,12 @@ class SharedNavigation {
                         name: '视频库',
                         icon: 'fas fa-play',
                         href: 'videos.html'
+                    },
+                    {
+                        id: 'rankings',
+                        name: '完整排行榜',
+                        icon: 'fas fa-ranking-star',
+                        href: 'rankings.html'
                     },
                     {
                         id: 'favorites',

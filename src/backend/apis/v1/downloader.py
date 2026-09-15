@@ -7,26 +7,30 @@ from datetime import datetime
 
 bp = Blueprint('downloader', __name__, url_prefix='/api/v1/downloader')
 logger = logging.getLogger(__name__)
+DOWNLOAD_TYPES = {'video', 'audio', 'srt', 'text'}
 
 @bp.route('/submit', methods=['POST'])
 def submit_download():
     """Submit a URL for download."""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         url = data.get('url')
+        download_type = data.get('download_type', 'video')
         
         if not url:
             return jsonify({'success': False, 'error': 'URL is required'}), 400
+        if download_type not in DOWNLOAD_TYPES:
+            return jsonify({'success': False, 'error': 'Unsupported download type'}), 400
             
         # Create task record
-        task = DownloadTask(url=url, status='pending')
+        task = DownloadTask(url=url, download_type=download_type, status='pending')
         db.session.add(task)
         db.session.commit()
         
         # Trigger Celery task
         celery_task = apply_async_after_db_release(
             download_video_task,
-            args=[task.id, url],
+            args=[task.id, url, download_type],
             queue='render',
         )
         
@@ -69,6 +73,23 @@ def get_task_status(task_id):
             'data': task.to_dict()
         })
     except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@bp.route('/task/<task_id>/cancel', methods=['POST'])
+def cancel_task(task_id):
+    """Cooperatively cancel a queued or running download."""
+    try:
+        task = DownloadTask.query.get(task_id)
+        if not task:
+            return jsonify({'success': False, 'error': 'Task not found'}), 404
+        if task.status not in {'pending', 'downloading', 'processing'}:
+            return jsonify({'success': False, 'error': 'Task is not cancellable'}), 409
+        task.status = 'cancelled'
+        task.error_message = None
+        db.session.commit()
+        return jsonify({'success': True, 'message': 'Download cancelled'})
+    except Exception as e:
+        logger.error(f"Failed to cancel download: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @bp.route('/task/<task_id>', methods=['DELETE'])

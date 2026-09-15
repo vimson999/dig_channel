@@ -141,6 +141,29 @@ socket 脱离 `utun8`。11:03 新建、明确命中 DIRECT 的连接仍在 11:05
 - 连续 24 小时要求 query/connect timeout=0、60 秒 Session=0，MP3/PDF/凭据和 ZSXQ 真实负载均成功；
   在此之前保持 `ISOLATED/OBSERVING`，不得写成已解决。
 
+### 2026-09-12 零错误但应用尾延迟再升
+
+- 固定窗口 query/connect timeout、server crash、SQL error 与 PgBouncer 六类错误均为 0；但应用慢 SQL
+  27 条/`70.433s`，P95/max 升至 `7.605/13.839s`。
+- 最大样本是旧 Watchdog 的 Publisher 窄扫描 `13.839s`，简笔画父/场景窄读最高
+  `7.605/5.789s`；同一路径在重启后首轮约 `34–122ms`，代表性生产 executor 仅
+  `0.022–35.218ms`，现场无锁等待。
+- PgBouncer wait/query P95 为 `55.60/98.90ms`，较上一窗口增加 6.7%/23.7%，server connection
+  仍为 12/h，来源保持 `100.96.3.12`，未见代理/TUN route fallback。
+- 结论保持 `RUNTIME_MITIGATED/OPEN/REPEATED/OBSERVING`：零 timeout 不能覆盖数秒应用尾延迟，
+  继续禁止按缺索引、调高超时或单次 smoke test关闭问题。
+
+### 2026-09-13 零错误且尾延迟回落，网络边界仍未关闭
+
+- 固定窗口 SQL error、traceback、statement/lock/query/connect timeout、server crash 与 PgBouncer 六类错误
+  全部为 0；应用慢 SQL 从 27 条/70.433 秒降至 14 条/26.437 秒，P95/max 从 7.605/13.839 秒降至
+  3.400/4.951 秒。
+- 代表性现场执行计划仍很快：Publisher 扫描 0.082ms、通知扫描 0.105ms、MP3 素材目录 1.951ms、
+  ZSXQ 聚合代表查询 37.050ms；应用相同形状却耗时 1.0–5.0 秒。现场无等待锁、无 idle-in-transaction，
+  不支持新增索引。
+- PgBouncer wait/query P95 为 44.62/71.85ms，连接源保持 `100.96.3.12`，未见 TUN fallback；相较前窗改善，
+  但应用与 executor 仍存在数量级差距。状态保持 `RUNTIME_MITIGATED/OPEN/REPEATED/OBSERVING`。
+
 ### 2026-08-12 长寿命后端 socket 缓解与 SSH 隧道回滚
 
 - 新窗口仍出现 6 个去重 query timeout 和多次 `server conn crashed?`；异常 PgBouncer server socket 年龄集中在约 10 分钟以上，旧 `server_lifetime=21600` 会让网络漂移前建立的连接继续复用。
@@ -386,3 +409,30 @@ SELECT 318.51/119.96ms；真实终态页面 26 秒仅请求一次，未再产生
 现场 `SHOW POOLS` 为 transaction mode、`cl_waiting=0`、`sv_login=0`、`maxwait=0`，6 条 server
 均为 used；这是事后恢复快照，不代表 18–20 时峰值。状态保持 `OPEN / REPEATED / OBSERVING`。
 下一次尖峰必须同期保存 pool/server socket、路由与远端 activity；一个无错误窗口不足以关闭。
+
+### 2026-09-10 错误继续为零但长尾相较桥接窗回升
+
+固定窗六类 PgBouncer 错误、SQL error、traceback、锁等待和超时均为 0；149 条应用慢 SQL 累计
+244.641 秒，P95/max 2.938/9.645 秒，较 2026-09-08 基线明显改善。但相较紧邻桥接窗的 27 条/
+45.481 秒，数量和累计耗时分别回升 451.9%/437.9%。PgBouncer wait/query P95 也从桥接窗的
+55.39/88.84ms 回升至 100.31/178.26ms。
+
+现场无 waiting lock 或 idle-in-transaction，代表 executor 0.027–35.522ms；恢复快照 transaction pool
+仅有一个最大等待 36ms 的诊断客户端，不能解释峰时数秒驱动等待。由于峰时没有同步保存 route、server socket
+与远端 activity，状态保持 `OPEN / REPEATED / OBSERVING`；未调整 timeout、池大小、路由或索引。
+
+### 2026-09-15 四个 query-wait episode 与应用断连复发
+
+- 固定窗应用慢 SQL 升至 132 条/223.626 秒，较上一窗数量增加 450.0%、总耗时增加 530.4%；最大值由
+  3.562 秒升至 19.799 秒。PgBouncer wait/query P95 同时由 43.65/72.77ms 升至
+  101.64/179.04ms。
+- 13:01:38–13:02:40 连续出现 4 个去重 `query_wait_timeout` episode；应用侧通知 drain、研报音频恢复、
+  Publisher 终态子任务清理与 pending scanner 同步出现约 15 秒 SQL 等待和 4 个 server-closed 事件。
+  13:02 分钟吞吐归零，13:03 恢复时 wait/query 峰值为 961/1,313ms。
+- 8 个 connection hold 全部匹配慢 SQL，SQL 合计 100.503 秒、非 SQL 仅 1.597 秒；现场无 waiting lock、
+  idle-in-transaction 为 0，代表 executor 0.025–35.0ms。共同根因仍不在索引、锁或外部 I/O 跨 Session。
+- 事后 `SHOW POOLS` 为 `cl_waiting=0`、6 条 Tailscale server socket 可用，目标仍经 `utun5`、MTU 1280；
+  本地 6432 与远端 5432 已恢复。该快照只证明事故后恢复，不能否定事故分钟的网络/池可用性中断。
+
+状态继续 `OPEN / REPEATED / OBSERVING`。未加索引、未提高 timeout、未自动修改 PgBouncer/Tailscale；下一次
+尖峰必须同期保存 pool/server socket、路由、远端 activity 与链路质量，不能再只依赖事后健康快照。

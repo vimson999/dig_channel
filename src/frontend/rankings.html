@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>频道数据中心 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="css/main.css">
+    <style>
+        .ranking-progress {
+            height: 6px;
+            appearance: none;
+            border: 0;
+            border-radius: 999px;
+            overflow: hidden;
+            background: #e2e8f0;
+        }
+        .ranking-progress::-webkit-progress-bar { background: #e2e8f0; }
+        .ranking-progress::-webkit-progress-value { background: var(--ranking-progress-color); border-radius: 999px; }
+        .ranking-progress::-moz-progress-bar { background: var(--ranking-progress-color); border-radius: 999px; }
+    </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 text-slate-800">
+    <div id="toast-container" class="toast-container space-y-2"></div>
+
+    <main class="mx-auto max-w-[1680px] px-3 py-3 sm:px-4">
+        <header class="mb-2 flex min-h-9 flex-col gap-2 px-1 sm:flex-row sm:items-center sm:justify-between">
+            <div class="flex min-w-0 items-center gap-3">
+                <a href="index.html" class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600 transition hover:bg-blue-100" aria-label="返回首页"><i class="fas fa-chart-column" aria-hidden="true"></i></a>
+                <div class="min-w-0">
+                    <h1 class="truncate text-base font-bold tracking-tight text-slate-900">频道数据中心</h1>
+                </div>
+            </div>
+            <div class="inline-flex w-full rounded-lg border border-slate-200 bg-white p-0.5 sm:w-auto" role="tablist" aria-label="数据中心视图">
+                <button type="button" data-page-view="rankings" role="tab" aria-selected="true" class="flex flex-1 items-center justify-center gap-2 rounded-md px-3 py-1 text-xs font-semibold transition sm:flex-none"><i class="fas fa-ranking-star" aria-hidden="true"></i>完整排行榜</button>
+                <button type="button" data-page-view="trends" role="tab" aria-selected="false" class="flex flex-1 items-center justify-center gap-2 rounded-md px-3 py-1 text-xs font-semibold transition sm:flex-none"><i class="fas fa-chart-line" aria-hidden="true"></i>趋势分析</button>
+            </div>
+        </header>
+
+        <section id="ranking-workspace" class="overflow-hidden rounded-xl border border-white/70 bg-white/95 shadow-md backdrop-blur" aria-label="完整排行榜">
+            <div class="flex flex-col gap-2 border-b border-slate-100 px-3 py-1.5 lg:flex-row lg:items-center lg:justify-between sm:px-4">
+                <div class="overflow-x-auto">
+                    <div id="ranking-tabs" role="tablist" aria-label="排行榜类型" class="flex min-w-max gap-1">
+                        <button id="ranking-tab-daily-revenue" type="button" role="tab" aria-controls="ranking-results" aria-selected="true" tabindex="0" data-ranking-type="daily_revenue" class="rounded-lg border border-transparent px-3 py-2 text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-200"><i class="fas fa-dollar-sign mr-1.5 text-green-500" aria-hidden="true"></i>日收入</button>
+                        <button id="ranking-tab-monthly-revenue" type="button" role="tab" aria-controls="ranking-results" aria-selected="false" tabindex="-1" data-ranking-type="monthly_revenue" class="rounded-lg border border-transparent px-3 py-2 text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-200"><i class="fas fa-chart-bar mr-1.5 text-blue-500" aria-hidden="true"></i>月收入</button>
+                        <button id="ranking-tab-yearly-revenue" type="button" role="tab" aria-controls="ranking-results" aria-selected="false" tabindex="-1" data-ranking-type="yearly_revenue" class="rounded-lg border border-transparent px-3 py-2 text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-200"><i class="fas fa-calendar mr-1.5 text-cyan-600" aria-hidden="true"></i>年收入</button>
+                        <button id="ranking-tab-daily-subscriber" type="button" role="tab" aria-controls="ranking-results" aria-selected="false" tabindex="-1" data-ranking-type="daily_subscriber" class="rounded-lg border border-transparent px-3 py-2 text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-200"><i class="fas fa-user-plus mr-1.5 text-purple-500" aria-hidden="true"></i>日新增订阅</button>
+                        <button id="ranking-tab-monthly-subscriber" type="button" role="tab" aria-controls="ranking-results" aria-selected="false" tabindex="-1" data-ranking-type="monthly_subscriber" class="rounded-lg border border-transparent px-3 py-2 text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-200"><i class="fas fa-users mr-1.5 text-orange-500" aria-hidden="true"></i>月新增订阅</button>
+                        <button id="ranking-tab-yearly-subscriber" type="button" role="tab" aria-controls="ranking-results" aria-selected="false" tabindex="-1" data-ranking-type="yearly_subscriber" class="rounded-lg border border-transparent px-3 py-2 text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-200"><i class="fas fa-calendar-check mr-1.5 text-rose-500" aria-hidden="true"></i>年新增订阅</button>
+                    </div>
+                </div>
+                <div class="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                    <div id="ranking-period-controls" class="inline-flex items-center overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                        <button type="button" data-period-shift="-1" class="h-8 w-8 text-slate-500 transition hover:bg-slate-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-35" aria-label="上一期"><i class="fas fa-chevron-left text-xs" aria-hidden="true"></i></button>
+                        <label for="ranking-period-input" class="sr-only">排行榜时间</label>
+                        <input id="ranking-period-input" type="date" class="h-8 w-[132px] border-x border-slate-200 bg-white px-2 text-center text-sm font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-100">
+                        <button type="button" data-period-shift="1" class="h-8 w-8 text-slate-500 transition hover:bg-slate-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-35" aria-label="下一期"><i class="fas fa-chevron-right text-xs" aria-hidden="true"></i></button>
+                    </div>
+                    <button id="ranking-current-period" type="button" class="h-8 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-semibold text-slate-600 shadow-sm transition hover:border-blue-300 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40">本期</button>
+                    <label for="ranking-page-size" class="text-xs font-medium text-slate-500">每页</label>
+                    <select id="ranking-page-size" class="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"><option value="10">10 条</option><option value="20" selected>20 条</option><option value="50">50 条</option><option value="100">100 条</option></select>
+                </div>
+            </div>
+            <div class="flex min-h-9 flex-col gap-1 border-b border-slate-100 px-4 py-1 sm:flex-row sm:items-center sm:justify-between">
+                <div class="flex flex-wrap items-center gap-x-3 gap-y-1"><p id="ranking-total" class="text-sm font-semibold text-slate-800">正在统计频道…</p><p id="ranking-period" class="text-xs text-slate-500"></p></div>
+                <div class="flex items-center gap-3"><p id="ranking-status" class="text-xs text-slate-500" aria-live="polite"></p><div id="ranking-pagination" class="flex flex-wrap items-center justify-center gap-1" aria-label="排行榜分页"></div></div>
+            </div>
+            <div class="overflow-x-auto"><div class="min-w-0">
+                <div class="grid min-h-7 grid-cols-[40px_minmax(140px,1fr)_110px_28px] items-center border-b border-slate-100 bg-slate-50/90 px-3 py-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500 sm:grid-cols-[56px_minmax(360px,520px)_160px_minmax(220px,1fr)_44px] sm:px-4 lg:grid-cols-[56px_minmax(260px,390px)_72px_112px_150px_minmax(180px,1fr)_44px]"><span>排名</span><span>频道 <span class="hidden sm:inline">/ ID</span></span><span class="hidden border-l border-slate-200 pl-3 lg:block">分类</span><span class="hidden border-l border-slate-200 px-3 text-right lg:block">千次参考值</span><span id="ranking-value-header" class="text-right">数据</span><span class="hidden pl-8 sm:block">相对榜首</span><span></span></div>
+                <div id="ranking-results" role="tabpanel" aria-live="polite" aria-labelledby="ranking-tab-daily-revenue" class="divide-y divide-slate-100"><div class="px-6 py-16 text-center text-slate-400"><i class="fas fa-spinner fa-spin mb-3 text-2xl" aria-hidden="true"></i><p>正在加载完整排行榜…</p></div></div>
+            </div></div>
+        </section>
+
+        <section id="trend-workspace" hidden class="overflow-hidden rounded-2xl border border-white/70 bg-white/90 shadow-lg backdrop-blur" aria-label="频道趋势分析">
+            <div class="border-b border-slate-100 bg-gradient-to-r from-slate-50/70 to-white px-5 py-5 sm:px-7">
+                <div class="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
+                    <div class="flex items-center gap-3"><span class="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-sm"><i class="fas fa-chart-area" aria-hidden="true"></i></span><div><h2 class="text-lg font-bold text-slate-900">数据趋势图表</h2><p class="text-sm text-slate-500">对比频道数据变化与最新占比</p></div></div>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <label for="trend-metric" class="sr-only">趋势指标</label>
+                        <select id="trend-metric" class="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-700 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"><option value="revenue">预估收入</option><option value="subscribers">订阅总量</option><option value="views">播放总量</option></select>
+                        <div class="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1" aria-label="图表样式">
+                            <button type="button" data-trend-chart="line" aria-pressed="true" title="折线图" class="rounded-md px-3 py-2 text-sm transition"><i class="fas fa-chart-line" aria-hidden="true"></i><span class="sr-only">折线图</span></button>
+                            <button type="button" data-trend-chart="bar" aria-pressed="false" title="柱状图" class="rounded-md px-3 py-2 text-sm transition"><i class="fas fa-chart-bar" aria-hidden="true"></i><span class="sr-only">柱状图</span></button>
+                            <button type="button" data-trend-chart="pie" aria-pressed="false" title="占比图" class="rounded-md px-3 py-2 text-sm transition"><i class="fas fa-chart-pie" aria-hidden="true"></i><span class="sr-only">占比图</span></button>
+                        </div>
+                        <button id="trend-channel-filter" type="button" class="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-indigo-300 hover:text-indigo-700" aria-haspopup="dialog"><i class="fas fa-filter text-xs text-purple-500" aria-hidden="true"></i><span id="trend-channel-summary">全部频道</span></button>
+                        <div class="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1" aria-label="聚合粒度">
+                            <button type="button" data-trend-granularity="daily" aria-pressed="true" title="按日" class="rounded-md px-3 py-2 text-sm transition"><i class="fas fa-calendar-day" aria-hidden="true"></i><span class="sr-only">按日</span></button>
+                            <button type="button" data-trend-granularity="monthly" aria-pressed="false" title="按月" class="rounded-md px-3 py-2 text-sm transition"><i class="fas fa-calendar-alt" aria-hidden="true"></i><span class="sr-only">按月</span></button>
+                        </div>
+                        <label for="trend-daily-range" class="sr-only">日趋势范围</label>
+                        <select id="trend-daily-range" class="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-700 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"><option value="7" selected>最近 7 天</option><option value="30">最近 30 天</option><option value="90">最近 90 天</option></select>
+                        <label for="trend-monthly-range" class="sr-only">月趋势范围</label>
+                        <select id="trend-monthly-range" hidden class="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-700 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"><option value="3">最近 3 个月</option><option value="6" selected>最近 6 个月</option><option value="12">最近 12 个月</option><option value="24">最近 24 个月</option></select>
+                    </div>
+                </div>
+            </div>
+            <div class="flex flex-col gap-2 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-7"><p id="trend-meta" class="text-sm font-semibold text-slate-700">正在准备趋势数据…</p><p id="trend-status" class="text-sm text-slate-500" aria-live="polite"></p></div>
+            <div class="relative min-h-[470px] px-2 py-4 sm:px-5"><div id="trend-chart" class="h-[440px] w-full" role="img" aria-label="频道数据趋势图"></div><div id="trend-empty" hidden class="absolute inset-0 hidden flex items-center justify-center bg-white/90 px-6 text-center"><div class="text-slate-400"><i class="fas fa-chart-line mb-3 text-4xl opacity-40" aria-hidden="true"></i><p class="font-semibold text-slate-600">当前条件下暂无趋势数据</p><p class="mt-1 text-sm">可以扩大时间范围或重新选择频道</p></div></div></div>
+        </section>
+    </main>
+
+    <div id="trend-channel-panel" hidden class="fixed inset-0 z-50 hidden flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm">
+        <div role="dialog" aria-modal="true" aria-labelledby="trend-filter-title" class="flex max-h-[80vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div class="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 id="trend-filter-title" class="font-bold text-slate-900">筛选频道</h2><p class="mt-1 text-xs text-slate-500">不选择时显示全部活跃频道</p></div><button id="trend-filter-close" type="button" class="flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700" aria-label="关闭频道筛选"><i class="fas fa-xmark" aria-hidden="true"></i></button></div>
+            <div class="border-b border-slate-100 p-4"><label for="trend-channel-search" class="sr-only">搜索频道</label><div class="relative"><i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden="true"></i><input id="trend-channel-search" type="search" placeholder="搜索频道名称或分类" class="w-full rounded-xl border border-slate-200 py-2.5 pl-10 pr-3 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-100"></div></div>
+            <div id="trend-channel-list" class="min-h-40 flex-1 divide-y divide-slate-100 overflow-y-auto" aria-live="polite"></div>
+            <div class="flex flex-col-reverse gap-3 border-t border-slate-100 bg-slate-50 px-5 py-4 sm:flex-row sm:items-center sm:justify-between"><button id="trend-filter-clear" type="button" class="text-sm font-semibold text-slate-500 hover:text-slate-800">清空选择</button><button id="trend-filter-apply" type="button" class="rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700">应用筛选</button></div>
+        </div>
+    </div>
+
+    <script src="js/env.js?v=20250720-002"></script>
+    <script>window.API_BASE_URL = API_BASE_URL;</script>
+    <script src="js/config.js?v=20260915-002"></script>
+    <script src="js/utils.js?v=20250110-001"></script>
+    <script src="js/api.js?v=20250110-002"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
+    <script src="js/rankings-trends.js?v=20260915-001"></script>
+    <script src="js/rankings-page.js?v=20260915-010"></script>
+    <script src="js/shared-navigation.js?v=20260516-003"></script>
+</body>
+</html>

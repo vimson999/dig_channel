@@ -1,4 +1,5 @@
 from datetime import datetime
+import os
 import uuid
 from . import db
 
@@ -35,16 +36,31 @@ class DownloadTask(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     completed_at = db.Column(db.DateTime, nullable=True)
 
+    _TYPE_MARKER = '.__download_type__:'
+
+    @property
+    def download_type(self):
+        """Persist pending mode compatibly in the existing filename column."""
+        if self.filename and self.filename.startswith(self._TYPE_MARKER):
+            return self.filename[len(self._TYPE_MARKER):]
+        extension = os.path.splitext(self.filename or '')[1].lower()
+        return {'.mp3': 'audio', '.srt': 'srt', '.txt': 'text'}.get(extension, 'video')
+
+    @download_type.setter
+    def download_type(self, value):
+        self.filename = self._TYPE_MARKER + (value or 'video')
+
     def to_dict(self):
         return {
             'id': self.id,
             'url': self.url,
+            'download_type': self.download_type or 'video',
             'title': self.title or self.url,
             'thumbnail': self.thumbnail,
             'duration': self.duration,
             'status': self.status,
             'progress': self.progress,
-            'filename': self.filename,
+            'filename': None if (self.filename or '').startswith(self._TYPE_MARKER) else self.filename,
             'filepath': self.filepath,
             'file_size': self.file_size,
             'error_message': self.error_message,

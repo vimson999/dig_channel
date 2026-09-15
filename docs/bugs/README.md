@@ -6,9 +6,9 @@
 
 复发根因登记表：[`recurrence-registry.json`](recurrence-registry.json)。正式回顾归档在 [`reviews/`](reviews/)。
 
-2026-09-05 每日复核：[数据库性能巡检](reviews/2026-09-05-db-performance-audit.md)。
-窗口内数据库错误归零，但慢 SQL 总耗时与 PgBouncer 往返尾延迟明显回升；最终代码尚未完成运行时替换，
-网络与事务边界根因继续 OBSERVING，不能用静态验证代替自然流量验收。
+2026-09-15 每日复核：[数据库性能巡检](reviews/2026-09-15-db-performance-audit.md)。
+应用慢 SQL 升至 132 条/223.626 秒，13:01 出现 4 个 PgBouncer query-wait episode 与 4 个应用断连；
+executor、锁和 Session 证据继续排除缺索引，既有网络簇保持 OPEN/REPEATED/OBSERVING。
 
 执行完整性检查：
 
@@ -20,6 +20,16 @@
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-09-15 | [每日数据库性能与错误巡检](reviews/2026-09-15-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | 4 个 query-wait episode 与应用断连复发；无 DDL 证据，网络 OPEN/REPEATED |
+| 2026-09-14 | [每日数据库性能与错误巡检](reviews/2026-09-14-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | 错误与 timeout 为 0；慢 SQL 24 条/35.476 秒；Publisher P0 已替换运行态待自然验收 |
+| 2026-09-14 | [Publisher 上传尚在合法执行窗口时被 Watchdog 误收口](2026-09-14-publisher-upload-orphan-grace-before-execution-timeout.md) | Publisher upload-only / Watchdog / platform_upload | RUNTIME_REPLACED/OBSERVING；1675 项全量与双安全门重启通过 |
+| 2026-09-13 | [每日数据库性能与错误巡检](reviews/2026-09-13-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | 错误与 timeout 为 0；慢 SQL 14 条/26.437 秒；修复 completed+error 矛盾并完成整栈替换 |
+| 2026-09-13 | [Publisher 上传成功后保留孤儿清理错误](2026-09-13-publisher-success-preserved-orphan-error.md) | Publisher upload-only / Watchdog / 终态一致性 | RUNTIME_REPLACED/OBSERVING；1674 项全量通过，待自然 upload-only 成功 |
+| 2026-09-12 | [每日数据库性能与错误巡检](reviews/2026-09-12-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | 错误与 timeout 为 0；慢 SQL 27 条/70.433 秒；无 DDL 证据；Publisher 修复已运行替换 |
+| 2026-09-11 | [每日数据库性能与错误巡检](reviews/2026-09-11-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | DB 错误为 0；慢 SQL 13 条/25.971 秒；无 DDL 证据；Publisher repair P0 已改码 |
+| 2026-09-11 | [Publisher 队列修复替换仍可见消息导致任务自我饿死](2026-09-11-publisher-queue-repair-visible-message-starvation.md) | Publisher pending repair / render queue / Redis unacked | CODE_VERIFIED/AWAITING_RUNTIME_REPLACEMENT；TDD 与 queue-repair 51/51 通过 |
+| 2026-09-10 | [每日数据库性能与错误巡检](reviews/2026-09-10-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | 错误为 0；慢 SQL 较基线下降、较桥接窗回升；无 DDL 证据，网络继续 OPEN |
+| 2026-09-10 | [DB 巡检漏报任务门禁的短暂 idle-in-transaction 观测](2026-09-10-db-audit-missed-task-guard-idle-observations.md) | DB 巡检 / runtime guard / Session | CODE_CHANGED/REPLAY_ACCEPTED；31 个短暂观测已正确汇总，待下一完整窗 |
 | 2026-09-05 | [每日数据库性能与错误巡检](reviews/2026-09-05-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | 错误为 0，但慢 SQL 总耗时升至 181.964 秒；最终代码待运行时替换，网络簇 OPEN/REPEATED/OBSERVING |
 | 2026-09-03 | [每日数据库性能与错误巡检](reviews/2026-09-03-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | 应用慢 SQL 总时长降 28.8%；两条 P0 已改码，待安全重启；网络超时 OPEN/REPEATED |
 | 2026-09-03 | [后台任务完整注册 Web API 导致混版导入失败](2026-09-03-worker-app-factory-api-import-fanout.md) | Celery 全任务 / app factory / Web API import | RUNTIME_REPLACED/OBSERVING；15/15 service running，待自然任务与完整窗口 |

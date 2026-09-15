@@ -14,7 +14,7 @@ from services.content_pipeline.clean_checkpoint import load_completed_clean_resu
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_GAP_AUDIO = Path("/Users/v9/Downloads/room/音频/00-头尾/间隔.MP3")
+DEFAULT_GAP_AUDIO = PROJECT_ROOT / "runtime" / "content_pipeline" / "config" / "interval.mp3"
 AUDIO_SUFFIXES = {".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg"}
 
 

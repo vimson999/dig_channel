@@ -8,7 +8,7 @@ from services.download_service import download_service
 logger = logging.getLogger(__name__)
 
 @celery_app.task(bind=True)
-def download_video_task(self, task_id, url):
+def download_video_task(self, task_id, url, download_type='video'):
     """
     Celery task to download a video.
     """
@@ -19,12 +19,14 @@ def download_video_task(self, task_id, url):
             # Update task with Celery ID
             task = DownloadTask.query.get(task_id)
             if task:
+                if task.status == 'cancelled':
+                    return {'status': 'cancelled', 'task_id': task_id}
                 task.celery_task_id = self.request.id
                 task.status = 'downloading'
                 db.session.commit()
             
             # Start download
-            download_service.download_video(task_id, url)
+            download_service.download(task_id, url, download_type)
             return {'status': 'completed', 'task_id': task_id}
             
         except Exception as e:

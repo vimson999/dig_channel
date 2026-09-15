@@ -2,7 +2,7 @@
 
 ## 基本信息
 
-- 状态：已修复
+- 状态：已重新打开；2026-09-14 发现 90 秒阈值会误收口健康上传，替代防线待运行验收
 - 严重级别：高
 - 影响模块：MP3 详情页 B站上传 / `platform_upload` Celery worker / publisher queue repair
 - 首次发现：B站上传记录显示 `运行中`，但 `platform_upload` worker 没有 active 任务
@@ -47,6 +47,10 @@ celery_task_id=a12f769e-f854-49c9-b1b2-f1c58230957a
 - 上传步骤使用独立 orphan grace：`PUBLISHER_UPLOAD_PROCESSING_ORPHAN_GRACE_SECONDS`，默认 90 秒。
 - 上传 orphan 只收口为失败，不自动重投，避免重复投稿。
 - 现场任务 `1227f221-f245-4a86-a1ab-730ddaea112f` 已收口为 `failed/orphaned_processing`。
+
+> 2026-09-14 复核：本节的 90 秒独立 grace 假设已被真实 81.6–212.8 秒成功上传反证。新实现把 Bilibili
+> orphan grace 绑定到上传器硬超时与结算余量，并补查 broker/unacked；详见
+> `2026-09-14-publisher-upload-orphan-grace-before-execution-timeout.md`。
 
 ## 验证
 

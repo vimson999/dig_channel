@@ -1,3 +1,63 @@
+# Design QA: 频道排行榜时间切换与高密度宽屏布局
+
+## Visual truth
+
+- Source visual truth paths: `/var/folders/dd/51s7f6gs6vz30qy285xd_b_80000gn/T/codex-clipboard-58006e8f-23a7-4f5e-88fe-396296e1652d.png` and the follow-up critique capture `/Users/v9/.codex/attachments/8ba72fd7-9a92-4c0d-9f6d-ec11b12d9a7b/image-1.png`.
+- Browser-rendered implementation screenshot artifact: Codex in-app browser capture at `http://127.0.0.1:5001/rankings.html?type=monthly_revenue`.
+- Source pixels: initial `1455 x 948`; follow-up `1769 x 959`, both including browser chrome. The latest comparison normalized the follow-up content region to a `1769 x 917` CSS viewport.
+- Implementation CSS viewport and capture: `1769 x 917`, device scale factor `1`; comparison used the page content region rather than browser chrome.
+- State: live monthly and daily revenue rankings, page size 20. Time-switching checks covered current period, August, July, and the exact day `2026-08-07`.
+
+## Comparison evidence
+
+- Full-view comparison: passed after a second design iteration. The initial source showed a 1280px content cap, large breadcrumb/hero blocks, repeated headings, two-line channel rows, and only four visible records. The first compact implementation showed all 20 rows but still left a large empty band between identity and value. The final implementation uses that band for semantic relative-to-leader comparison bars.
+- Focused ranking-table comparison: passed. Channel name and YouTube ID share one line on desktop; rank, the active metric, relative percentage, semantic progress bar, and action retain distinct aligned columns.
+- Focused mobile comparison: passed after iteration. At `390 x 844`, the secondary YouTube ID is hidden while rank, channel name, value, and action remain visible without horizontal dragging.
+
+## Findings and iteration history
+
+1. Initial P1: the source layout spent most of the first viewport on container margins, breadcrumb, hero copy, and repeated section headings, leaving only four ranking rows visible.
+2. Fix: expanded the page frame from 1280px to 1680px, removed the breadcrumb and redundant descriptions, reduced the page header, and condensed the ranking controls and metadata.
+3. Initial P1: 20 two-line rows could not fit in the desktop viewport and required page scrolling.
+4. Fix: changed rows to a 24px minimum-height single-line grid and moved pagination into the metadata bar. Post-fix browser evidence shows all 20 rows, including rank 20, within `1455 x 906`.
+5. Initial P2: the first responsive pass kept the desktop minimum table width, pushing values offscreen on mobile.
+6. Fix: added a four-column mobile grid and hid only the secondary channel ID. Post-fix evidence shows channel values and actions inside the `390px` viewport.
+7. Follow-up P1: widening the table without adding information left a conspicuous empty middle band; the metric remained isolated at the far right and the layout looked stretched rather than designed.
+8. Fix: capped the channel identity column, added a flexible `相对榜首` column using semantic progress elements, displayed exact percentages, and changed the generic `数据` heading to the active metric name.
+9. Post-fix: the `1769 x 917` browser capture shows continuous information across the table width. Monthly revenue uses blue comparison bars, subscriber growth uses purple, and page 2 preserves the page-1 leader baseline (`1.3%` for its first row rather than resetting to `100%`).
+10. Follow-up P1: the period label was read-only, so historical monthly and daily rankings were inaccessible even though the API already supported them.
+11. Fix: added a compact native date/month picker, previous/next period buttons, and a “本期” shortcut in the existing toolbar. Daily and monthly selections are preserved separately and encoded in the URL for refresh/share continuity.
+12. Post-fix: August and July monthly rankings each rendered 20 of 49 live channels; `2026-08-07` rendered 20 of 48 daily records. Current-period next/current actions disable automatically, and the controls fit without reintroducing the removed vertical bulk.
+13. Follow-up: added `年收入` and `年新增订阅` alongside the existing daily/monthly tabs. The same compact period control becomes a four-digit year selector with previous year, next year, and current-year behavior.
+14. Post-fix: the live 2026 annual revenue and subscriber rankings aggregate `2026-01-01` through `2026-09-15`; navigating back renders the full `2025-01-01` through `2025-12-31` period. All six tabs remain on one compact desktop control row.
+15. Follow-up: each ranking row now includes the channel's saved category and CPM reference value. Both are compact single-line badges beside the channel ID (`教育`, `参考 $4.00/千次` in the live first row), so the table gains configuration context without increasing row height or displacing the metric/progress columns.
+16. Correction: category and CPM were initially placed inline after a variable-length channel ID, which made their horizontal positions drift. They are now dedicated grid columns with matching headers, fixed widths, consistent right alignment for CPM, and subtle vertical separators. Browser evidence confirms 20 category cells and 20 CPM cells align independently of ID length.
+
+## Fidelity surfaces
+
+- Fonts and typography: passed. Existing system fonts and weight hierarchy remain; row labels use compact 12–14px sizes with truncation for long names and IDs.
+- Spacing and layout rhythm: passed. Desktop side margins are reduced to 16px, controls form two compact bands, row rhythm is consistent, and 20 records fit without page scrolling at the target viewport.
+- Colors and visual tokens: passed. Existing slate, blue, green, purple, orange, borders, selected states, and subtle white surface remain consistent with Shioa; comparison bars follow the active ranking metric color.
+- Image quality and assets: passed. The page contains no raster content; existing Font Awesome icons are retained without placeholders or custom drawings.
+- Copy and content: passed. Duplicate explanatory copy was removed; total, period, page status, names, IDs, active metric labels, and relative-to-leader values continue to use live API data or transparent client-side derivation from that data.
+
+## Functional checks
+
+- Desktop page rendered 20 live rows; the last visible row was rank 20, `Skill Leap AI`.
+- Page 2 interaction rendered 20 rows and updated the status to `第 2 / 3 页`; returning to page 1 restored the initial ranking.
+- Relative comparison remained anchored to the global first-place value when paging; page 2's first result rendered `1.3%`, not `100%`.
+- Switching to daily subscriber ranking updated the value header to `日增订阅` and the progress token to purple; returning to monthly revenue restored `月收入` and blue.
+- Desktop browser console contained zero errors.
+- Historical-time browser checks passed for `month=2026-08`, previous-month navigation to `2026-07`, exact `date=2026-08-07`, and return to the current period. URLs and API-rendered period labels remained synchronized.
+- Annual browser checks passed for both revenue and subscriber rankings, including `year=2026`, previous-year navigation to `year=2025`, 20-row pagination, and a clean-console run in a fresh browser tab.
+- Channel metadata browser check passed with live category and configured reference CPM on all rendered rows; the fresh-tab console remained clean and the page continued to render 20 results.
+- Mobile capture retained rank, channel, metric, and detail action without pushing the metric offscreen; the desktop-only comparison visualization was correctly hidden.
+- Frontend ranking regression suite passed 10/10; combined ranking and trend suite passed 15/15; `git diff --check` passed.
+
+final result: passed
+
+---
+
 # Design QA: 知识星球内容分析工作台
 
 ## Visual truth
@@ -39,6 +99,52 @@ The selected direction and browser implementation were reviewed together in one 
 - Header sync delegates to the existing current-Tab synchronization action.
 - Inspector “定位主题” and conditional “查看原文” use existing topic data and page behavior.
 - JavaScript syntax checks, duplicate-ID check, console error check, responsive overflow check, and `git diff --check` passed.
+
+final result: passed
+
+---
+
+# Design QA: 频道数据中心趋势分析整合
+
+## Visual truth
+
+- Source visual truth path: `/Users/v9/.codex/attachments/58df59a2-9011-4305-ac02-f291237df02d/image-1.png`.
+- Browser-rendered implementation screenshot artifact: Codex in-app browser task capture at `http://127.0.0.1:5001/rankings.html?view=trends`.
+- Viewport: desktop `1280 x 720`; responsive check `390 x 844`.
+- Dimensions and density: source `1440 x 586`; implementation desktop capture `1280 x 720`, CSS density `1`. The comparison was normalized around the trend-card region rather than the surrounding application navigation.
+- State: live local data, 50 active channels, daily revenue over the latest seven days. Additional states checked: monthly aggregation, one-channel filtering, pie view, ranking view, and mobile layout.
+
+## Comparison evidence
+
+- Full-view comparison: passed. The source and implementation captures were reviewed together in the task context. Both use a white elevated data card, compact title block, right-aligned controls, a scrollable legend, and a large chart canvas.
+- Focused control comparison: passed. Line, bar, and pie controls; channel filtering; daily/monthly aggregation; and the range selector preserve the source workflow. The implementation adds a metric selector for the backend's existing revenue, subscriber, and view data instead of hard-coding revenue.
+- Focused chart comparison: passed. The seven-day line view retains the source's dense multi-channel comparison. The pie view intentionally shows the ten largest channels and combines the remainder as “其他频道” so labels remain readable.
+
+## Iteration history
+
+1. Initial P1: Tailwind display utilities overrode the native `hidden` attribute, so the filter dialog and chart empty state appeared on first load.
+2. Fix: synchronized the semantic `hidden` property with Tailwind's `hidden` class in the controller and initial markup.
+3. Post-fix: the initial chart renders unobstructed; opening, applying, and closing the filter dialog works normally.
+4. Initial P2: the pie view rendered all 50 channels, creating overlapping labels and unusable visual density.
+5. Fix: sorted current values, retained the ten largest slices, and aggregated the long tail into “其他频道”.
+6. Post-fix: the pie legend contains ten named channels plus one aggregate slice; no remaining actionable P0/P1/P2 findings.
+
+## Fidelity surfaces
+
+- Fonts and typography: passed. Existing system fonts, compact control labels, bold section titles, and readable metadata hierarchy match the Shioa interface and source density.
+- Spacing and layout rhythm: passed. Desktop controls stay aligned with the title card; mobile controls wrap into logical rows without clipping. At `390px`, body width, document width, and viewport width all equal `390px`.
+- Colors and visual tokens: passed. Existing indigo, slate, white, soft border, shadow, and semantic chart colors are reused.
+- Image quality and assets: passed. The region contains data visualization and standard UI icons only; ECharts and the existing Font Awesome library render them sharply without placeholder or generated assets.
+- Copy and content: passed. Labels describe the actual metric, aggregation, range, selected-channel count, channel count, and date range returned by the live API.
+
+## Functional checks
+
+- Daily revenue trend loaded 50 live channels for `2026-09-09` through `2026-09-15`.
+- Monthly aggregation loaded the six-month range `2026-04-01` through `2026-09-15`.
+- Selecting one channel updated both the filter summary and chart metadata to one channel.
+- Switching between trend analysis and the complete ranking updated the URL and lazy-loaded the selected workspace.
+- Mobile layout has no horizontal overflow at `390 x 844`.
+- Browser console has no application errors; only the project's existing Tailwind CDN warning remains.
 
 final result: passed
 

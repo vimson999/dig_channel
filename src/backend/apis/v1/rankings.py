@@ -2,7 +2,7 @@
 """
 排行榜相关的RESTful API接口
 
-提供4个排行榜的数据查询功能
+提供日、月、年三个周期的收入与新增订阅排行榜查询功能
 """
 
 from flask import Blueprint, request, jsonify
@@ -14,20 +14,40 @@ from datetime import datetime, date
 # 创建蓝图
 bp = Blueprint('rankings', __name__, url_prefix='/api/v1/rankings')
 
+
+def _parse_pagination(default_per_page=10, max_per_page=100):
+    """Parse the shared ranking pagination contract."""
+    page = int(request.args.get('page', 1))
+    per_page = int(request.args.get('per_page', request.args.get('limit', default_per_page)))
+    if page < 1:
+        raise ValueError("页码必须大于等于1")
+    if per_page < 1 or per_page > max_per_page:
+        raise ValueError(f"每页条数必须在1-{max_per_page}之间")
+    return page, per_page
+
+
+def _parse_year():
+    year = int(request.args.get('year', date.today().year))
+    if not (2020 <= year <= 2030):
+        raise ValueError("年份范围无效")
+    return year
+
 @bp.route('/daily-revenue', methods=['GET'])
 @require_login
 def get_daily_revenue_ranking(current_user):
     """获取日收入排行榜
     
     Query Parameters:
-        limit (int): 返回条数，默认10，最大50
+        page (int): 页码，默认1
+        per_page (int): 每页条数，默认10，最大100
+        limit (int): per_page 的兼容别名
         date (str): 查询日期，格式YYYY-MM-DD，默认今天
     
     Returns:
         JSON: 日收入排行榜数据
     """
     try:
-        limit = min(int(request.args.get('limit', 10)), 50)
+        page, per_page = _parse_pagination()
         
         # 解析日期参数
         target_date = None
@@ -36,7 +56,9 @@ def get_daily_revenue_ranking(current_user):
             # 验证日期格式
             target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
         
-        result = RankingService.get_daily_revenue_ranking(limit, target_date, current_user.id)
+        result = RankingService.get_daily_revenue_ranking(
+            per_page, target_date, current_user.id, page=page
+        )
         
         if result['success']:
             return jsonify({
@@ -57,7 +79,9 @@ def get_monthly_revenue_ranking(current_user):
     """获取月收入排行榜
     
     Query Parameters:
-        limit (int): 返回条数，默认10，最大50
+        page (int): 页码，默认1
+        per_page (int): 每页条数，默认10，最大100
+        limit (int): per_page 的兼容别名
         year (int): 年份，默认当前年
         month (int): 月份，默认当前月
     
@@ -65,7 +89,7 @@ def get_monthly_revenue_ranking(current_user):
         JSON: 月收入排行榜数据
     """
     try:
-        limit = min(int(request.args.get('limit', 10)), 50)
+        page, per_page = _parse_pagination()
         
         # 解析年月参数
         target_date = None
@@ -80,7 +104,9 @@ def get_monthly_revenue_ranking(current_user):
                 return handle_api_error(400, "年份范围无效")
             target_date = date(year, month, 1)
         
-        result = RankingService.get_monthly_revenue_ranking(limit, target_date, current_user.id)
+        result = RankingService.get_monthly_revenue_ranking(
+            per_page, target_date, current_user.id, page=page
+        )
         
         if result['success']:
             return jsonify({
@@ -101,14 +127,16 @@ def get_daily_subscriber_ranking(current_user):
     """获取日新增订阅排行榜
     
     Query Parameters:
-        limit (int): 返回条数，默认10，最大50
+        page (int): 页码，默认1
+        per_page (int): 每页条数，默认10，最大100
+        limit (int): per_page 的兼容别名
         date (str): 查询日期，格式YYYY-MM-DD，默认今天
     
     Returns:
         JSON: 日新增订阅排行榜数据
     """
     try:
-        limit = min(int(request.args.get('limit', 10)), 50)
+        page, per_page = _parse_pagination()
         
         # 解析日期参数
         target_date = None
@@ -116,7 +144,9 @@ def get_daily_subscriber_ranking(current_user):
         if date_str:
             target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
         
-        result = RankingService.get_daily_subscriber_ranking(limit, target_date, current_user.id)
+        result = RankingService.get_daily_subscriber_ranking(
+            per_page, target_date, current_user.id, page=page
+        )
         
         if result['success']:
             return jsonify({
@@ -131,13 +161,33 @@ def get_daily_subscriber_ranking(current_user):
     except Exception as e:
         return handle_api_error(500, f"获取日订阅增长排行榜失败: {str(e)}")
 
+
+@bp.route('/yearly-revenue', methods=['GET'])
+@require_login
+def get_yearly_revenue_ranking(current_user):
+    """获取指定自然年的累计收入排行榜。"""
+    try:
+        page, per_page = _parse_pagination()
+        result = RankingService.get_yearly_revenue_ranking(
+            per_page, _parse_year(), current_user.id, page=page
+        )
+        if result['success']:
+            return jsonify({'success': True, 'data': result['data']})
+        return handle_api_error(500, result['message'])
+    except ValueError as e:
+        return handle_api_error(400, f"参数错误: {str(e)}")
+    except Exception as e:
+        return handle_api_error(500, f"获取年收入排行榜失败: {str(e)}")
+
 @bp.route('/monthly-subscriber', methods=['GET'])
 @require_login
 def get_monthly_subscriber_ranking(current_user):
     """获取月新增订阅排行榜
     
     Query Parameters:
-        limit (int): 返回条数，默认10，最大50
+        page (int): 页码，默认1
+        per_page (int): 每页条数，默认10，最大100
+        limit (int): per_page 的兼容别名
         year (int): 年份，默认当前年
         month (int): 月份，默认当前月
     
@@ -145,7 +195,7 @@ def get_monthly_subscriber_ranking(current_user):
         JSON: 月新增订阅排行榜数据
     """
     try:
-        limit = min(int(request.args.get('limit', 10)), 50)
+        page, per_page = _parse_pagination()
         
         # 解析年月参数
         target_date = None
@@ -160,7 +210,9 @@ def get_monthly_subscriber_ranking(current_user):
                 return handle_api_error(400, "年份范围无效")
             target_date = date(year, month, 1)
         
-        result = RankingService.get_monthly_subscriber_ranking(limit, target_date, current_user.id)
+        result = RankingService.get_monthly_subscriber_ranking(
+            per_page, target_date, current_user.id, page=page
+        )
         
         if result['success']:
             return jsonify({
@@ -174,6 +226,24 @@ def get_monthly_subscriber_ranking(current_user):
         return handle_api_error(400, f"参数错误: {str(e)}")
     except Exception as e:
         return handle_api_error(500, f"获取月订阅增长排行榜失败: {str(e)}")
+
+
+@bp.route('/yearly-subscriber', methods=['GET'])
+@require_login
+def get_yearly_subscriber_ranking(current_user):
+    """获取指定自然年的累计新增订阅排行榜。"""
+    try:
+        page, per_page = _parse_pagination()
+        result = RankingService.get_yearly_subscriber_ranking(
+            per_page, _parse_year(), current_user.id, page=page
+        )
+        if result['success']:
+            return jsonify({'success': True, 'data': result['data']})
+        return handle_api_error(500, result['message'])
+    except ValueError as e:
+        return handle_api_error(400, f"参数错误: {str(e)}")
+    except Exception as e:
+        return handle_api_error(500, f"获取年订阅增长排行榜失败: {str(e)}")
 
 @bp.route('/all', methods=['GET'])
 @require_login
@@ -301,6 +371,12 @@ def get_ranking_types():
                 'endpoint': '/api/v1/rankings/monthly-revenue'
             },
             {
+                'key': 'yearly_revenue',
+                'name': '年收入排行榜',
+                'description': '按指定自然年累计预估收入排序',
+                'endpoint': '/api/v1/rankings/yearly-revenue'
+            },
+            {
                 'key': 'daily_subscriber',
                 'name': '日新增订阅排行榜',
                 'description': '按当日订阅者增长排序',
@@ -311,6 +387,12 @@ def get_ranking_types():
                 'name': '月新增订阅排行榜',
                 'description': '按本月累计订阅者增长排序',
                 'endpoint': '/api/v1/rankings/monthly-subscriber'
+            },
+            {
+                'key': 'yearly_subscriber',
+                'name': '年新增订阅排行榜',
+                'description': '按指定自然年累计订阅者增长排序',
+                'endpoint': '/api/v1/rankings/yearly-subscriber'
             }
         ]
         

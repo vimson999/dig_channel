@@ -739,9 +739,10 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         )
         self.assertEqual(len(publication_selects), 2, publication_selects)
 
-    def test_requeues_deferred_publisher_task_when_message_is_unacked_but_not_active(self):
+    def test_keeps_deferred_publisher_task_when_message_is_unacked_but_not_active(self):
         task = self._pending_publisher_task(step="deferred_capacity")
         task_id = task.id
+        original_celery_id = task.celery_task_id
         dummy = DummyCeleryTask()
 
         with patch.object(publisher_queue_repair, "_message_visible_in_workers", return_value=(False, True)), \
@@ -750,12 +751,13 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
             result = publisher_queue_repair.repair_stale_publisher_pending_tasks_once()
 
         self.assertEqual(result["checked"], 1)
-        self.assertEqual(result["requeued"], 1)
+        self.assertEqual(result["requeued"], 0)
         task = db.session.get(PublicationTask, task_id)
-        self.assertEqual(task.celery_task_id, "new-celery-id")
-        repair = task.result["queue_repair"]
-        self.assertEqual(repair["reason"], "pending_message_not_active_but_queue_visible")
-        self.assertTrue(repair["previous_message_visible_in_queue"])
+        self.assertEqual(task.status, "pending")
+        self.assertEqual(task.current_step, "deferred_capacity")
+        self.assertEqual(task.celery_task_id, original_celery_id)
+        self.assertNotIn("queue_repair", task.result)
+        self.assertEqual(dummy.calls, [])
 
     def test_scan_excludes_paused_features(self):
         self._task(feature="content_audio_clean")
@@ -1242,7 +1244,10 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(transaction_states, [("worker", False), ("queue", False)])
 
     def test_publisher_processing_close_releases_db_before_revoke(self):
-        task = self._processing_publisher_task(step="upload_bilibili")
+        task = self._processing_publisher_task(
+            step="upload_bilibili",
+            minutes_old=30,
+        )
         transaction_states = []
 
         def capture_revoke(*_args, **_kwargs):
@@ -1251,6 +1256,10 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         with patch.object(
             publisher_queue_repair,
             "_message_visible_in_workers",
+            return_value=(False, True),
+        ), patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_queue",
             return_value=(False, True),
         ), patch.object(
             publisher_queue_repair,
@@ -1449,7 +1458,10 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(dummy.calls, [])
 
     def test_closes_stale_bilibili_upload_processing_task_on_platform_upload_queue(self):
-        task = self._processing_publisher_task(step="upload_bilibili")
+        task = self._processing_publisher_task(
+            step="upload_bilibili",
+            minutes_old=30,
+        )
         task.params = {
             "feature": "publisher",
             "video": {
@@ -1463,12 +1475,12 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
                 "parent_task_id": "parent-1",
             },
         }
-        task.updated_at = datetime.utcnow() - timedelta(minutes=20)
+        task.updated_at = datetime.utcnow() - timedelta(minutes=30)
         db.session.commit()
 
         with patch.object(publisher_queue_repair, "_message_visible_in_workers", return_value=(False, True)), \
              patch.object(publisher_queue_repair, "_revoke_celery_task"), \
-             patch.object(publisher_queue_repair, "_message_visible_in_queue") as queue_scan:
+             patch.object(publisher_queue_repair, "_message_visible_in_queue", return_value=(False, True)) as queue_scan:
             updated, repaired, action = publisher_queue_repair.maybe_repair_stale_publisher_processing_task(task)
 
         self.assertTrue(repaired)
@@ -1476,9 +1488,9 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(updated.status, "failed")
         self.assertEqual(updated.current_step, "orphaned_processing")
         self.assertEqual(updated.result["processing_orphan_repair"]["queue"], "platform_upload")
-        queue_scan.assert_not_called()
+        self.assertEqual(queue_scan.call_args.kwargs["queue"], "platform_upload")
 
-    def test_closes_upload_processing_task_after_short_upload_grace(self):
+    def test_keeps_bilibili_upload_processing_within_uploader_timeout(self):
         task = self._processing_publisher_task(step="upload_bilibili")
         task.params = {
             "feature": "publisher",
@@ -1497,17 +1509,54 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         db.session.commit()
 
         with patch.dict(os.environ, {
+            "BILIBILI_UPLOAD_TIMEOUT_SECONDS": "600",
             "PUBLISHER_PROCESSING_ORPHAN_GRACE_SECONDS": "600",
             "PUBLISHER_UPLOAD_PROCESSING_ORPHAN_GRACE_SECONDS": "90",
         }), \
-             patch.object(publisher_queue_repair, "_message_visible_in_workers", return_value=(False, True)), \
-             patch.object(publisher_queue_repair, "_revoke_celery_task"):
+             patch.object(publisher_queue_repair, "_message_visible_in_workers") as worker_scan, \
+             patch.object(publisher_queue_repair, "_revoke_celery_task") as revoke:
             updated, repaired, action = publisher_queue_repair.maybe_repair_stale_publisher_processing_task(task)
 
-        self.assertTrue(repaired)
-        self.assertEqual(action, "closed")
-        self.assertEqual(updated.status, "failed")
-        self.assertEqual(updated.result["processing_orphan_repair"]["reason"], "upload_step_not_requeued")
+        self.assertFalse(repaired)
+        self.assertEqual(action, "within_grace")
+        self.assertEqual(updated.status, "processing")
+        worker_scan.assert_not_called()
+        revoke.assert_not_called()
+
+    def test_processing_scan_routes_bilibili_projection_to_platform_upload(self):
+        task = self._processing_publisher_task(
+            step="upload_bilibili",
+            minutes_old=20,
+        )
+        db.session.add(PublicationTaskBilibiliUpload(
+            task_id=task.id,
+            parent_task_id="parent-1",
+            parent_feature="mp3_video_workflow",
+            source_label="mp3_video_workflow:bilibili_upload",
+            video_key="landscape",
+            title="生产扫描必须识别结构化投稿",
+            video_path="/tmp/done.mp4",
+            tags=["财经"],
+        ))
+        db.session.commit()
+        task_id = task.id
+
+        with patch.dict(os.environ, {
+            "BILIBILI_UPLOAD_TIMEOUT_SECONDS": "600",
+            "PUBLISHER_UPLOAD_PROCESSING_ORPHAN_GRACE_SECONDS": "90",
+        }), \
+             patch.object(publisher_queue_repair, "_message_visible_in_workers", return_value=(False, True)), \
+             patch.object(publisher_queue_repair, "_message_visible_in_queue", return_value=(False, True)), \
+             patch.object(publisher_queue_repair, "_revoke_celery_task"):
+            result = publisher_queue_repair.repair_stale_publisher_processing_tasks_once()
+
+        self.assertEqual(result["closed"], 1)
+        self.assertEqual(result["items"][0]["queue"], "platform_upload")
+        persisted = db.session.get(PublicationTask, task_id)
+        self.assertEqual(
+            persisted.result["processing_orphan_repair"]["queue"],
+            "platform_upload",
+        )
 
     def test_does_not_repair_processing_publisher_task_when_celery_message_is_visible(self):
         task = self._processing_publisher_task(step="v_synthesis")
@@ -1541,7 +1590,7 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         repair = updated.result["processing_orphan_repair"]
         self.assertEqual(repair["reason"], "processing_not_active_but_message_visible")
 
-    def test_closes_stale_upload_processing_publisher_task_without_requeue(self):
+    def test_keeps_stale_upload_processing_task_when_message_is_unacked(self):
         task = self._processing_publisher_task(step="upload")
         dummy = DummyCeleryTask()
 
@@ -1551,13 +1600,12 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
              patch.object(publisher_queue_repair, "run_publication_pipeline", dummy):
             updated, repaired, action = publisher_queue_repair.maybe_repair_stale_publisher_processing_task(task)
 
-        self.assertTrue(repaired)
-        self.assertEqual(action, "closed")
-        self.assertEqual(updated.status, "failed")
-        self.assertEqual(updated.current_step, "orphaned_processing")
-        self.assertIn("释放并发槽位", updated.error_message)
+        self.assertFalse(repaired)
+        self.assertEqual(action, "visible_in_queue")
+        self.assertEqual(updated.status, "processing")
+        self.assertEqual(updated.current_step, "upload")
         self.assertEqual(dummy.calls, [])
-        revoke.assert_called_once()
+        revoke.assert_not_called()
 
 
 if __name__ == "__main__":

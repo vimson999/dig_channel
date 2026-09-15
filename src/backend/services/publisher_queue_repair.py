@@ -507,6 +507,13 @@ def maybe_requeue_stale_publisher_child(
         )
         if not queue_checked:
             return snapshot, False
+        if queue_visible:
+            active_logger.info(
+                "Publisher pending task message is still queued/unacked; waiting without replacing celery id: child=%s celery=%s",
+                snapshot.id,
+                previous_celery_id,
+            )
+            return snapshot, False
     else:
         worker_visible = False
         queue_visible = False
@@ -550,27 +557,14 @@ def maybe_requeue_stale_publisher_child(
         )
         return updated_snapshot, False
 
-    reason = (
-        "pending_message_not_active_but_queue_visible"
-        if queue_visible
-        else "pending_queued_not_visible_in_celery"
-    )
+    reason = "pending_queued_not_visible_in_celery"
 
-    if not queue_visible and previous_celery_id:
+    if previous_celery_id:
         logger.info(
             "Publisher pending task message is absent from workers and queue: child=%s celery=%s",
             snapshot.id,
             previous_celery_id,
         )
-    elif queue_visible:
-        logger.warning(
-            "Publisher pending task message is queued/unacked but not active; requeueing with a fresh celery id: child=%s celery=%s",
-            snapshot.id,
-            previous_celery_id,
-        )
-
-    if previous_celery_id and worker_visible:
-        return snapshot, False
 
     try:
         async_result = apply_async_after_db_release(
@@ -597,7 +591,7 @@ def maybe_requeue_stale_publisher_child(
         "current_celery_id": async_result.id,
         "queue": target_queue,
         "reason": reason,
-        "previous_message_visible_in_queue": bool(queue_visible),
+        "previous_message_visible_in_queue": False,
     })
     history = list(repair_state.get("history") or [])
     history.append({
@@ -923,6 +917,7 @@ def maybe_repair_stale_publisher_processing_task(
     *,
     queue: str = "render",
     log: Optional[logging.Logger] = None,
+    upload_projection: Optional[PublicationTaskBilibiliUpload] = None,
 ) -> Tuple[PublicationTask, bool, str]:
     """Repair a publisher row stuck in processing when Celery no longer sees it."""
     active_logger = log or logger
@@ -935,7 +930,10 @@ def maybe_repair_stale_publisher_processing_task(
 
     snapshot = _detached_repair_task_snapshot(task)
     step = str(snapshot.current_step or "").lower()
-    grace_seconds = _publisher_processing_orphan_grace_seconds(step)
+    grace_seconds = _publisher_processing_orphan_grace_seconds(
+        step,
+        upload_projection=upload_projection,
+    )
     reference_time = snapshot.updated_at or snapshot.created_at
     if _age_seconds(reference_time) < grace_seconds:
         return snapshot, False, "within_grace"
@@ -943,6 +941,7 @@ def maybe_repair_stale_publisher_processing_task(
     requeue_target, target_queue = _publisher_child_repair_target(
         snapshot,
         default_queue=queue,
+        upload_projection=upload_projection,
     )
     _release_repair_db_session()
     worker_visible, worker_checked = _message_visible_in_workers(
@@ -955,6 +954,18 @@ def maybe_repair_stale_publisher_processing_task(
         return snapshot, False, "visible_in_worker"
 
     if step in PUBLISHER_PROCESSING_UPLOAD_STEPS:
+        queue_visible, queue_checked = _message_visible_in_queue(
+            snapshot.celery_task_id,
+            child_id=snapshot.id,
+            queue=target_queue,
+        )
+        if not queue_checked:
+            return snapshot, False, "visibility_unknown"
+        if queue_visible:
+            # Uploads have non-idempotent external side effects.  A broker or
+            # unacked copy is sufficient evidence to leave the row untouched;
+            # requeueing or revoking here could create a duplicate submission.
+            return snapshot, False, "visible_in_queue"
         _revoke_celery_task(snapshot)
         current = _load_matching_processing_publisher_task(snapshot)
         if current is None:
@@ -1161,6 +1172,15 @@ def repair_stale_publisher_processing_tasks_once(
         .limit(scan_limit)
         .all()
     )
+    row_ids = [str(row.id) for row in rows]
+    bilibili_upload_task_ids = {
+        str(task_id)
+        for task_id, in (
+            db.session.query(PublicationTaskBilibiliUpload.task_id)
+            .filter(PublicationTaskBilibiliUpload.task_id.in_(row_ids))
+            .all()
+        )
+    } if row_ids else set()
 
     items = []
     requeued = 0
@@ -1169,11 +1189,20 @@ def repair_stale_publisher_processing_tasks_once(
     for row in rows:
         previous_celery_id = row.celery_task_id
         previous_step = row.current_step
+        upload_projection = (
+            SimpleNamespace(task_id=str(row.id))
+            if str(row.id) in bilibili_upload_task_ids
+            else None
+        )
         task = _load_repair_task(row.id, *PUBLISHER_REPAIR_SCAN_COLUMNS)
         if not task:
             continue
         try:
-            updated, did_repair, action = maybe_repair_stale_publisher_processing_task(task, log=active_logger)
+            updated, did_repair, action = maybe_repair_stale_publisher_processing_task(
+                task,
+                log=active_logger,
+                upload_projection=upload_projection,
+            )
         except Exception as exc:
             db.session.rollback()
             active_logger.exception(
@@ -1195,7 +1224,11 @@ def repair_stale_publisher_processing_tasks_once(
             demoted += 1
         elif action == "closed":
             closed += 1
-        _target, target_queue = _publisher_child_repair_target(updated, default_queue="render")
+        _target, target_queue = _publisher_child_repair_target(
+            updated,
+            default_queue="render",
+            upload_projection=upload_projection,
+        )
         items.append({
             "task_id": updated.id,
             "queue": target_queue,
@@ -1895,10 +1928,37 @@ def _celery_message_visible(celery_id: Optional[str], *, child_id: str, queue: s
     return worker_visible or queue_visible, checked
 
 
-def _publisher_processing_orphan_grace_seconds(step: str) -> int:
+def _publisher_processing_orphan_grace_seconds(
+    step: str,
+    *,
+    upload_projection: Optional[PublicationTaskBilibiliUpload] = None,
+) -> int:
     normalized = str(step or "").strip().lower()
     if normalized in PUBLISHER_PROCESSING_UPLOAD_STEPS:
-        return _int_env("PUBLISHER_UPLOAD_PROCESSING_ORPHAN_GRACE_SECONDS", 90, 30)
+        configured_grace = _int_env(
+            "PUBLISHER_UPLOAD_PROCESSING_ORPHAN_GRACE_SECONDS",
+            90,
+            30,
+        )
+        is_bilibili_upload = (
+            normalized == "upload_bilibili"
+            or upload_projection is not None
+        )
+        if is_bilibili_upload:
+            upload_timeout = _int_env(
+                "BILIBILI_UPLOAD_TIMEOUT_SECONDS",
+                600,
+                1,
+            )
+            settle_seconds = _int_env(
+                "PUBLISHER_UPLOAD_PROCESSING_ORPHAN_SETTLE_SECONDS",
+                60,
+                0,
+            )
+            # Publishing is non-idempotent: never declare the task orphaned
+            # while its uploader is still inside the allowed execution window.
+            return max(configured_grace, upload_timeout + settle_seconds)
+        return configured_grace
     return _int_env("PUBLISHER_PROCESSING_ORPHAN_GRACE_SECONDS", 600, 120)
 
 

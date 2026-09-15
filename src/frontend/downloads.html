@@ -13,6 +13,7 @@
         .btn-primary { background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); color: white; padding: 0.75rem 2rem; border-radius: 12px; font-weight: 600; transition: all 0.2s; }
         .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(37, 99, 235, 0.3); }
         .progress-bar-fill { transition: width 0.5s ease-out; }
+        .type-option input:checked + span { background: #eff6ff; border-color: #3b82f6; color: #2563eb; box-shadow: 0 0 0 1px #3b82f6; }
     </style>
 </head>
 <body class="bg-slate-50 min-h-screen">
@@ -20,7 +21,7 @@
     <main class="max-w-[1200px] mx-auto px-6 py-12">
         <div class="mb-12">
             <h2 class="text-3xl font-extrabold text-slate-900 tracking-tight">素材下载中心</h2>
-            <p class="text-slate-500 mt-2">支持 YouTube, Bilibili 等多平台视频下载，自动存入系统素材库</p>
+            <p class="text-slate-500 mt-2">粘贴视频地址，可下载视频、音频、SRT 字幕或纯文本</p>
         </div>
 
         <!-- Download Input -->
@@ -32,6 +33,13 @@
                 <button id="downloadBtn" class="btn-primary">
                     <i class="fas fa-download mr-2"></i> 开始下载
                 </button>
+            </div>
+            <div class="mt-4 flex flex-wrap items-center gap-2" role="radiogroup" aria-label="下载内容">
+                <span class="text-sm font-semibold text-slate-600 mr-1">下载内容</span>
+                <label class="type-option cursor-pointer"><input class="sr-only" type="radio" name="downloadType" value="video" checked><span class="inline-flex items-center gap-2 px-4 py-2 border border-slate-200 rounded-lg text-sm text-slate-600"><i class="fas fa-video"></i>视频 <em class="not-italic text-[10px] text-blue-500">默认</em></span></label>
+                <label class="type-option cursor-pointer"><input class="sr-only" type="radio" name="downloadType" value="audio"><span class="inline-flex items-center gap-2 px-4 py-2 border border-slate-200 rounded-lg text-sm text-slate-600"><i class="fas fa-headphones"></i>仅音频</span></label>
+                <label class="type-option cursor-pointer"><input class="sr-only" type="radio" name="downloadType" value="srt"><span class="inline-flex items-center gap-2 px-4 py-2 border border-slate-200 rounded-lg text-sm text-slate-600"><i class="fas fa-closed-captioning"></i>SRT 字幕</span></label>
+                <label class="type-option cursor-pointer"><input class="sr-only" type="radio" name="downloadType" value="text"><span class="inline-flex items-center gap-2 px-4 py-2 border border-slate-200 rounded-lg text-sm text-slate-600"><i class="fas fa-file-lines"></i>纯文本 TXT</span></label>
             </div>
         </div>
 
@@ -50,6 +58,7 @@
     <script>
         const API_BASE = 'http://localhost:5001/api/v1';
         let tasks = [];
+        const typeLabels = { video: '视频', audio: '音频', srt: 'SRT 字幕', text: 'TXT 文本' };
 
         async function loadTasks() {
             try {
@@ -70,11 +79,14 @@
                 const isDownloading = task.status === 'downloading';
                 const isCompleted = task.status === 'completed';
                 const isFailed = task.status === 'failed';
+                const isCancelled = task.status === 'cancelled';
+                const isActive = ['pending', 'downloading', 'processing'].includes(task.status);
                 
                 let statusBadge = '';
                 if (isDownloading) statusBadge = '<span class="px-2 py-1 bg-blue-100 text-blue-600 text-xs font-bold rounded">下载中</span>';
                 if (isCompleted) statusBadge = '<span class="px-2 py-1 bg-emerald-100 text-emerald-600 text-xs font-bold rounded">已完成</span>';
                 if (isFailed) statusBadge = '<span class="px-2 py-1 bg-red-100 text-red-600 text-xs font-bold rounded">失败</span>';
+                if (isCancelled) statusBadge = '<span class="px-2 py-1 bg-amber-100 text-amber-700 text-xs font-bold rounded">已停止</span>';
                 if (task.status === 'pending') statusBadge = '<span class="px-2 py-1 bg-slate-100 text-slate-600 text-xs font-bold rounded">等待中</span>';
 
                 return `
@@ -85,7 +97,7 @@
                     <div class="flex-1 min-w-0">
                         <div class="flex justify-between items-start mb-2">
                             <h3 class="font-bold text-slate-800 truncate pr-4" title="${task.title}">${task.title || task.url}</h3>
-                            ${statusBadge}
+                            <div class="flex items-center gap-2"><span class="px-2 py-1 bg-violet-50 text-violet-600 text-xs font-bold rounded">${typeLabels[task.download_type || 'video'] || '视频'}</span>${statusBadge}</div>
                         </div>
                         <p class="text-xs text-slate-400 mb-4 truncate">${task.url}</p>
                         
@@ -103,7 +115,7 @@
 
                         ${isCompleted ? `
                         <div class="flex items-center gap-4 text-xs text-slate-500">
-                            <span><i class="far fa-file-video mr-1"></i> ${task.filename}</span>
+                            <span><i class="far fa-file mr-1"></i> ${task.filename}</span>
                             <span><i class="far fa-hdd mr-1"></i> ${(task.file_size / (1024*1024)).toFixed(1)} MB</span>
                             <span class="text-emerald-500"><i class="fas fa-check-circle mr-1"></i> 下载成功</span>
                         </div>
@@ -116,6 +128,11 @@
                         ` : ''}
                     </div>
                     <div class="flex gap-2">
+                        ${isActive ? `
+                        <button onclick="cancelTask('${task.id}')" class="p-2 text-slate-400 hover:text-amber-600 transition-colors" title="停止任务">
+                            <i class="fas fa-stop-circle"></i>
+                        </button>
+                        ` : ''}
                         ${isCompleted ? `
                         <button onclick="copyPath('${task.filepath}')" class="p-2 text-slate-400 hover:text-blue-500 transition-colors" title="复制路径">
                             <i class="fas fa-copy"></i>
@@ -134,6 +151,7 @@
             const urlInput = document.getElementById('videoUrl');
             const url = urlInput.value.trim();
             if (!url) return;
+            const downloadType = document.querySelector('input[name="downloadType"]:checked').value;
 
             const btn = document.getElementById('downloadBtn');
             btn.disabled = true;
@@ -143,7 +161,7 @@
                 const res = await fetch(`${API_BASE}/downloader/submit`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url })
+                    body: JSON.stringify({ url, download_type: downloadType })
                 });
                 const json = await res.json();
                 if (json.success) {
@@ -167,6 +185,15 @@
                 const json = await res.json();
                 if (json.success) loadTasks();
             } catch (e) { console.error(e); }
+        }
+
+        async function cancelTask(id) {
+            try {
+                const res = await fetch(`${API_BASE}/downloader/task/${id}/cancel`, { method: 'POST' });
+                const json = await res.json();
+                if (json.success) loadTasks();
+                else alert('停止失败: ' + json.error);
+            } catch (e) { alert('网络错误'); }
         }
 
         function copyPath(path) {

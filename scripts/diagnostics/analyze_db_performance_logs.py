@@ -7,6 +7,7 @@ import argparse
 import gzip
 import hashlib
 import ipaddress
+import json
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
@@ -99,6 +100,10 @@ IDLE_PRESSURE_DEFER = re.compile(
 )
 IDLE_PRESSURE_COUNT = re.compile(
     r"(?:idle_in_transaction_connections['\"]?|idle_tx)\s*[:=]\s*(?P<count>\d+)"
+)
+IDLE_OFFENDERS = re.compile(
+    r"\[TASK_GUARD\] idle-in-transaction offenders count=(?P<count>\d+) "
+    r"details=(?P<details>\[.*\])"
 )
 UUID_PATH_SEGMENT = re.compile(
     r"/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32})(?=/|$)",
@@ -385,6 +390,29 @@ def is_proxy_tun_source(address: str) -> bool:
         return False
 
 
+def idle_offender_observation(record: str):
+    match = IDLE_OFFENDERS.search(record.partition("\n")[0])
+    if not match:
+        return None
+    try:
+        details = json.loads(match.group("details"))
+    except (TypeError, ValueError):
+        details = []
+    offenders = [item for item in details if isinstance(item, dict)]
+    return {
+        "count": int(match.group("count")),
+        "max_xact_age_seconds": max(
+            (max(0.0, float(item.get("xact_age_seconds") or 0.0)) for item in offenders),
+            default=0.0,
+        ),
+        "max_idle_age_seconds": max(
+            (max(0.0, float(item.get("idle_age_seconds") or 0.0)) for item in offenders),
+            default=0.0,
+        ),
+        "signature": match.group("details"),
+    }
+
+
 def is_adhoc_diagnostic_context(
     fields: dict[str, str],
     *,
@@ -509,6 +537,7 @@ def main() -> int:
     celery_seen: set[tuple[datetime, str, str, str]] = set()
     idle_pressure_deferrals: set[tuple[datetime, str]] = set()
     idle_pressure_observations: set[tuple[datetime, int]] = set()
+    idle_offender_observations: dict[tuple[datetime, str], dict[str, object]] = {}
     traceback_sql_errors = {}
     for path in paths:
         if not path.exists():
@@ -560,6 +589,12 @@ def main() -> int:
                 if idle_pressure_count_match:
                     idle_pressure_observations.add(
                         (timestamp, int(idle_pressure_count_match.group("count")))
+                    )
+                idle_offender = idle_offender_observation(line)
+                if idle_offender:
+                    idle_offender_observations.setdefault(
+                        (timestamp.replace(microsecond=0), str(idle_offender["signature"])),
+                        idle_offender,
                     )
                 request_start_match = REQUEST_START.search(line)
                 if request_start_match:
@@ -678,6 +713,13 @@ def main() -> int:
         f"affected_tasks={len({task for _timestamp, task in idle_pressure_deferrals})} "
         f"observations={len(idle_pressure_observations)} "
         f"max_connections={max((count for _timestamp, count in idle_pressure_observations), default=0)}"
+    )
+    print(
+        "idle_in_transaction_observations "
+        f"episodes={len(idle_offender_observations)} "
+        f"max_connections={max((int(item['count']) for item in idle_offender_observations.values()), default=0)} "
+        f"max_xact_age_seconds={max((float(item['max_xact_age_seconds']) for item in idle_offender_observations.values()), default=0.0):.3f} "
+        f"max_idle_age_seconds={max((float(item['max_idle_age_seconds']) for item in idle_offender_observations.values()), default=0.0):.3f}"
     )
     print(f"connection_holds {stats(lifecycle)}")
     lifecycle_by_role: dict[str, list[float]] = defaultdict(list)

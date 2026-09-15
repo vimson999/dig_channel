@@ -48,6 +48,9 @@
   start time、worker ready 与真实任务验证模块图一致，磁盘函数存在不能替代运行态验收。
 - 数据库异常进入恢复分支后，任何查询、更新或提交之前必须先 `rollback/remove`；禁止在可能失效的 session 上二次查询，也禁止用 `finally: commit()` 收口这类分支。
 - 可重试数据库异常在 service 层不得提前写业务终态。由任务层先写 `retrying` 再安排 retry，只有重试耗尽才允许写 `failed`。
+- 任何成功终态写入都必须原子清除旧 `error_message`；watchdog、orphan cleanup、retry 与真实 worker 可能并发写入，
+  因此不能假设“成功前错误字段必为空”。终态合同测试必须在业务执行期间注入竞争失败标记，并证明最终
+  `status=completed` 与 `error_message IS NULL` 同时成立。
 - 人工素材生成等“先读共享 JSON、再执行浏览器/文件 I/O、最后写回”的链路，必须在读取阶段冻结
   `params/result` 与响应所需关联摘要，随后 rollback/remove；I/O 结束后用 ID、原 status 与原
   `updated_at` 做窄 CAS。CAS 失败必须保留较新的数据库结果并返回冲突，禁止无条件覆盖。
@@ -132,6 +135,9 @@ def release_db_session_quietly():
 
 ## 健康验收
 
+- 巡检必须把三种口径分开：数据库异常事件、任务准入压力、runtime guard 的短暂 offender 观测。
+  offender 至少汇总 episode、最大连接数、最大事务年龄与最大 idle 年龄；亚秒短事务不能冒充 60 秒事故，
+  但也不能因没有 defer 或异常文本而报告“没有观测”。日志格式变化必须附生产样本回放合同。
 - 错误巡检必须按完整时间戳日志块读取 traceback，不能丢弃无时间戳续行；链式DBAPI/SQLAlchemy异常
   与跨日志副本按episode去重。结构化SQL logger、traceback和PgBouncer为不同证据流，未关联前不得
   相加或把任意单流的0解释为全库无错误。栈中的lifecycle文件名不能充当连接持有事件。
@@ -139,6 +145,12 @@ def release_db_session_quietly():
   只有有效命中主键才能读取必要回滚快照，并校验版本以避免筛选后的并发覆盖；回归必须捕获真实SQL。
 - broker 失败恢复必须重新确认 claim 所有权和父任务仍处可恢复步骤；只回退自己修改的字段，基于最新锁定
   快照合并 JSON，保留 broker 等待期间新增的审计信息。取消/终态/推进后的状态不得被旧快照覆盖。
+- pending/queued 消息修复必须同时核对 worker active/reserved/scheduled、普通 broker 队列与 Redis unacked。
+  当前 Celery ID 在任一来源仍可见时只能等待原 delivery 或交给消费者健康检查，禁止发布新消息、替换
+  `celery_task_id` 或增加 repair count；只有所有检查均成功且全部不可见时，才能按 CAS 发布替代消息。
+- processing 的非幂等外部副作用任务同样必须核对 worker active/reserved/scheduled、目标 broker 队列与
+  Redis unacked；任一来源可见时禁止撤销、降级或重投。orphan grace 不得短于执行器硬超时与结算余量，任务
+  类型和目标队列必须来自结构化投影，禁止热扫描为判型回读 `params/result` 大 JSON。
 
 任一重启或修复后，至少检查：
 

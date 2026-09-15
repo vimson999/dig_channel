@@ -111,3 +111,10 @@ P0 查询形态门禁在固定窗口检出 `services/report_audio_finalization.p
 CAS/回滚路径，后者仍 OPEN。旧 finalization 指纹继续保持 OBSERVING，不把单一窗口零样本
 扩大解释为所有父子收尾路径均已闭环；下一轮要求真实 child completion、字段完整且 parent
 wakeup 不再读取完整 JSON。
+
+## 2026-09-10 后窗复核
+
+固定窗父唤醒旧宽 JSON 指纹 `71b8b6d6cc87d1f3` 为 0；但生产只读对账显示本窗 25 个 Publisher
+任务全部来自 MP3，没有 report-audio 的自然 Publisher completion，因而没有目标事件可以验收父唤醒。
+状态继续 `RUNTIME_REPLACED / OBSERVING`。下一轮仍要求自然 report-audio child completion、父状态
+正确收口、字段完整且旧指纹为 0；不能把零样本窗口写成 CLOSED。

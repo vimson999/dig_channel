@@ -1,12 +1,17 @@
 {
   "schema_version": 2,
-  "reviewed_through": "2026-09-05",
+  "reviewed_through": "2026-09-15",
   "max_days_between_reviews": 7,
   "clusters": [
     {
       "key": "DB-SESSION-LIFECYCLE",
+      "daily_2026_09_15": "固定窗应用慢SQL132条/223.626秒，较前窗数量+450.0%、总耗时+530.4%，最大19.799秒；13:01:38–13:02:40出现4个PgBouncer query_wait_timeout episode和4个应用server-closed事件。8次长hold全部匹配SQL，SQL100.503秒/非SQL1.597秒；executor0.025–35.0ms、无锁/idle-in-transaction/DDL证据，网络簇继续OPEN/REPEATED/OBSERVING。",
+      "daily_2026_09_14": "固定窗应用SQL/traceback及五类DB timeout/deadlock、idle-in-transaction和PgBouncer六类错误均为0；慢SQL24条/35.476秒，较前窗数量+71.4%、总耗时+34.2%，但P95/max降至3.198/3.562秒。代表executor0.025–35.077ms、无锁与DDL证据，网络尾延迟继续OPEN/REPEATED/OBSERVING。",
+      "daily_2026_09_13": "固定窗SQL/traceback/statement/lock/query/connect timeout、idle-in-transaction与PgBouncer六类错误均为0；慢SQL较前窗降至14条/26.437秒，P95/max 3.400/4.951秒。代表executor0.082–37.050ms、无锁与DDL证据，wait/query P95降至44.62/71.85ms；网络尾延迟保持OPEN/REPEATED/OBSERVING。",
+      "daily_2026_09_12": "固定窗SQL/traceback/statement/lock/query/connect timeout与PgBouncer六类错误均为0，但慢SQL升至27条/70.433秒，P95/max为7.605/13.839秒；3次长hold均匹配scheduler慢SQL，SQL31.386秒而非SQL仅0.869秒。代表executor0.022–35.218ms、无锁等待与DDL证据，网络/驱动尾延迟保持OPEN/REPEATED/OBSERVING。",
       "daily_2026_09_04": "固定窗慢SQL29/39.148秒，长hold1次15.024秒来自notification due_provider_drains且sql15.017秒/非SQL7.12ms；PgBouncer query_wait_timeout1组，网络OPEN。自然25PDF+10音频全部成功，1查1插且无Web长hold，但哈希事务入口尚无直接生产探针，保持OBSERVING。",
       "daily_2026_09_05": "固定窗慢SQL103/181.964秒，P95/max3.720/9.386秒，长hold6次且SQL占37.836/41.927秒；六类PgBouncer错误0但wait/query P95升至137.56/239.98ms，executor仅0.02–35.21ms。网络簇保持OPEN/REPEATED。dec217e全量1607项通过且双安全门通过，但标准重启被自动审批拒绝，最终事务边界补强等待运行替换。",
+      "daily_2026_09_10": "固定窗慢SQL149/244.641秒，较09-08基线数量/耗时下降46.8%/65.2%，但较桥接窗回升451.9%/437.9%；长hold5次/37.375秒，六类PgBouncer错误0，wait/query P95为100.31/178.26ms，executor0.027–35.522ms。runtime guard短暂offender31次、最大3连接/事务龄0.779秒且defer0；分析器漏报已TDD修复，网络与哈希边界继续OBSERVING。",
       "title": "数据库 Session 生命周期与热查询",
       "priority": "P0",
       "status": "in_progress",
@@ -126,20 +131,29 @@
         "2026-08-31-script-video-detail-polling-n-plus-one.md",
         "2026-09-01-script-video-image-submit-query-amplification.md",
         "2026-09-02-content-pipeline-dedupe-query-amplification.md",
-        "2026-09-03-content-pipeline-hash-inside-transaction.md"
+        "2026-09-03-content-pipeline-hash-inside-transaction.md",
+        "2026-09-10-db-audit-missed-task-guard-idle-observations.md"
       ]
     },
     {
       "key": "ORCH-PARENT-CHILD-STATE",
+      "daily_2026_09_15": "8条结构化Bilibili完整Publisher任务均completed/done、有效BVID、error为空且repair count为0；但本机唯一upload-only成功日志是CAS-loser stale skip，不是自然投稿，grace与upload-only成功清错继续RUNTIME_REPLACED/OBSERVING。两次pending repair CAS loser被撤销/跳过且当前ID最终完成，支持竞态防线但未直接覆盖原消息queued/unacked分支。唯一Publisher业务失败为素材路径不可见，父流程与同批子任务完成，和DB事故无因果关系。",
+      "daily_2026_09_14": "两条Bilibili upload-only在合法上传期间被90秒orphan grace误收口，之后携有效BVID完成且保留错误；processing scanner还因漏读结构化projection把队列记为render。已按RED→GREEN把grace绑定上传器硬超时+60秒结算余量、补查broker/unacked并批量恢复platform_upload路由；queue-repair51/51、交叉161/161、全量1675/1675和源码门禁通过。双安全门读取46条近期任务/0活动sync，冻结17队列且未FORCE重启到backend PID20631；bootstrap17/17、errors=[]、platform_upload与Watchdog ready，保持RUNTIME_REPLACED/OBSERVING并等待自然投稿。",
+      "daily_2026_09_13": "Publisher task e9fc559e最终completed/done却保留orphan cleanup错误，定位为upload-only成功窄写遗漏error_message=None；竞态TDD先RED后GREEN，交叉134/134、全量1674/1674通过。另有queue-repair旧语义审计复发，本轮双门禁整栈重启到backend PID46428，保持RUNTIME_REPLACED/OBSERVING。",
+      "daily_2026_09_12": "Publisher可见消息修复已通过安全门读取47条近期任务/0活动sync后完成标准双门禁整栈重启，未FORCE；新backend PID7204 healthy、bootstrap17/17、errors=[]，Watchdog与目标worker ready。首轮Publisher扫描102–122ms且无错误，但没有自然queued/unacked候选，保持RUNTIME_REPLACED/OBSERVING。",
+      "daily_2026_09_11": "Publisher child d588a3db 在消息仍 queued/unacked 时三次被 repair 替换 ID，四个 delivery 随后均被 current-id/terminal guard 跳过并达上限误失败。已按 RED→GREEN 改为任一 worker/queue/unacked 可见即等待；queue-repair联合51/51、全量1666/1666通过。安全门读取47条近期任务/0活动sync并放行，但标准重启因无显式服务中断授权被审批拒绝，等待运行替换。",
       "title": "父子任务状态机与运行时对账",
       "priority": "P0",
       "status": "in_progress",
       "acceptance_stage": "runtime_replaced",
-      "last_reopened_at": "2026-08-31",
+      "last_reopened_at": "2026-09-14",
       "blocking_records": [
-        "2026-08-31-content-pipeline-clean-retry-workspace-reset.md"
+        "2026-08-31-content-pipeline-clean-retry-workspace-reset.md",
+        "2026-09-11-publisher-queue-repair-visible-message-starvation.md",
+        "2026-09-13-publisher-success-preserved-orphan-error.md",
+        "2026-09-14-publisher-upload-orphan-grace-before-execution-timeout.md"
       ],
-      "latest_guardrail_addition": "自动发布 handoff 对同一 source_task_id 必须先获取事务级 advisory lock，并在锁内复用既有 child；重复 delivery 不得创建或再次 dispatch 第二个发布子任务。",
+      "latest_guardrail_addition": "非幂等processing外部副作用的orphan grace不得早于执行器硬超时与结算余量；worker不可见后仍须检查目标broker queue与Redis unacked，任一来源可见禁止撤销、降级或重投；热扫描以结构化projection判型和路由，不得回读params大JSON。任何成功终态仍须在同一短事务中原子清除旧error_message。",
       "last_runtime_observation": "2026-08-31 生产只读对账显示三个清洗来源5341ebed…、a96435a4…、693ee226…均completed/done/100%，且各恰好一个zsxq_clean_output_publish子任务15d73154…、c186c4fa…、08544642…，三者均completed。代码级redelivery回归证明会复用同一child且不再dispatch；生产未捕获同一消息自然重复投递，继续RUNTIME_REPLACED/OBSERVING。",
       "systemic_guardrail": "统一父子任务生命周期策略、集中状态迁移 API、reconciler、完整的父 feature × 子 feature × 父状态契约矩阵，以及 fail-closed 重启预检；长生命周期父容器必须区分 active、ready/waiting 和 terminal，重启门禁按阶段是否存在不可中断 worker 工作判定；任何异步子阶段回写必须保持状态与进度单调，较早阶段不得覆盖音频、视频或终态；任何写回 pending 的 queued、deferred 或 auto_retry 状态都必须登记消息可见、消息丢失和重启窗口三类 watchdog 契约，超过宽限期且 broker/worker 不可见时才能 CAS 重排；任何声明端到端的工作流必须以最终业务产物为唯一成功终点，每个自动阶段迁移同时具备 completion hook、幂等 CAS、历史 reconciler 和最终产物契约测试；跨来源任务必须在创建边界把带类型引用规范成 source_feature 与不超列宽的稳定 ID，完整引用保留审计 JSON，读取端对历史截断键兼容时必须检测碰撞并禁止 JSON 全表扫描；共享模型同步不得静默截断未知来源身份，新写入超宽必须fail closed，历史例外必须同时受持久化状态、feature、owner、前缀与当前列值约束；写产物的 commit 遇到断连或结果不确定时必须先释放失效 Session，再以共享 durable completion contract 对账，禁止直接把成功产物覆盖为业务失败；清洗 redelivery 必须先采用严格验证的 durable manifest，禁止删除同 task workspace 后整批重做，cleaned/terminal 状态只允许单调前进；同一来源自动 handoff 必须在数据库互斥区内先查既有 child 并复用，重复投递不得产生第二个 child 或第二次 broker dispatch",
       "records": [
@@ -176,7 +190,10 @@
         "2026-08-06-report-audio-scheme3-publisher-failure-storm.md",
         "2026-08-07-storyboard-ambiguous-commit-false-failure.md",
         "2026-08-29-mp3-pipeline-source-key-truncation.md",
-        "2026-08-31-content-pipeline-clean-retry-workspace-reset.md"
+        "2026-08-31-content-pipeline-clean-retry-workspace-reset.md",
+        "2026-09-11-publisher-queue-repair-visible-message-starvation.md",
+        "2026-09-13-publisher-success-preserved-orphan-error.md",
+        "2026-09-14-publisher-upload-orphan-grace-before-execution-timeout.md"
       ]
     },
     {
@@ -293,13 +310,15 @@
     },
     {
       "key": "REGRESSION-ACCEPTANCE-INTEGRITY",
+      "daily_2026_09_13": "09-12对Publisher queue-repair仅凭healthy/ready判定已加载，但09-13窗口业务审计仍出现pending_message_not_active_but_queue_visible并换ID，证明运行验收假绿。已重新双门禁整栈替换；后续必须核对进程启动时间/代码版本与自然业务状态迁移，保持OBSERVING。",
       "daily_2026_09_04": "重开08-18巡检误报记录：逐行解析漏掉无时间戳traceback，导致真实15s断连被报0。完整日志块解析、链式/跨文件episode去重和独立traceback SQL流已落地，23项通过，真实回放server_closed1/traceback1；完整unit1593项通过。下一窗必须三源对账，不以专用SQL logger0代表全库0。",
       "daily_2026_09_05": "固定窗app/backend/scheduler/Celery、publication专用SQL和PgBouncer三源对账：结构化SQL error0、traceback episode0、六类PgBouncer错误0。分析器合同与完整unit1607项通过；本窗没有自然错误可验证分类，保持OBSERVING，下一episode继续按来源/进程/request/task跨文件去重。",
+      "daily_2026_09_10": "固定窗三源错误仍为0，但runtime guard的连字符offender格式被分析器漏成0。生产回放实际31个短暂观测、最大3连接/事务龄0.779秒、defer0。新增测试先RED，再加入JSON解析与年龄汇总；分析器30项通过。事件、准入压力、短暂观测必须独立报告，保持OBSERVING。",
       "title": "回归覆盖完整性与验收假绿",
       "priority": "P0",
       "status": "in_progress",
-      "last_reopened_at": "2026-09-04",
-      "systemic_guardrail": "单命令确定性全量回归、真实副作用显式 opt-in、全源编译、前端类型检查、单迁移头、SQL 契约必须编译断言 PostgreSQL JSONB/数组/UUID 真实类型、结构门禁、新 PID 与真实负载分阶段验收；数据库巡检必须覆盖 PgBouncer pool wait/server crash/TLS error 和 server source address，历史故障片段必须有回放契约；日志位于托管文件但显式 process=-/python 且 role/origin unknown 时必须优先判为 adhoc；任一门失败必须重新打开记录并从头复测",
+      "last_reopened_at": "2026-09-10",
+      "systemic_guardrail": "单命令确定性全量回归、真实副作用显式 opt-in、全源编译、前端类型检查、单迁移头、SQL 契约必须编译断言 PostgreSQL JSONB/数组/UUID 真实类型、结构门禁、新 PID 与真实负载分阶段验收；数据库巡检必须覆盖 PgBouncer pool wait/server crash/TLS error 和 server source address，历史故障片段必须有回放契约；数据库异常事件、任务准入压力和短暂idle offender必须独立统计episode、最大连接与年龄，任何关键日志格式演进都必须用生产样本回放；日志位于托管文件但显式 process=-/python 且 role/origin unknown 时必须优先判为 adhoc；任一门失败必须重新打开记录并从头复测",
       "records": [
         "2026-07-11-backend-restart-accepted-stale-listener.md",
         "2026-07-18-bilibili-upload-json-polling-and-online-ddl-lock-convoy.md",
@@ -310,7 +329,8 @@
         "2026-08-04-db-audit-skipped-gzip-rotations.md",
         "2026-08-06-idle-transaction-pressure-observability-gap.md",
         "2026-08-15-db-audit-missed-pgbouncer-route-fallback.md",
-        "2026-08-18-managed-sql-error-source-misclassified.md"
+        "2026-08-18-managed-sql-error-source-misclassified.md",
+        "2026-09-10-db-audit-missed-task-guard-idle-observations.md"
       ]
     },
     {
@@ -393,13 +413,17 @@
     },
     {
       "key": "RUNTIME-TOPOLOGY-RELOAD",
+      "daily_2026_09_14": "Publisher上传孤儿修复通过全量1675/1675及源码门禁后，首次与冻结17队列后的二次安全门均读取46条近期任务/0活动sync，未用FORCE完成标准整栈重启。新backend PID20631 healthy，bootstrap17/17、errors=[]；platform_upload PID20707 ready、Watchdog PID21170启动，四个目标runtime status均running/未暂停/queue0，等待自然上传验收。",
+      "daily_2026_09_13": "窗口内Publisher queue-repair仍出现可见消息换ID的旧语义证据，上一轮runtime acceptance重开。06:09安全门读取46条近期任务/0活动sync，标准脚本冻结17队列并通过二次门禁，未FORCE重启到backend PID46428；health正常、bootstrap17/17/errors=[]，关键worker running/queue0，待自然业务验收。",
+      "daily_2026_09_12": "安全门读取47条近期任务/0活动sync并放行；标准脚本冻结17队列、关闭API入队并通过第二次门禁，未FORCE完成整栈重启。backend PID7204 healthy、bootstrap17/17、errors=[]，全部目标worker与Watchdog ready。Publisher修复已加载，待自然消息和完整24h后窗。",
+      "daily_2026_09_11": "真实Publisher child在queued/unacked仍可见时被repair连续换ID，自造stale delivery后达上限误失败；这是既有acks_late联合可见性防线未覆盖pending repair的复发。TDD最小修复、51项queue-repair和1666项全量回归通过。安全门读取47条近期任务/0活动sync并放行，但标准重启因无显式服务中断授权被审批拒绝，未FORCE绕过，等待运行替换。",
       "daily_2026_09_04": "自然发布9、upload-only8、MP3 delivery50均成功且目标ImportError0；DB新建publisher16/MP3父4均completed。获得上轮最小app factory真实运行正向证据，仍待后续完整窗口。",
       "daily_2026_09_05": "固定窗Publisher12、MP3 delivery54、ZSXQ publish7及内容清洗7次成功；目标ImportError0。最终dec217e晚于backend38129及worker启动时间约12.5小时，完整unit1607与app-factory门禁通过但自动审批拒绝标准重启。现有服务健康，最终补强状态CODE_VERIFIED/WAITING_RUNTIME_REPLACEMENT。",
       "title": "Worker/调度器注册、队列拓扑与代码重载",
       "priority": "P0",
       "status": "in_progress",
       "acceptance_stage": "runtime_replaced",
-      "last_reopened_at": "2026-09-03",
+      "last_reopened_at": "2026-09-14",
       "blocking_records": [
         "2026-07-18-full-restart-interrupted-active-render.md",
         "2026-07-23-optimized-video-redis-localhost-db-thundering-herd.md",
@@ -410,7 +434,8 @@
         "2026-06-29-feishu-cookie-import-stale-celery-workers.md",
         "2026-08-19-bilibili-intelligence-duplicate-scheduler-write-amplification.md",
         "2026-09-01-workflow-notification-mixed-version-import-storm.md",
-        "2026-09-03-worker-app-factory-api-import-fanout.md"
+        "2026-09-03-worker-app-factory-api-import-fanout.md",
+        "2026-09-11-publisher-queue-repair-visible-message-starvation.md"
       ],
       "latest_guardrail_addition": "重启必须等不可中断任务自然结束；首次门禁、冻结消费、关闭 API 入队、二次门禁和新进程 readiness 缺一不可，禁止 FORCE。schema 门禁同时校验 notification outbox 表/索引/唯一约束、migration ancestry 和已清理 Bilibili 重复索引不复发；启动后还须核对 PgBouncer 实际 config/pool/server。",
       "last_runtime_observation": "2026-08-31 安全门先后因真实PDF清洗、自动发布以及20份PDF/8份音频发布多次fail closed；全部自然完成后10:01读取47条任务/0活动sync，未用FORCE完成第二次标准整栈重启。backend PID70045 healthy，bootstrap17/17、errors=[]，三个目标worker ready；素材自然成功请求证明第三项新代码加载。10:28新增continue-full-video修复后安全门又被真实publisher任务正确阻断。任务自然结束后10:41门禁读取47条任务/0 sync并放行；标准脚本冻结17队列、关闭API、二次门禁后完成重启，全程未FORCE。新backend PID78053 healthy、bootstrap17/17/errors=[]，MP3/content-pipeline/zsxq-publish均ready。11:21同一双门禁标准流程把PDF合并修复加载到PID82858。11:55 B站上传修复再次先读取47条任务/0活动sync并放行；标准脚本冻结队列和关闭API后第二次门禁仍安全，未FORCE重启到PID86809，health healthy、17/17 Celery service ok、errors=[]，platform_upload与mp3_video_workflow ready、watchdog启动。13:31同一双门禁重启到PID96754；13:55全量revoke防线补全后再次读取47条近期任务/0活动sync，冻结17队列、停止旧API、二次门禁通过，未FORCE重启到PID99802。health healthy、bootstrap17/17/errors=[]，六个相关服务running且queue0；代码已加载，仍待自然动作与完整24h。",
@@ -439,7 +464,8 @@
         "2026-07-27-watchdog-stop-script-self-match.md",
         "2026-08-19-bilibili-intelligence-duplicate-scheduler-write-amplification.md",
         "2026-09-01-workflow-notification-mixed-version-import-storm.md",
-        "2026-09-03-worker-app-factory-api-import-fanout.md"
+        "2026-09-03-worker-app-factory-api-import-fanout.md",
+        "2026-09-11-publisher-queue-repair-visible-message-starvation.md"
       ]
     },
     {

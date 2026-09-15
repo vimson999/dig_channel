@@ -1719,6 +1719,7 @@ def run_bilibili_upload_only(self, task_id):
                 current_step="done",
                 progress=100,
                 result_patch=result_patch,
+                error_message=None,
                 completed_at=datetime.utcnow(),
             )
             logger.info("Task %s: Bilibili upload supplement successful.", task_id)

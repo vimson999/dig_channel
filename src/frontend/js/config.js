@@ -37,8 +37,10 @@ const CONFIG = {
         RANKINGS_ALL: '/rankings/all',
         RANKINGS_DAILY_REVENUE: '/rankings/daily-revenue',
         RANKINGS_MONTHLY_REVENUE: '/rankings/monthly-revenue',
+        RANKINGS_YEARLY_REVENUE: '/rankings/yearly-revenue',
         RANKINGS_DAILY_SUBSCRIBER: '/rankings/daily-subscriber',
         RANKINGS_MONTHLY_SUBSCRIBER: '/rankings/monthly-subscriber',
+        RANKINGS_YEARLY_SUBSCRIBER: '/rankings/yearly-subscriber',
         RANKINGS_TYPES: '/rankings/types',
         
         // 数据相关

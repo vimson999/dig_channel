@@ -254,6 +254,22 @@ class DbPerformanceLogAnalyzerTest(unittest.TestCase):
         self.assertEqual("5", pressure.group("count"))
         self.assertEqual("8", retry_pressure.group("count"))
 
+    def test_main_reports_task_guard_idle_transaction_observations(self):
+        output = self._analyze_events({
+            "scheduler.log": (
+                "2026-09-03 08:54:10,100 - runtime_guard - WARNING - "
+                "[TASK_GUARD] idle-in-transaction offenders count=2 details="
+                "[{\"pid\":11,\"xact_age_seconds\":0.779,\"idle_age_seconds\":0.538},"
+                "{\"pid\":12,\"xact_age_seconds\":0.106,\"idle_age_seconds\":-0.01}]\n"
+            )
+        })
+
+        self.assertIn(
+            "idle_in_transaction_observations episodes=1 max_connections=2 "
+            "max_xact_age_seconds=0.779 max_idle_age_seconds=0.538",
+            output,
+        )
+
     def test_parses_connection_hold_attribution_and_sql_breakdown(self):
         analyzer = load_analyzer()
         line = (

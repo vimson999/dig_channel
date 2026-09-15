@@ -2438,6 +2438,11 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         class FakeUploader:
             async def upload_single(self, **kwargs):
                 upload_kwargs.update(kwargs)
+                PublicationTask.query.filter_by(id=child.id).update({
+                    PublicationTask.error_message:
+                        "publisher orphan cleanup raced with the active worker",
+                })
+                db.session.commit()
                 return {"aid": 123, "bvid": "BV1FULLWORKER"}
 
         auth = {
@@ -2504,6 +2509,7 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         task = PublicationTask.query.filter_by(id=child.id).one()
         projection = PublicationTaskBilibiliUpload.query.filter_by(task_id=child.id).one()
         self.assertEqual(task.status, "completed")
+        self.assertIsNone(task.error_message)
         self.assertEqual(task.result["bilibili_result"]["bvid"], "BV1FULLWORKER")
         self.assertEqual(projection.aid, "123")
         self.assertEqual(projection.bvid, "BV1FULLWORKER")

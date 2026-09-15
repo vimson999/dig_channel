@@ -101,3 +101,14 @@ savepoint。20 个文件因此把正常 admission 放大为约 20 次存在性�
 完整 unit 1607 项与定向交叉 114 项通过；两次安全门通过，但标准重启被自动审批拒绝。状态保持
 `OBSERVING`，最终补强为 `CODE_VERIFIED / WAITING_RUNTIME_REPLACEMENT`。重启后首个自然多文件批次仍需
 验证 canonical SELECT/INSERT O(1)、输入保序、冲突回退、连接持有与最终 ownership。
+
+## 2026-09-10 自然批次验收
+
+固定窗四个 Web submit 分别提交 19、24、16、24 个资产，均严格执行 1 次 canonical SELECT 与
+1 次多行 INSERT，共 83 个 Web 资产全部返回 202。生产只读对账覆盖同窗全部入口，共 35 音频与 49 PDF
+资产，84/84 为 `cleaned`，84 个唯一 hash、owner 缺失 0。O(1) 查询预算从
+`WAITING_RUNTIME_REPLACEMENT` 提升为 `RUNTIME_ACCEPTED / OBSERVING`。
+
+最慢 Web 请求仍为 10.379 秒，但没有超过 1 秒的 SQL，也没有 Web 长连接持有事件；这是文件处理、通知和
+远端往返的端到端长尾，不推翻 canonical 查询预算。独立的哈希事务边界仍缺直接运行标记，继续由
+`2026-09-03-content-pipeline-hash-inside-transaction.md` 观察，不能把本项验收扩写为整条请求已关闭。

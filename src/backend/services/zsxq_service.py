@@ -3,6 +3,7 @@ import json
 import logging
 import mimetypes
 import base64
+import os
 import re
 import time
 from urllib.parse import urlparse
@@ -22,6 +23,9 @@ class ZsxqService:
 
     BASE_URL = "https://api.zsxq.com"
     SECRET = "zsxqapi2020"
+    STORAGE_UPLOAD_TIMEOUT_SECONDS = 900
+    STORAGE_UPLOAD_TIMEOUT_MIN_SECONDS = 60
+    STORAGE_UPLOAD_TIMEOUT_MAX_SECONDS = 3600
 
     def __init__(self):
         self.session = requests.Session()
@@ -503,11 +507,14 @@ class ZsxqService:
     def upload_to_storage(self, upload_token, filename, content, content_type=None):
         content_type = content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
         policy_summary = self._decode_qiniu_policy_summary(upload_token)
+        upload_timeout = self._storage_upload_timeout_seconds()
         logger.info(
-            "[ZSXQ_UPLOAD] qiniu upload start | filename=%s | size=%s | content_type=%s | policy=%s",
+            "[ZSXQ_UPLOAD] qiniu upload start | filename=%s | size=%s | "
+            "content_type=%s | timeout=%ss | policy=%s",
             filename,
             len(content or b""),
             content_type,
+            upload_timeout,
             policy_summary,
         )
         response = None
@@ -527,7 +534,7 @@ class ZsxqService:
                         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                     )
                 },
-                timeout=180,
+                timeout=upload_timeout,
             )
             if response.status_code < 400:
                 break
@@ -553,7 +560,7 @@ class ZsxqService:
                             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                         )
                     },
-                    timeout=180,
+                    timeout=upload_timeout,
                 )
                 attempted_hosts.append(suggested_endpoint)
                 if response.status_code < 400:
@@ -581,6 +588,20 @@ class ZsxqService:
             return response.json()
         except ValueError as exc:
             raise ValueError(f"上传存储返回非 JSON: {response.text[:200]}") from exc
+
+    def _storage_upload_timeout_seconds(self):
+        raw = os.environ.get(
+            "ZSXQ_STORAGE_UPLOAD_TIMEOUT_SECONDS",
+            str(self.STORAGE_UPLOAD_TIMEOUT_SECONDS),
+        )
+        try:
+            timeout = int(raw)
+        except (TypeError, ValueError):
+            timeout = self.STORAGE_UPLOAD_TIMEOUT_SECONDS
+        return max(
+            self.STORAGE_UPLOAD_TIMEOUT_MIN_SECONDS,
+            min(timeout, self.STORAGE_UPLOAD_TIMEOUT_MAX_SECONDS),
+        )
 
     def _qiniu_upload_endpoints(self, policy_summary):
         scope = (policy_summary or {}).get("scope")
