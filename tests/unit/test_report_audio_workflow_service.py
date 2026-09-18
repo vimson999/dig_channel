@@ -113,6 +113,14 @@ class ReportAudioWorkflowServiceTest(unittest.TestCase):
             self.assertEqual(report_audio_service._title_generation_model(), "deepseek-v4-flash")
             self.assertEqual(report_audio_service._title_review_model(), "deepseek-v4-flash")
 
+    def test_title_models_prefer_flash_setting_over_legacy_pro_setting(self):
+        with patch.dict(os.environ, {
+            "DEEPSEEK_PRO_MODEL": "deepseek-v4-pro",
+            "DEEPSEEK_FLASH_MODEL": "deepseek-v4-flash",
+        }, clear=True):
+            self.assertEqual(report_audio_service._title_generation_model(), "deepseek-v4-flash")
+            self.assertEqual(report_audio_service._title_review_model(), "deepseek-v4-flash")
+
     def test_pdf_original_title_is_kept_as_review_baseline(self):
         title = report_audio_service._pdf_title_baseline(
             "高盛-Alphabet：人工智能投资周期向上推进-260723.pdf",

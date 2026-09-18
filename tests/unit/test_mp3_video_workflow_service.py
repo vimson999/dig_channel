@@ -19,6 +19,7 @@ from api.mp3_video_workflow import (
     _default_bilibili_title as _api_default_bilibili_title,
     _ds_extract_payload as _api_ds_extract_payload,
     _prepare_job_for_video_regeneration as _api_prepare_job_for_video_regeneration,
+    _apply_continue_audio_range_override as _api_apply_continue_audio_range_override,
     _prepare_keyframe_job_for_full_video as _api_prepare_keyframe_job_for_full_video,
 )
 from models.task import PublicationTask
@@ -53,6 +54,7 @@ from services.mp3_video_workflow import (
     _active_workflow_state,
     _child_inline_wait_seconds,
     _child_id_from_result,
+    _cover_browser_launch_kwargs,
     _db_retry,
     _direct_ds_numbered_sections,
     _emit,
@@ -106,6 +108,15 @@ from services.mp3_video_workflow import (
     _validate_strict_ds_plan,
     _validate_ds_response_contract,
 )
+
+
+class Mp3CoverBrowserLaunchTests(unittest.TestCase):
+    @patch.dict(os.environ, {"MP3_VIDEO_COVER_BROWSER_HEADLESS": "1"}, clear=False)
+    def test_current_chrome_uses_new_headless_mode(self):
+        kwargs = _cover_browser_launch_kwargs()
+
+        self.assertFalse(kwargs["headless"])
+        self.assertIn("--headless=new", kwargs["args"])
 
 
 class Mp3VideoWorkflowServiceTest(unittest.TestCase):
@@ -2077,7 +2088,7 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
 
             ok, message = _api_prepare_job_for_video_regeneration(
                 task,
-                {"start_seconds": "00:12", "end_seconds": "12:46"},
+                {"start_seconds": "00:12", "end_seconds": "12:46", "speed": 1.5},
             )
 
         self.assertTrue(ok, message)
@@ -2087,11 +2098,11 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
         self.assertIn("force_video_regenerate_at", task.params["mp3_video_workflow"])
         self.assertEqual(
             task.params["mp3_video_workflow"]["audio_range_override"],
-            {"start_seconds": 12.0, "end_seconds": 766.0},
+            {"start_seconds": 12.0, "end_seconds": 766.0, "speed": 1.5},
         )
         self.assertEqual(
             task.result["plan"]["audio"],
-            {"start_seconds": 12.0, "end_seconds": 766.0, "speed": 1.2},
+            {"start_seconds": 12.0, "end_seconds": 766.0, "speed": 1.5},
         )
         self.assertIn("force_video_regenerate_at", task.result)
         self.assertEqual(task.result["children"], {})
@@ -2121,6 +2132,62 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
             plan["audio"],
             {"start_seconds": 12, "end_seconds": 766, "speed": 1.2},
         )
+
+    def test_regeneration_speed_reaches_publisher_audio_segment(self):
+        result = {
+            "plan": {"audio": {"start_seconds": 12, "end_seconds": 72, "speed": 1.2}},
+            "audio": {"duration_seconds": 100},
+        }
+        workflow = {}
+
+        ok, message, _ = _api_apply_continue_audio_range_override(
+            result,
+            workflow,
+            {"start_seconds": 12, "end_seconds": 72, "speed": 1.5},
+            allow_speed=True,
+        )
+
+        self.assertTrue(ok, message)
+        self.assertEqual(result["plan"]["audio"]["speed"], 1.5)
+        rebuilt = _apply_workflow_audio_range_override(
+            {"audio": {"start_seconds": 0, "end_seconds": 100, "speed": 1.2}},
+            workflow,
+        )
+        self.assertEqual(rebuilt["audio"]["speed"], 1.5)
+        segment = audio_segment_from_plan(
+            {"path": "/tmp/demo.mp3", "duration_seconds": 100}, rebuilt,
+        )
+        self.assertEqual(segment["speed"], 1.5)
+
+    def test_regeneration_rejects_speed_outside_supported_range(self):
+        for speed in (0.4, 2.1, "nan", "abc", None):
+            with self.subTest(speed=speed):
+                result = {"plan": {"audio": {"start_seconds": 12, "end_seconds": 72, "speed": 1.2}}}
+                workflow = {}
+                ok, message, _ = _api_apply_continue_audio_range_override(
+                    result,
+                    workflow,
+                    {"start_seconds": 12, "end_seconds": 72, "speed": speed},
+                    allow_speed=True,
+                )
+                self.assertFalse(ok)
+                self.assertIn("倍速", message)
+                self.assertEqual(result["plan"]["audio"]["speed"], 1.2)
+                self.assertEqual(workflow, {})
+
+    def test_continue_audio_override_keeps_legacy_speed_behavior(self):
+        result = {"plan": {"audio": {"start_seconds": 12, "end_seconds": 72, "speed": 1.2}}}
+        workflow = {}
+
+        ok, message, audio_range = _api_apply_continue_audio_range_override(
+            result,
+            workflow,
+            {"start_seconds": 15, "end_seconds": 70, "speed": 1.5},
+        )
+
+        self.assertTrue(ok, message)
+        self.assertEqual(result["plan"]["audio"]["speed"], 1.2)
+        self.assertNotIn("speed", audio_range)
 
     def test_publisher_video_children_use_short_inline_wait_and_deferred_resume(self):
         with patch.dict(os.environ, {

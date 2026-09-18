@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -1510,6 +1511,8 @@ def _apply_workflow_audio_range_override(
     audio_plan = dict(plan.get("audio") or {})
     audio_plan["start_seconds"] = round(float(start), 3)
     audio_plan["end_seconds"] = round(float(end), 3)
+    if "speed" in override:
+        audio_plan["speed"] = override["speed"]
     plan["audio"] = audio_plan
     return plan
 
@@ -2893,24 +2896,7 @@ def _cover_browser_context():
     class _ContextManager:
         def __enter__(self):
             self._playwright = sync_playwright().start()
-            headless = _bool_env("MP3_VIDEO_COVER_BROWSER_HEADLESS", True)
-            args = ["--disable-dev-shm-usage", "--disable-gpu", "--no-sandbox"]
-            kwargs = {
-                "headless": headless,
-                "args": args,
-            }
-            chrome_path = _cover_chrome_executable_path()
-            chrome_channel = _env(
-                "MP3_VIDEO_COVER_BROWSER_CHANNEL",
-                "REPORT_PDF_GEMINI_CHANNEL",
-                os.environ.get("GEMINI_BROWSER_CHANNEL") or "",
-            )
-            if chrome_path:
-                kwargs["executable_path"] = chrome_path
-            elif chrome_channel:
-                kwargs["channel"] = chrome_channel
-            else:
-                kwargs["channel"] = "chrome"
+            kwargs = _cover_browser_launch_kwargs()
             self._browser = _launch_cover_browser(self._playwright.chromium, kwargs)
             self._context = self._browser.new_context(
                 viewport={"width": 1440, "height": 1000},
@@ -2930,6 +2916,31 @@ def _cover_browser_context():
                     self._playwright.stop()
 
     return _ContextManager()
+
+
+def _cover_browser_launch_kwargs() -> Dict[str, Any]:
+    headless = _bool_env("MP3_VIDEO_COVER_BROWSER_HEADLESS", True)
+    args = ["--disable-dev-shm-usage", "--disable-gpu", "--no-sandbox"]
+    kwargs: Dict[str, Any] = {"headless": headless, "args": args}
+    if headless:
+        # Playwright 1.48 requests the removed --headless=old mode for current
+        # Chrome releases. Pass the supported mode explicitly instead.
+        kwargs["headless"] = False
+        kwargs["args"] = ["--headless=new", *args]
+
+    chrome_path = _cover_chrome_executable_path()
+    chrome_channel = _env(
+        "MP3_VIDEO_COVER_BROWSER_CHANNEL",
+        "REPORT_PDF_GEMINI_CHANNEL",
+        os.environ.get("GEMINI_BROWSER_CHANNEL") or "",
+    )
+    if chrome_path:
+        kwargs["executable_path"] = chrome_path
+    elif chrome_channel:
+        kwargs["channel"] = chrome_channel
+    else:
+        kwargs["channel"] = "chrome"
+    return kwargs
 
 
 def _route_cover_render_request(route):
@@ -3835,12 +3846,18 @@ def audio_segment_from_plan(audio: Dict[str, Any], plan: Dict[str, Any]) -> Dict
     if end is not None and duration:
         end = min(duration, max(start + 0.1, end))
         end_offset = max(0.0, duration - end)
+    try:
+        speed = float(plan_audio.get("speed") or DEFAULT_SPEED)
+    except (TypeError, ValueError) as exc:
+        raise Mp3VideoWorkflowError("视频音频倍速无效") from exc
+    if not math.isfinite(speed) or not 0.5 <= speed <= 2.0:
+        raise Mp3VideoWorkflowError("视频音频倍速必须在 0.5×–2.0× 之间")
     return {
         "path": audio.get("path"),
         "subtitle": "",
         "start": round(start, 3),
         "end_offset": round(end_offset, 3),
-        "speed": DEFAULT_SPEED,
+        "speed": round(speed, 3),
     }
 
 
