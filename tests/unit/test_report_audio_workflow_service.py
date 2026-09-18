@@ -108,10 +108,10 @@ class ReportAudioWorkflowServiceTest(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(_normalizer_model(), "deepseek-v4-flash")
 
-    def test_default_title_review_model_uses_pro_variant(self):
+    def test_default_title_models_use_flash_variant(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(report_audio_service._title_generation_model(), "deepseek-v4-pro")
-            self.assertEqual(report_audio_service._title_review_model(), "deepseek-v4-pro")
+            self.assertEqual(report_audio_service._title_generation_model(), "deepseek-v4-flash")
+            self.assertEqual(report_audio_service._title_review_model(), "deepseek-v4-flash")
 
     def test_pdf_original_title_is_kept_as_review_baseline(self):
         title = report_audio_service._pdf_title_baseline(

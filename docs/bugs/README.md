@@ -6,6 +6,17 @@
 
 复发根因登记表：[`recurrence-registry.json`](recurrence-registry.json)。正式回顾归档在 [`reviews/`](reviews/)。
 
+2026-09-18 每日复核：[数据库性能巡检](reviews/2026-09-18-db-performance-audit.md)。
+私网路由保持正确但 01:36 再发 PgBouncer query-wait/TLS 断连；巡检补读独立调度器日志，
+并修正数据库失败时错误启用已停用的 ZSXQ 全部 Tab 计划。网络根因仍 OPEN。
+同窗另外登记 [B站情报 24 次整点连接失败](2026-09-18-bilibili-intelligence-hourly-connect-failure.md)
+和 [B站定时上传余量耗尽](2026-09-18-bilibili-scheduled-upload-margin-expired.md)；
+前者等待网络链路现场证据，后者等待工作流修复与自然上传验收，均保持 OPEN。
+
+2026-09-16 每日复核：[数据库性能巡检](reviews/2026-09-16-db-performance-audit.md)。
+主机 17:39 重启后 Tailscale 处于 `NeedsLogin`，数据库私网路由落入代理 TUN；PgBouncer 记录 2,889 次
+server crash，应用整栈停机 12 小时 20 分。安全门已 fail closed，等待用户恢复 Tailscale 身份。
+
 2026-09-15 每日复核：[数据库性能巡检](reviews/2026-09-15-db-performance-audit.md)。
 应用慢 SQL 升至 132 条/223.626 秒，13:01 出现 4 个 PgBouncer query-wait episode 与 4 个应用断连；
 executor、锁和 Session 证据继续排除缺索引，既有网络簇保持 OPEN/REPEATED/OBSERVING。
@@ -20,6 +31,10 @@ executor、锁和 Session 证据继续排除缺索引，既有网络簇保持 OP
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-09-18 | [每日数据库性能与错误巡检](reviews/2026-09-18-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 调度器 | 私网连接瞬断复发；配置回退修复待运行验收，网络 OPEN |
+| 2026-09-18 | [数据库瞬断把已停用的 ZSXQ 全部 Tab 计划临时启用](2026-09-18-zsxq-schedule-db-error-enabled-disabled-targets.md) | ZSXQ all-tabs / scheduler / PostgreSQL | P0 CODE_VERIFIED / WAITING_RUNTIME_REPLACEMENT / OBSERVING |
+| 2026-09-16 | [每日数据库性能与错误巡检](reviews/2026-09-16-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 运行拓扑 | 主机重启后 Tailscale 注销；应用停机 12:20:56，OPEN/BLOCKED_USER_AUTH |
+| 2026-09-16 | [主机重启后 Tailscale 注销使数据库私网路由落入代理 TUN](2026-09-16-host-reboot-tailscale-auth-route-fallback-outage.md) | 全站 / Tailscale / 代理 TUN / PgBouncer / 启动拓扑 | P0 OPEN/BLOCKED_USER_AUTH；安全门拒绝重启，等待用户登录 |
 | 2026-09-15 | [每日数据库性能与错误巡检](reviews/2026-09-15-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | 4 个 query-wait episode 与应用断连复发；无 DDL 证据，网络 OPEN/REPEATED |
 | 2026-09-14 | [每日数据库性能与错误巡检](reviews/2026-09-14-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | 错误与 timeout 为 0；慢 SQL 24 条/35.476 秒；Publisher P0 已替换运行态待自然验收 |
 | 2026-09-14 | [Publisher 上传尚在合法执行窗口时被 Watchdog 误收口](2026-09-14-publisher-upload-orphan-grace-before-execution-timeout.md) | Publisher upload-only / Watchdog / platform_upload | RUNTIME_REPLACED/OBSERVING；1675 项全量与双安全门重启通过 |

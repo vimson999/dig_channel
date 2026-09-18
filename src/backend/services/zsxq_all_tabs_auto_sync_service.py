@@ -134,21 +134,10 @@ def load_all_tabs_auto_sync_configs(*, include_disabled=True, ensure_defaults=Tr
             pass
         release_db_session_quietly()
         logger.warning(
-            "[ZSXQ_ALL_TABS_AUTO] DB schedule config unavailable; using bootstrap defaults | error=%s",
+            "[ZSXQ_ALL_TABS_AUTO] DB schedule config unavailable; skipping all-tabs schedules until DB recovers | error=%s",
             exc,
         )
-        return [
-            _normalize_stored_config(
-                target["key"],
-                _default_config_payload(
-                    target,
-                    credential_id=_frontier_preferred_credential_id(),
-                ),
-                enabled=True,
-                source="bootstrap_fallback",
-            )
-            for target in DEFAULT_AUTO_SYNC_TARGETS
-        ]
+        return []
 
 
 def _db_config_rows():

@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>频道主档案 - Shioa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="css/main.css">
+</head>
+<body class="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 text-slate-800">
+    <div id="toast-container" class="toast-container space-y-2"></div>
+    <main class="mx-auto max-w-7xl px-4 py-5 sm:px-6 lg:py-7">
+        <header class="mb-5 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <a href="rankings.html" class="inline-flex w-fit items-center gap-2 text-sm font-semibold text-slate-600 transition hover:text-blue-600"><i class="fas fa-arrow-left" aria-hidden="true"></i>返回频道数据中心</a>
+            <a id="channel-owner-videos-link" href="videos.html" class="inline-flex w-fit items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-blue-300 hover:text-blue-600"><i class="fas fa-play-circle" aria-hidden="true"></i>查看全部视频</a>
+        </header>
+
+        <section id="channel-owner-profile" class="overflow-hidden rounded-2xl border border-white/70 bg-white/95 shadow-lg backdrop-blur" aria-live="polite">
+            <div id="channel-owner-loading" class="px-6 py-24 text-center text-slate-400"><i class="fas fa-spinner fa-spin mb-3 text-3xl" aria-hidden="true"></i><p>正在加载频道主档案…</p></div>
+            <div id="channel-owner-content" hidden>
+                <div class="border-b border-slate-100 bg-gradient-to-r from-blue-50 to-indigo-50 px-6 py-6 sm:px-8">
+                    <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                        <div class="flex min-w-0 gap-4"><span class="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-indigo-600 text-xl text-white shadow-sm"><i class="fas fa-user-chart" aria-hidden="true"></i></span><div class="min-w-0"><h1 id="channel-owner-name" class="truncate text-2xl font-bold tracking-tight text-slate-900">频道主档案</h1><p id="channel-owner-meta" class="mt-1 text-sm text-slate-500"></p></div></div>
+                        <a id="channel-owner-external-link" target="_blank" rel="noopener noreferrer" class="inline-flex w-fit items-center gap-2 text-sm font-semibold text-blue-600 hover:text-blue-800"><i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i>打开频道</a>
+                    </div>
+                </div>
+                <div class="grid gap-3 border-b border-slate-100 px-6 py-5 sm:grid-cols-2 lg:grid-cols-4 sm:px-8" id="channel-owner-metrics"></div>
+                <div class="grid gap-5 p-6 sm:p-8 lg:grid-cols-[minmax(0,1.65fr)_minmax(280px,0.9fr)]">
+                    <section class="rounded-xl border border-slate-100 p-4 sm:p-5"><div class="mb-4 flex flex-col gap-3"><div class="flex flex-wrap items-start justify-between gap-3"><div><h2 id="channel-owner-trend-title" class="font-bold text-slate-900">日趋势</h2><p class="mt-1 text-xs text-slate-500">切换维度后，图表和表格会同步更新</p></div><div class="inline-flex rounded-lg bg-slate-100 p-1" aria-label="趋势指标"><button type="button" data-owner-metric="revenue" class="rounded-md px-2.5 py-1.5 text-xs font-semibold">收入</button><button type="button" data-owner-metric="subscribers" class="rounded-md px-2.5 py-1.5 text-xs font-semibold">订阅</button></div></div><div class="inline-flex w-fit rounded-lg border border-indigo-100 bg-indigo-50/70 p-1" aria-label="统计维度"><button type="button" data-owner-period="daily" class="rounded-md px-3 py-1.5 text-xs font-bold">日</button><button type="button" data-owner-period="monthly" class="rounded-md px-3 py-1.5 text-xs font-bold">月</button><button type="button" data-owner-period="yearly" class="rounded-md px-3 py-1.5 text-xs font-bold">年</button></div></div><div id="channel-owner-chart" class="h-72 w-full" role="img" aria-label="频道趋势图"></div><div class="mt-5 overflow-x-auto rounded-lg border border-slate-100"><div class="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-3 py-2"><h3 class="text-sm font-bold text-slate-700">统计明细</h3><span id="channel-owner-period-summary" class="text-xs text-slate-500"></span></div><table class="w-full min-w-[790px] text-left text-xs"><thead class="bg-white text-slate-500"><tr><th class="px-3 py-2.5 font-semibold">周期</th><th class="px-3 py-2.5 text-right font-semibold">订阅</th><th class="px-3 py-2.5 text-right font-semibold">播放</th><th class="px-3 py-2.5 text-right font-semibold">视频数</th><th class="px-3 py-2.5 text-right font-semibold">新增订阅</th><th class="px-3 py-2.5 text-right font-semibold">新增播放</th><th class="px-3 py-2.5 text-right font-semibold">预估收入</th></tr></thead><tbody id="channel-owner-period-table" class="divide-y divide-slate-100 text-slate-700"></tbody></table></div></section>
+                    <section class="rounded-xl border border-slate-100 p-5"><h2 class="font-bold text-slate-900">本账户内排名</h2><p id="channel-owner-rank-date" class="mt-1 text-xs text-slate-500"></p><div id="channel-owner-rankings" class="mt-4 grid grid-cols-2 gap-3"></div></section>
+                </div>
+                <div class="grid gap-5 border-t border-slate-100 p-6 sm:p-8 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1.4fr)]">
+                    <section class="rounded-xl border border-slate-100 p-5"><h2 class="font-bold text-slate-900">内容表现</h2><div id="channel-owner-top-video" class="mt-4"></div></section>
+                    <section class="rounded-xl border border-slate-100 p-5"><div class="flex items-center justify-between gap-4"><h2 class="font-bold text-slate-900">近期内容</h2><span id="channel-owner-video-count" class="text-xs text-slate-500"></span></div><div id="channel-owner-videos" class="mt-3 divide-y divide-slate-100"></div></section>
+                </div>
+            </div>
+        </section>
+    </main>
+    <script src="js/env.js?v=20250720-002"></script>
+    <script>window.API_BASE_URL = API_BASE_URL;</script>
+    <script src="js/config.js?v=20260915-002"></script>
+    <script src="js/utils.js?v=20250110-001"></script>
+    <script src="js/api.js?v=20250110-002"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
+    <script src="js/channel-owner-profile.js?v=20260915-003"></script>
+    <script src="js/shared-navigation.js?v=20260516-003"></script>
+</body>
+</html>

@@ -298,6 +298,19 @@ def get_channel_rankings(channel_id):
     except Exception as e:
         return handle_api_error(500, f"获取频道排名失败: {str(e)}")
 
+
+@bp.route('/channel/<int:channel_id>/profile', methods=['GET'])
+@require_login
+def get_channel_owner_profile(current_user, channel_id):
+    """Return the current user's single-channel owner profile."""
+    try:
+        result = RankingService.get_channel_owner_profile(channel_id, current_user.id)
+        if result['success']:
+            return jsonify({'success': True, 'data': result['data']})
+        return handle_api_error(404, result['message'])
+    except Exception as e:
+        return handle_api_error(500, f"获取频道主档案失败: {str(e)}")
+
 @bp.route('/summary', methods=['GET'])
 def get_rankings_summary():
     """获取排行榜概要信息

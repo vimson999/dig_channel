@@ -338,6 +338,29 @@ class DbPerformanceLogAnalyzerTest(unittest.TestCase):
             )
         )
 
+    def test_discovers_independent_scheduler_hold_without_double_counting_mirror(self):
+        analyzer = load_analyzer()
+        record = (
+            "2026-09-18 01:36:50,741 - WARNING - database connection held too long "
+            "duration_ms=6205.43 pid=29166 role=scheduler "
+            "process=run_bilibili_intelligence_scheduler.py request_id=unknown "
+            "checkout_origin=services/bilibili_intelligence_scheduler_service.py:57:load_schedule_config "
+            "sql_count=2 sql_total_ms=6145.33 sql_max_ms=6118.16 non_sql_hold_ms=60.1\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "bilibili_intelligence_scheduler.log").write_text(record)
+            (logs / "scheduler.log").write_text(record)
+            (logs / "pgbouncer.log").write_text(record)
+            output = io.StringIO()
+            with patch("sys.argv", [str(SCRIPT_PATH), "--since", "2026-09-18 00:00:00", "--until", "2026-09-18 06:00:00"]), patch.object(analyzer, "ROOT", root), patch.object(analyzer, "SLOW_LOG", logs / "slow_query.log"), patch.object(analyzer, "DEFAULT_EVENT_LOGS", (logs / "scheduler.log",)), redirect_stdout(output):
+                self.assertEqual(analyzer.main(), 0)
+        self.assertIn("connection_holds count=1", output.getvalue())
+        self.assertIn("sql_total_ms=6145.33 non_sql_total_ms=60.10", output.getvalue())
+        self.assertIn("connection_holds_query_correlated count=1", output.getvalue())
+
     def test_classifies_pgbouncer_hba_rejections_without_closing_duplicates(self):
         analyzer = load_analyzer()
 

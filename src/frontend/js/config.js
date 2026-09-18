@@ -41,6 +41,7 @@ const CONFIG = {
         RANKINGS_DAILY_SUBSCRIBER: '/rankings/daily-subscriber',
         RANKINGS_MONTHLY_SUBSCRIBER: '/rankings/monthly-subscriber',
         RANKINGS_YEARLY_SUBSCRIBER: '/rankings/yearly-subscriber',
+        CHANNEL_OWNER_PROFILE: '/rankings/channel',
         RANKINGS_TYPES: '/rankings/types',
         
         // 数据相关

@@ -194,7 +194,7 @@ test('ranking rows keep channel identity on one compact line', () => {
     assert.match(row, /\$3\.25\/千次/);
     assert.match(row, /data-channel-identity[^>]*>[\s\S]*?<\/div>\s*<div data-category-column/);
     assert.match(row, /data-category-column[^>]*>[\s\S]*?<\/div>\s*<div data-cpm-column/);
-    assert.match(row, /data-channel-identity[^>]*>\s*<span[^>]*>Skill Leap AI<\/span>\s*<span[^>]*>UCwSozl89jl2zUDzQ4jGJD3g<\/span>/);
+    assert.match(row, /data-channel-identity[^>]*>\s*<a href="channel-owner\.html\?channel_id=26"[^>]*>[\s\S]*?>Skill Leap AI<\/span>\s*<span[^>]*>[\s\S]*?档案<\/span>[\s\S]*?<\/a>\s*<span[^>]*>UCwSozl89jl2zUDzQ4jGJD3g<\/span>/);
     assert.doesNotMatch(row, /mt-1/);
 });
 

@@ -332,6 +332,7 @@ class RankingsPage {
         const cpm = Number(item.cpm);
         const cpmLabel = Number.isFinite(cpm) ? `$${cpm.toFixed(2)}/千次` : '未设置';
         const channelId = encodeURIComponent(item.channel_id);
+        const profileUrl = `channel-owner.html?channel_id=${channelId}`;
         const videoUrl = `videos.html?channel_id=${channelId}&channel_name=${encodeURIComponent(item.channel_name || '')}`;
         return `
             <div data-ranking-row class="grid min-h-6 grid-cols-[40px_minmax(140px,1fr)_110px_28px] items-center px-3 py-0.5 transition-colors hover:bg-blue-50/50 sm:grid-cols-[56px_minmax(360px,520px)_160px_minmax(220px,1fr)_44px] sm:px-4 lg:grid-cols-[56px_minmax(260px,390px)_72px_112px_150px_minmax(180px,1fr)_44px]">
@@ -339,7 +340,7 @@ class RankingsPage {
                     ? `<span class="inline-flex h-6 w-6 items-center justify-center rounded-full bg-blue-50 text-xs font-bold text-blue-700">${rank}</span>`
                     : `<span class="inline-flex h-6 w-6 items-center justify-center text-xs font-semibold text-slate-500">${rank}</span>`}</div>
                 <div data-channel-identity class="flex min-w-0 items-center gap-3">
-                    <span class="min-w-0 flex-1 truncate text-sm font-semibold text-slate-800 sm:w-52 sm:flex-none sm:shrink-0" title="${channelName}">${channelName}</span>
+                    <a href="${profileUrl}" class="flex min-w-0 flex-1 items-center gap-1.5 text-sm font-semibold text-slate-800 transition hover:text-violet-700 sm:w-52 sm:flex-none sm:shrink-0" title="查看 ${channelName} 的频道主档案"><span class="min-w-0 truncate">${channelName}</span><span class="inline-flex shrink-0 items-center gap-1 rounded bg-violet-50 px-1.5 py-0.5 text-[11px] font-bold text-violet-700"><i class="fas fa-user-chart text-[9px]" aria-hidden="true"></i>档案</span></a>
                     <span class="hidden min-w-0 truncate pr-3 text-xs text-slate-400 sm:inline">${RankingsPage.escapeHtml(item.youtube_id || '')}</span>
                 </div>
                 <div data-category-column class="hidden truncate border-l border-slate-100 pl-3 text-xs font-medium text-slate-600 lg:block" title="分类：${category}">${category}</div>
@@ -349,8 +350,11 @@ class RankingsPage {
                     <progress value="${relativePercent}" max="100" class="ranking-progress min-w-24 flex-1" style="--ranking-progress-color: ${definition.progressColor || '#3b82f6'}" aria-label="${channelName} 相对榜首 ${relativePercent}%"></progress>
                     <span class="w-11 text-right text-xs tabular-nums text-slate-500">${relativePercent}%</span>
                 </div>
-                <div class="text-right">
-                    <a href="${videoUrl}" class="inline-flex h-6 w-6 items-center justify-center rounded-md text-xs text-slate-400 transition-colors hover:bg-blue-100 hover:text-blue-600" aria-label="查看 ${channelName} 的视频">
+                    <div class="text-right">
+                        <a href="${profileUrl}" class="mr-1 inline-flex h-6 w-6 items-center justify-center rounded-md text-xs text-slate-400 transition-colors hover:bg-violet-100 hover:text-violet-600" aria-label="查看 ${channelName} 的频道主档案">
+                            <i class="fas fa-user-chart" aria-hidden="true"></i>
+                        </a>
+                        <a href="${videoUrl}" class="inline-flex h-6 w-6 items-center justify-center rounded-md text-xs text-slate-400 transition-colors hover:bg-blue-100 hover:text-blue-600" aria-label="查看 ${channelName} 的视频">
                         <i class="fas fa-arrow-right" aria-hidden="true"></i>
                     </a>
                 </div>

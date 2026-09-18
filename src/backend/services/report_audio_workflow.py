@@ -1470,8 +1470,9 @@ def _title_generation_model() -> str:
     return (
         os.environ.get("REPORT_AUDIO_TITLE_GENERATION_MODEL")
         or os.environ.get("REPORT_AUDIO_TITLE_REVIEW_MODEL")
-        or os.environ.get("DEEPSEEK_PRO_MODEL")
-        or "deepseek-v4-pro"
+        or os.environ.get("DEEPSEEK_FLASH_MODEL")
+        or os.environ.get("DEEPSEEK_MODEL")
+        or "deepseek-v4-flash"
     )
 
 
@@ -1479,8 +1480,9 @@ def _title_review_model() -> str:
     return (
         os.environ.get("REPORT_AUDIO_TITLE_REVIEW_MODEL")
         or os.environ.get("REPORT_AUDIO_TITLE_GENERATION_MODEL")
-        or os.environ.get("DEEPSEEK_PRO_MODEL")
-        or "deepseek-v4-pro"
+        or os.environ.get("DEEPSEEK_FLASH_MODEL")
+        or os.environ.get("DEEPSEEK_MODEL")
+        or "deepseek-v4-flash"
     )
 
 

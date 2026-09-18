@@ -164,6 +164,19 @@ socket 脱离 `utun8`。11:03 新建、明确命中 DIRECT 的连接仍在 11:05
 - PgBouncer wait/query P95 为 44.62/71.85ms，连接源保持 `100.96.3.12`，未见 TUN fallback；相较前窗改善，
   但应用与 executor 仍存在数量级差距。状态保持 `RUNTIME_MITIGATED/OPEN/REPEATED/OBSERVING`。
 
+### 2026-09-16 主机重启后 Tailscale 注销，代理 TUN 路由回退形成持续停机
+
+- 主机于 2026-09-15 17:39:04 重启；Clash/Mihomo 先恢复，Tailscale 当前为 `NeedsLogin`、无私网 IP。
+- 数据库目标 `100.92.99.39` 的 route 变成 `gateway=198.18.0.1 interface=utun0`。PgBouncer 自
+  17:46:39 至窗口结束 2,889 次 server connection 从代理 TUN 发出并在约 5 秒后 crash，另有 2 个去重
+  query-wait episode；没有恢复到 Tailscale source `100.96.3.12`。
+- 后端、17 个 worker、Watchdog 与调度器均未恢复，固定窗口末段停机 12 小时 20 分 56 秒；HTTP 日志中的
+  零 5xx 只代表重启前在线段，不能作为健康证据。
+- 重启安全门因 PgBouncer 后的 PostgreSQL 握手超时以 exit 3 fail closed，未使用 FORCE。当前必须由用户先
+  登录 Tailscale，再验证 route/source、执行标准双门禁重启与真实 API/任务验收。
+- 这次复发把根因边界进一步收敛为“外部私网身份丢失 + 代理 TUN 捕获 + 启动依赖缺口”。状态升级为
+  `OPEN/BLOCKED_USER_AUTH/REPEATED`，详见 `2026-09-16-host-reboot-tailscale-auth-route-fallback-outage.md`。
+
 ### 2026-08-12 长寿命后端 socket 缓解与 SSH 隧道回滚
 
 - 新窗口仍出现 6 个去重 query timeout 和多次 `server conn crashed?`；异常 PgBouncer server socket 年龄集中在约 10 分钟以上，旧 `server_lifetime=21600` 会让网络漂移前建立的连接继续复用。

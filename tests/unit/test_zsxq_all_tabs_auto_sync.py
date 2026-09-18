@@ -435,6 +435,30 @@ class ZsxqAllTabsAutoSyncDatabaseConfigTest(unittest.TestCase):
 
         self.assertEqual([config["key"] for config in enabled], ["shengcai"])
 
+    def test_database_read_failure_never_enables_operator_disabled_schedules(self):
+        with patch.object(
+            service,
+            "_frontier_preferred_credential_id",
+            return_value="credential-frontier",
+        ):
+            service.ensure_default_auto_sync_configs()
+            for key in ("shengcai", "honghao"):
+                service.save_all_tabs_auto_sync_config(key, {"enabled": False})
+        service._invalidate_config_cache()
+        with patch.object(
+            service, "_db_config_rows", side_effect=RuntimeError("database unavailable")
+        ):
+            self.assertEqual(
+                service.load_all_tabs_auto_sync_configs(include_disabled=False), []
+            )
+        self.assertEqual(
+            [config["key"] for config in service.load_all_tabs_auto_sync_configs()],
+            ["honghao", "shengcai"],
+        )
+        self.assertFalse(any(
+            config["enabled"] for config in service.load_all_tabs_auto_sync_configs()
+        ))
+
     def test_target_of_40_uses_api_safe_pages_of_20(self):
         with patch.object(
             zsxq_sync_service,

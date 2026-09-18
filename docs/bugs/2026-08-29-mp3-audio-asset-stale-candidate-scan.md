@@ -120,3 +120,21 @@ authoritative catalog、Session/文件 I/O 边界、轻量 worker 状态和 sour
 canonical 和该页 `/api/v1/celery/status` 调用均为 0；冷目录最多 2 条 SQL、暖搜索 0；runtime status
 无业务 SQL；历史 stats 不再返回假 0，下一自然任务写入规范 UUID；同时六类网络错误、失败 SQL 和长
 Session 为 0。
+
+## 2026-09-17 冷目录长尾复核
+
+固定窗真实音频目录 API 2/2 成功，但耗时 5.255/4.398 秒；canonical SQL 同一指纹
+`be891b5c1af362da` 为 5.042/4.002 秒、累计 9.044 秒，占本窗 10 条慢 SQL 总耗时的 47.7%。
+当前 cleaned audio 773 行，仍是有界一次投影；只读 EXPLAIN 顺扫 2,100 行、返回 773，executor
+2.508ms / shared read 222。唯一 5.108 秒 Session hold 中 SQL 占 5.042 秒、非 SQL 66ms，未见旧附件
+N+1 或文件 I/O 跨事务证据。长尾在 executor 外，缺 request 级 pool wait/传输 marker，故旧查询预算可保持
+`RUNTIME_REPLACED`，整体用户延迟继续 `OPEN/OBSERVING`；不据顺扫盲目建索引。下一自然冷/强刷记录
+行数、response bytes、pool/driver 分段、P95 和 cache 命中，完整后窗仍要求暖搜索目录 SQL 为 0。
+
+## 2026-09-18 同指纹再次复发
+
+固定窗音频目录 3 个真实 API 累计 9.547 秒、P95 5.173 秒；canonical 指纹
+`be891b5c1af362da` 仍有 2 条，累计 8.933 秒、P95 4.772 秒。
+旧逐项附件 N+1 没有进入慢 SQL 样本，但并不排除低于阈值的查询；代表数据库 executor
+仍为毫秒级，底层连接与驱动尾延迟继续 OPEN/REPEATED/OBSERVING。
+下一自然冷/暖搜索必须补齐 request 级 pool wait、fetch bytes 和 SQL 数。

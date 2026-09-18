@@ -46,6 +46,9 @@
 - 只需要 extensions/数据库 app context 的 Celery task、scheduler 或 watchdog 不得注册完整 Web API；应用工厂
   必须提供显式最小模式且默认 Web 模式保持兼容。长期驻留消费者的源码/API 契约变更后必须重启并以进程
   start time、worker ready 与真实任务验证模块图一致，磁盘函数存在不能替代运行态验收。
+- 由数据库持久化启停状态的 scheduler 在配置读取失败时必须停止注册或投递对应计划；不得把读库失败解释为
+  配置缺失并启用 bootstrap 默认值。故障注入回归必须覆盖“数据库中已停用 → 读库失败 → 无计划/无投递 →
+  恢复后仍停用”，且巡检要同时读取独立 scheduler 日志、PgBouncer 和失败 SQL 的连接持有事件。
 - 数据库异常进入恢复分支后，任何查询、更新或提交之前必须先 `rollback/remove`；禁止在可能失效的 session 上二次查询，也禁止用 `finally: commit()` 收口这类分支。
 - 可重试数据库异常在 service 层不得提前写业务终态。由任务层先写 `retrying` 再安排 retry，只有重试耗尽才允许写 `failed`。
 - 任何成功终态写入都必须原子清除旧 `error_message`；watchdog、orphan cleanup、retry 与真实 worker 可能并发写入，

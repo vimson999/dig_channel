@@ -7,11 +7,221 @@
 
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Any
-from sqlalchemy import func, desc
-from models import db, Channel, ChannelData
+from sqlalchemy import and_, desc, func, or_
+from models import db, Channel, ChannelData, Video
 
 class RankingService:
     """排行榜服务类"""
+
+    @staticmethod
+    def _period_tables(rows):
+        """Build portable day/month/year table rows from chronological snapshots."""
+        def snapshot(record, period):
+            return {
+                'period': period,
+                'subscribers': record.subscribers,
+                'total_views': record.total_views,
+                'video_count': record.video_count,
+                'subscriber_change': record.subscriber_change,
+                'view_change': record.view_change,
+                'estimated_revenue': float(record.estimated_revenue),
+            }
+
+        def aggregate(key_for):
+            grouped = {}
+            for record in rows:
+                key = key_for(record)
+                if key not in grouped:
+                    grouped[key] = snapshot(record, key)
+                else:
+                    grouped[key].update({
+                        'subscribers': record.subscribers,
+                        'total_views': record.total_views,
+                        'video_count': record.video_count,
+                    })
+                    grouped[key]['subscriber_change'] += record.subscriber_change
+                    grouped[key]['view_change'] += record.view_change
+                    grouped[key]['estimated_revenue'] += float(record.estimated_revenue)
+            return list(reversed(list(grouped.values())))
+
+        daily = [snapshot(record, record.date.isoformat()) for record in reversed(rows[-90:])]
+        monthly = aggregate(lambda record: record.date.strftime('%Y-%m'))[:24]
+        yearly = aggregate(lambda record: str(record.date.year))
+        return {'daily': daily, 'monthly': monthly, 'yearly': yearly}
+
+    @staticmethod
+    def get_channel_owner_profile(channel_id: int, user_id: int) -> Dict[str, Any]:
+        """Return the factual, single-channel profile behind one ranking row.
+
+        The product calls this a channel-owner profile, but the persisted unit is
+        deliberately a single channel.  We do not infer a real person or merge
+        multiple channels without an explicit ownership relation in the data.
+        """
+        channel = Channel.query.filter_by(id=channel_id, user_id=user_id).first()
+        if not channel:
+            return {'success': False, 'message': '频道不存在或无权访问', 'data': None}
+
+        latest = (
+            ChannelData.query.filter_by(channel_id=channel.id)
+            .order_by(ChannelData.date.desc())
+            .first()
+        )
+        if not latest:
+            return {'success': False, 'message': '该频道暂无可用的数据记录', 'data': None}
+
+        trend_start = latest.date - timedelta(days=89)
+        trend_rows = (
+            ChannelData.query.filter(
+                ChannelData.channel_id == channel.id,
+                ChannelData.date >= trend_start,
+                ChannelData.date <= latest.date,
+            )
+            .order_by(ChannelData.date.asc())
+            .all()
+        )
+        history_rows = (
+            ChannelData.query.filter(
+                ChannelData.channel_id == channel.id,
+                ChannelData.date <= latest.date,
+            )
+            .order_by(ChannelData.date.asc())
+            .all()
+        )
+        performance_start = latest.date - timedelta(days=29)
+        recent_performance = db.session.query(
+            func.coalesce(func.sum(ChannelData.estimated_revenue), 0),
+            func.coalesce(func.sum(ChannelData.subscriber_change), 0),
+            func.coalesce(func.sum(ChannelData.view_change), 0),
+        ).filter(
+            ChannelData.channel_id == channel.id,
+            ChannelData.date >= performance_start,
+            ChannelData.date <= latest.date,
+        ).one()
+
+        recent_videos = (
+            Video.query.filter_by(user_id=user_id, channel_id=channel.id, is_active=True)
+            .order_by(Video.published_at.desc(), Video.id.desc())
+            .limit(6)
+            .all()
+        )
+        top_video = (
+            Video.query.filter_by(user_id=user_id, channel_id=channel.id, is_active=True)
+            .order_by(Video.view_count.desc(), Video.published_at.desc(), Video.id.desc())
+            .first()
+        )
+
+        daily_revenue_rank = db.session.query(func.count(ChannelData.id)).join(Channel).filter(
+            Channel.user_id == user_id,
+            Channel.is_active == True,
+            ChannelData.date == latest.date,
+            or_(
+                ChannelData.estimated_revenue > latest.estimated_revenue,
+                and_(
+                    ChannelData.estimated_revenue == latest.estimated_revenue,
+                    Channel.id < channel.id,
+                ),
+            ),
+        ).scalar() + 1
+        daily_subscriber_rank = db.session.query(func.count(ChannelData.id)).join(Channel).filter(
+            Channel.user_id == user_id,
+            Channel.is_active == True,
+            ChannelData.date == latest.date,
+            or_(
+                ChannelData.subscriber_change > latest.subscriber_change,
+                and_(
+                    ChannelData.subscriber_change == latest.subscriber_change,
+                    Channel.id < channel.id,
+                ),
+            ),
+        ).scalar() + 1
+
+        month_start = latest.date.replace(day=1)
+        monthly_revenue = db.session.query(
+            func.coalesce(func.sum(ChannelData.estimated_revenue), 0)
+        ).filter(
+            ChannelData.channel_id == channel.id,
+            ChannelData.date >= month_start,
+            ChannelData.date <= latest.date,
+        ).scalar()
+        monthly_subscriber = db.session.query(
+            func.coalesce(func.sum(ChannelData.subscriber_change), 0)
+        ).filter(
+            ChannelData.channel_id == channel.id,
+            ChannelData.date >= month_start,
+            ChannelData.date <= latest.date,
+        ).scalar()
+        monthly_totals = db.session.query(
+            Channel.id.label('channel_id'),
+            func.sum(ChannelData.estimated_revenue).label('revenue'),
+            func.sum(ChannelData.subscriber_change).label('subscriber_change'),
+        ).join(ChannelData).filter(
+            Channel.user_id == user_id,
+            Channel.is_active == True,
+            ChannelData.date >= month_start,
+            ChannelData.date <= latest.date,
+        ).group_by(Channel.id).subquery()
+        monthly_revenue_rank = db.session.query(func.count()).select_from(monthly_totals).filter(
+            or_(
+                monthly_totals.c.revenue > monthly_revenue,
+                and_(
+                    monthly_totals.c.revenue == monthly_revenue,
+                    monthly_totals.c.channel_id < channel.id,
+                ),
+            )
+        ).scalar() + 1
+        monthly_subscriber_rank = db.session.query(func.count()).select_from(monthly_totals).filter(
+            or_(
+                monthly_totals.c.subscriber_change > monthly_subscriber,
+                and_(
+                    monthly_totals.c.subscriber_change == monthly_subscriber,
+                    monthly_totals.c.channel_id < channel.id,
+                ),
+            )
+        ).scalar() + 1
+
+        return {
+            'success': True,
+            'data': {
+                'channel': {
+                    'id': channel.id,
+                    'name': channel.name,
+                    'youtube_id': channel.channel_id,
+                    'url': channel.url,
+                    'category': channel.category,
+                    'cpm': float(channel.cpm),
+                },
+                'latest_metrics': {
+                    'date': latest.date.isoformat(),
+                    'subscribers': latest.subscribers,
+                    'total_views': latest.total_views,
+                    'video_count': latest.video_count,
+                },
+                'recent_performance': {
+                    'days': 30,
+                    'revenue': float(recent_performance[0]),
+                    'subscriber_change': int(recent_performance[1]),
+                    'view_change': int(recent_performance[2]),
+                },
+                'rankings': {
+                    'as_of': latest.date.isoformat(),
+                    'daily_revenue_rank': daily_revenue_rank,
+                    'daily_subscriber_rank': daily_subscriber_rank,
+                    'monthly_revenue_rank': monthly_revenue_rank,
+                    'monthly_subscriber_rank': monthly_subscriber_rank,
+                },
+                'trend': [{
+                    'date': row.date.isoformat(),
+                    'subscribers': row.subscribers,
+                    'total_views': row.total_views,
+                    'subscriber_change': row.subscriber_change,
+                    'view_change': row.view_change,
+                    'estimated_revenue': float(row.estimated_revenue),
+                } for row in trend_rows],
+                'periods': RankingService._period_tables(history_rows),
+                'recent_videos': [video.to_card_dict() for video in recent_videos],
+                'top_video': top_video.to_card_dict() if top_video else None,
+            },
+        }
 
     @staticmethod
     def _page(query, limit: int, page: int):

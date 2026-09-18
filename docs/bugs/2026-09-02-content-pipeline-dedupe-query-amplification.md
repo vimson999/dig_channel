@@ -112,3 +112,21 @@ savepoint。20 个文件因此把正常 admission 放大为约 20 次存在性�
 最慢 Web 请求仍为 10.379 秒，但没有超过 1 秒的 SQL，也没有 Web 长连接持有事件；这是文件处理、通知和
 远端往返的端到端长尾，不推翻 canonical 查询预算。独立的哈希事务边界仍缺直接运行标记，继续由
 `2026-09-03-content-pipeline-hash-inside-transaction.md` 观察，不能把本项验收扩写为整条请求已关闭。
+
+## 2026-09-17 端到端残余延迟复核
+
+固定窗 3 次 Web submit 全部 202，累计 21.962 秒、P95/max 12.525 秒。最慢 request `bc05ae0c`
+有一次 canonical SELECT/一次 7 行 INSERT，没有逐文件 N+1；三批 16+8+7 PDF 均已完成，31/31
+canonical 资产 cleaned。日志显示单次请求内 durable task、broker 与两次 workflow notification outbox
+串行往返，其中 17:49:53–58 的两次通知约 5.35 秒；另约 4 秒仍缺阶段 marker，不能凭现有日志把全部
+残余延迟归咎通知。没有 >5 秒 Web Session hold，说明旧哈希跨事务症状未再被捕获，但仍缺哈希入口
+`in_transaction=false` 的生产 marker。查询预算维持运行验收，**端到端延迟继续 OPEN**。下一批需记录
+接收/暂存、哈希、task commit、broker、两次 outbox 的阶段耗时及 request id，再在保留 durable/audit
+和两个业务事件的前提下评审批量出站写入；不可通过丢通知、放宽 timeout 或假成功掩盖。
+
+## 2026-09-18 残余接口耗时复核
+
+6 次自然 Web submit 全部返回 202，累计 26.091 秒、P50 4.127 秒、P95/max 5.244 秒，
+比前窗 P95 12.525 秒改善，但仍无 >=1 秒的匹配慢 SQL，不能由此宣称端到端根因已消失。
+Web history 自动轮询 105 次、累计 33.781 秒；需要在下一批自然提交中按 request id 对齐
+接收、哈希、durable commit、broker 与通知 outbox 阶段，以及最终 canonical ownership。

@@ -55,7 +55,8 @@ PARAMETER = re.compile(r"%\([^)]+\)s|:\w+|\$\d+")
 LITERAL = re.compile(r"'(?:''|[^'])*'|\b\d+(?:\.\d+)?\b")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 LIFECYCLE_DURATION = re.compile(
-    r"db_connection_lifecycle.*?duration_ms=(?P<duration>\d+(?:\.\d+)?)"
+    r"(?:db_connection_lifecycle|database connection held too long).*?"
+    r"duration_ms=(?P<duration>\d+(?:\.\d+)?)"
 )
 PGBOUNCER_STATS = re.compile(
     r"stats:.*?xact (?P<xact>\d+) us, query (?P<query>\d+) us, wait (?P<wait>\d+) us"
@@ -297,6 +298,17 @@ def discover_event_logs(since: datetime | None = None) -> list[Path]:
             for candidate in base_path.parent.glob(base_path.name + ".*")
             if candidate.is_file() and rotated_log_may_overlap(candidate, since)
         )
+    # Independently managed schedulers write to their own top-level files.
+    # Exclude the dedicated SQL and pooler streams, parsed separately below.
+    for base_path in (ROOT / "logs").glob("*.log"):
+        if base_path.name in {"slow_query.log", "pgbouncer.log"}:
+            continue
+        paths.add(base_path.resolve())
+        paths.update(
+            candidate.resolve()
+            for candidate in base_path.parent.glob(base_path.name + ".*")
+            if candidate.is_file() and rotated_log_may_overlap(candidate, since)
+        )
     paths.update(
         path.resolve()
         for pattern in ("*.log", "*.log.*")
@@ -309,7 +321,8 @@ def discover_event_logs(since: datetime | None = None) -> list[Path]:
 
 def event_type(line: str) -> str | None:
     lowered = line.lower()
-    if "db_connection_lifecycle" in lowered.partition("\n")[0]:
+    header = lowered.partition("\n")[0]
+    if "db_connection_lifecycle" in header or "database connection held too long duration_ms=" in header:
         return "connection_held"
     if "server closed the connection unexpectedly" in lowered:
         return "server_closed"
