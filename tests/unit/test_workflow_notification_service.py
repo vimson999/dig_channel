@@ -14,6 +14,52 @@ from services import workflow_notification_service as notification_module  # noq
 
 
 class WorkflowNotificationServiceTest(unittest.TestCase):
+    def test_contact_message_uses_fixed_recipient_and_visitor_reply_to(self):
+        captured = {}
+
+        def capture_send(settings, subject, body, event_id=None):
+            captured.update(
+                settings=settings,
+                subject=subject,
+                body=body,
+                event_id=event_id,
+            )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "WORKFLOW_NOTIFY_PROVIDER": "email",
+                "WORKFLOW_EMAIL_USER": "sender@example.test",
+                "WORKFLOW_EMAIL_PASSWORD": "secret",
+                "WORKFLOW_NOTIFY_TO": "workflow-owner@example.test",
+                "CONTACT_TO_EMAIL": "contact-owner@example.test",
+            },
+            clear=False,
+        ), patch.object(
+            workflow_notification_service,
+            "_send_email_with_retry",
+            side_effect=capture_send,
+        ):
+            result = workflow_notification_service.send({
+                "provider": "email",
+                "event_type": "contact_message",
+                "delivery_id": "delivery-contact-1",
+                "contact": {
+                    "name": "张三",
+                    "email": "visitor@example.test",
+                    "message": "我想了解你们的服务。",
+                    "source": "example.test",
+                },
+            })
+
+        self.assertTrue(result["sent"])
+        self.assertEqual(captured["settings"]["to"], "contact-owner@example.test")
+        self.assertEqual(captured["settings"]["reply_to"], "visitor@example.test")
+        self.assertEqual(captured["subject"], "[网站留言] 张三 · example.test")
+        self.assertIn("访客邮箱：visitor@example.test", captured["body"])
+        self.assertIn("我想了解你们的服务。", captured["body"])
+        self.assertEqual(captured["event_id"], "delivery-contact-1")
+
     def test_public_human_intervention_notification_masks_recipient(self):
         summary = notification_module.public_browser_human_intervention_notification({
             "sent": True,

@@ -274,6 +274,10 @@ def create_app(config_class=Config, *, register_apis=True):
             from utils.zsxq_history_auth import is_valid_service_request
             if is_valid_service_request():
                 return None
+        if path == '/api/v1/contact-messages':
+            from utils.contact_api_auth import is_valid_contact_request
+            if is_valid_contact_request():
+                return None
         if path in public_paths or path.startswith('/access/'):
             return None
 

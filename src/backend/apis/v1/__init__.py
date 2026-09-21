@@ -121,6 +121,10 @@ def register_blueprints(app):
     from .platform_credentials import bp as platform_credentials_bp
     app.register_blueprint(platform_credentials_bp)
 
+    # 同服务器项目提交访客留言，邮件通过持久化通知队列异步发送
+    from .contact_messages import bp as contact_messages_bp
+    app.register_blueprint(contact_messages_bp)
+
     # 知识星球历史 API 的多租户调用方凭据管理
     from .zsxq_history_api_clients import bp as zsxq_history_api_clients_bp
     app.register_blueprint(zsxq_history_api_clients_bp)

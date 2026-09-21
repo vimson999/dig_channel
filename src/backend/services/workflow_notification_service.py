@@ -130,6 +130,73 @@ def public_browser_human_intervention_notification(notification):
 class WorkflowNotificationService:
     """Dispatch workflow milestone notifications without blocking workflow stages."""
 
+    def enqueue_contact_message(self, contact):
+        contact = contact if isinstance(contact, dict) else {}
+        idempotency_key = str(contact.get("idempotency_key") or "").strip()
+        provider = self.provider() or "email"
+        workflow = {"id": f"contact:{idempotency_key}"}
+        payload = {
+            "provider": provider,
+            "event_type": "contact_message",
+            "workflow": workflow,
+            "contact": {
+                "name": str(contact.get("name") or "").strip(),
+                "email": str(contact.get("email") or "").strip(),
+                "message": str(contact.get("message") or "").strip(),
+                "source": str(contact.get("source") or "").strip(),
+            },
+            "queued_at": self._now_iso(),
+        }
+        end_db_transaction_before_external_io("contact message outbox enqueue")
+        from services.workflow_notification_outbox import (
+            enqueue_delivery,
+            mark_dispatch_result,
+        )
+        from tasks.workflow_notify import send_workflow_notification
+
+        delivery = enqueue_delivery(
+            provider=provider,
+            event_type="contact_message",
+            workflow=workflow,
+            payload=payload,
+        )
+        if delivery.get("status") == "sent":
+            return {
+                "queued": True,
+                "durable": True,
+                "deduplicated": True,
+                "delivery_id": delivery.get("id"),
+                "celery_task_id": delivery.get("celery_task_id"),
+            }
+        try:
+            result = apply_async_after_db_release(
+                send_workflow_notification,
+                args=[provider],
+                queue="workflow_notify",
+                retry=False,
+            )
+            mark_dispatch_result(delivery["id"], celery_task_id=result.id)
+            return {
+                "queued": True,
+                "durable": True,
+                "deduplicated": not delivery.get("created"),
+                "delivery_id": delivery["id"],
+                "celery_task_id": result.id,
+            }
+        except Exception as exc:
+            mark_dispatch_result(delivery["id"], error=exc)
+            logger.exception(
+                "[CONTACT_MESSAGE] broker dispatch failed; delivery remains pending | delivery=%s",
+                delivery.get("id"),
+            )
+            return {
+                "queued": True,
+                "durable": True,
+                "dispatch_scheduled": False,
+                "delivery_id": delivery["id"],
+                "reason": "broker_dispatch_pending",
+            }
+
     def enqueue_workflow_event(self, event_type, workflow_payload):
         if not self.should_send_event(event_type):
             return {"queued": False, "reason": "disabled"}
@@ -228,7 +295,8 @@ class WorkflowNotificationService:
     def send(self, payload):
         payload = payload if isinstance(payload, dict) else {}
         event_type = payload.get("event_type") or "workflow"
-        if not self.should_send_event(event_type):
+        is_contact_message = event_type == "contact_message"
+        if not is_contact_message and not self.should_send_event(event_type):
             logger.info("[WORKFLOW_NOTIFY] skipped by level/provider | event=%s", event_type)
             return {"sent": False, "reason": "disabled"}
 
@@ -237,11 +305,19 @@ class WorkflowNotificationService:
             return {"sent": False, "reason": f"unsupported_provider:{provider or 'none'}"}
 
         settings = self.email_settings()
+        if is_contact_message:
+            contact = payload.get("contact") if isinstance(payload.get("contact"), dict) else {}
+            settings = dict(settings)
+            settings["to"] = (os.getenv("CONTACT_TO_EMAIL") or "").strip()
+            settings["reply_to"] = str(contact.get("email") or "").strip()
         missing = self.missing_email_settings(settings)
         if missing:
             return {"sent": False, "reason": "missing_config", "missing": missing}
 
-        subject, body = self.build_email_content(payload)
+        if is_contact_message:
+            subject, body = self.build_contact_email_content(payload.get("contact"))
+        else:
+            subject, body = self.build_email_content(payload)
         # The durable provider breaker owns retry/backoff for workflow events.
         # Clamp the legacy in-process retry knob so one leased delivery can
         # never multiply connections before opening the shared circuit.
@@ -263,6 +339,27 @@ class WorkflowNotificationService:
                 "\n".join(self._stage_lines(workflow)),
             )
         return {"sent": True, "event_type": event_type, "to": settings["to"]}
+
+    def build_contact_email_content(self, contact):
+        contact = contact if isinstance(contact, dict) else {}
+        name = str(contact.get("name") or "匿名访客").replace("\r", " ").replace("\n", " ").strip()
+        source = str(contact.get("source") or "未知来源").replace("\r", " ").replace("\n", " ").strip()
+        visitor_email = str(contact.get("email") or "").strip()
+        message = str(contact.get("message") or "").strip()
+        subject = f"[网站留言] {name} · {source}"
+        body = "\n".join((
+            "收到一条新的网站留言。",
+            "",
+            f"访客姓名：{name}",
+            f"访客邮箱：{visitor_email}",
+            f"来源：{source}",
+            "",
+            "留言内容：",
+            message,
+            "",
+            f"接收时间：{self._local_time_text(datetime.utcnow().isoformat() + 'Z')}",
+        ))
+        return subject, body
 
     def send_test_email(self):
         workflow = {
@@ -538,6 +635,8 @@ class WorkflowNotificationService:
         message["Subject"] = subject
         message["From"] = formataddr((settings["from_name"], from_addr))
         message["To"] = settings["to"]
+        if settings.get("reply_to"):
+            message["Reply-To"] = settings["reply_to"]
         if event_id:
             message["X-Workflow-Event-ID"] = str(event_id)[:200]
         message.set_content(body)
