@@ -59,3 +59,6 @@ Gemini 与豆包真实浏览器 worker 会额外检测“登录状态失效”�
 ```bash
 curl -X POST http://localhost:5001/api/v1/zsxq/workflow-notifications/test
 ```
+
+同服务器项目提交访客留言并异步发送邮件的接口，见
+[`CONTACT_MESSAGE_API.md`](CONTACT_MESSAGE_API.md)。
