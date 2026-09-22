@@ -1361,7 +1361,7 @@ def regenerate_videos(current_user, job_id):
     )
     return jsonify({
         "success": True,
-        "message": f"已按新时间重新投递横屏和竖屏视频生成任务{range_text}",
+        "message": f"已按新设置重新投递横屏和竖屏视频生成任务{range_text}",
         **payload,
         "data": payload,
     })
@@ -2195,7 +2195,7 @@ def _format_audio_time(seconds):
     return f"{minutes:02d}:{remainder:02d}"
 
 
-def _apply_continue_audio_range_override(result, workflow, payload):
+def _apply_continue_audio_range_override(result, workflow, payload, *, allow_speed=False):
     if not isinstance(payload, dict):
         payload = {}
     has_override = any(key in payload for key in (
@@ -2206,6 +2206,7 @@ def _apply_continue_audio_range_override(result, workflow, payload):
         "start",
         "end",
     ))
+    has_override = has_override or (allow_speed and "speed" in payload)
     if not has_override:
         return True, "", None
     plan = dict(result.get("plan") or {})
@@ -2242,12 +2243,28 @@ def _apply_continue_audio_range_override(result, workflow, payload):
         if end is not None and end > duration + 1:
             return False, "终点不能超过音频总时长", None
 
+    speed = None
+    if allow_speed and "speed" in payload:
+        try:
+            if isinstance(payload["speed"], bool):
+                raise ValueError
+            speed = float(payload["speed"])
+        except (TypeError, ValueError):
+            return False, "播放倍速必须在 0.5×–2.0× 之间", None
+        if not math.isfinite(speed) or not 0.5 <= speed <= 2.0:
+            return False, "播放倍速必须在 0.5×–2.0× 之间", None
+        speed = round(speed, 3)
+
     audio_range = {
         "start_seconds": round(float(start), 3),
         "end_seconds": None if end is None else round(float(end), 3),
     }
+    if speed is not None:
+        audio_range["speed"] = speed
     plan_audio["start_seconds"] = audio_range["start_seconds"]
     plan_audio["end_seconds"] = audio_range["end_seconds"]
+    if speed is not None:
+        plan_audio["speed"] = speed
     plan["audio"] = plan_audio
     result["plan"] = plan
     workflow["audio_range_override"] = audio_range
@@ -2327,7 +2344,9 @@ def _prepare_job_for_video_regeneration(task, payload=None):
     if not _path_exists((artifacts.get("audio_background") or {}).get("path")):
         return False, "当前任务缺少此刻此声竖屏背景图，不能重生成视频"
 
-    ok, message, audio_range = _apply_continue_audio_range_override(result, workflow, payload)
+    ok, message, audio_range = _apply_continue_audio_range_override(
+        result, workflow, payload, allow_speed=True,
+    )
     if not ok:
         return False, message
 

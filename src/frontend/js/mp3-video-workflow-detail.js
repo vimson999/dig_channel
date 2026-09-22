@@ -1697,7 +1697,7 @@ class Mp3VideoWorkflowDetailPage {
             this.els.regenerateEnd.value = Number.isFinite(end) ? this.formatDuration(end) : '';
         }
         if (this.els.regenerateSpeed) {
-            this.els.regenerateSpeed.textContent = `${planAudio.speed || 1.2}×`;
+            this.els.regenerateSpeed.value = String(planAudio.speed || 1.2);
         }
         if (this.els.regenerateError) {
             this.els.regenerateError.textContent = '';
@@ -1718,9 +1718,15 @@ class Mp3VideoWorkflowDetailPage {
             if (start === null) throw new Error('请输入起点时间');
             if (end === null) throw new Error('请输入终点时间');
             if (end <= start) throw new Error('终点时间必须大于起点时间');
+            const speedText = String(this.els.regenerateSpeed?.value ?? '').trim();
+            const speed = Number(speedText);
+            if (!speedText || !Number.isFinite(speed) || speed < 0.5 || speed > 2) {
+                throw new Error('播放倍速必须在 0.5×–2.0× 之间');
+            }
             payload = {
                 start_seconds: Math.round(start * 1000) / 1000,
                 end_seconds: Math.round(end * 1000) / 1000,
+                speed: Math.round(speed * 1000) / 1000,
             };
         } catch (error) {
             if (this.els.regenerateError) {
