@@ -294,6 +294,7 @@ class BrowserSidebarImportService:
         errors: list[dict[str, Any]] = []
         records_seen = 0
         downloads: dict[tuple[str, ...], dict[str, Any]] = {}
+        asset_id_by_identity: dict[tuple[str, ...], str] = {}
         unified_submissions = 0
 
         trusted_paths = unique_paths
@@ -436,6 +437,7 @@ class BrowserSidebarImportService:
                 )
                 asset_rows = (
                     ContentPipelineAsset.query.with_entities(
+                        ContentPipelineAsset.id,
                         ContentPipelineAsset.filename,
                         ContentPipelineAsset.content_sha256,
                         ContentPipelineAsset.source_path,
@@ -475,7 +477,14 @@ class BrowserSidebarImportService:
                     },
                 }
 
-            for filename, content_sha256, source_path, created_at, updated_at in asset_rows:
+            for (
+                asset_id,
+                filename,
+                content_sha256,
+                source_path,
+                created_at,
+                updated_at,
+            ) in asset_rows:
                 filename = _strip_chrome_duplicate_suffix(
                     str(filename or Path(str(source_path or "")).name).strip()
                 )
@@ -490,6 +499,7 @@ class BrowserSidebarImportService:
                 unified_submissions += 1
                 records_seen += 1
                 identity = self._history_identity(entry)
+                asset_id_by_identity[identity] = str(asset_id)
                 existing = downloads.get(identity)
                 if existing is None:
                     downloads[identity] = {
@@ -517,6 +527,53 @@ class BrowserSidebarImportService:
                     existing["downloaded_at"] = created_at.isoformat()
                 if updated_at:
                     existing["last_seen_at"] = updated_at.isoformat()
+
+            if kind == "mp3":
+                from models.task import PublicationTask
+
+                latest_workflow_by_asset: dict[str, Any] = {}
+                asset_ids = list(dict.fromkeys(asset_id_by_identity.values()))
+                if asset_ids:
+                    workflow_rows = (
+                        PublicationTask.query.with_entities(
+                            PublicationTask.id,
+                            PublicationTask.source_task_id,
+                            PublicationTask.status,
+                            PublicationTask.current_step,
+                            PublicationTask.created_at,
+                        )
+                        .filter(
+                            PublicationTask.feature == "mp3_video_workflow",
+                            PublicationTask.source_task_id.in_(asset_ids),
+                        )
+                        .order_by(
+                            PublicationTask.source_task_id.asc(),
+                            PublicationTask.created_at.desc(),
+                            PublicationTask.id.desc(),
+                        )
+                        .all()
+                    )
+                    for row in workflow_rows:
+                        latest_workflow_by_asset.setdefault(str(row.source_task_id), row)
+
+                for identity, item in downloads.items():
+                    workflow = latest_workflow_by_asset.get(
+                        asset_id_by_identity.get(identity, "")
+                    )
+                    item["mp3_video_workflow"] = {
+                        "submitted": workflow is not None,
+                        "job_id": str(workflow.id) if workflow is not None else None,
+                        "status": workflow.status if workflow is not None else None,
+                        "step": workflow.current_step if workflow is not None else None,
+                        "submitted_at": (
+                            workflow.created_at.isoformat()
+                            if workflow is not None and workflow.created_at
+                            else None
+                        ),
+                        "completed": bool(
+                            workflow is not None and workflow.status == "completed"
+                        ),
+                    }
 
         files = list(downloads.values())
         return {

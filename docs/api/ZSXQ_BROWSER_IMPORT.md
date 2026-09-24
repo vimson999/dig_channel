@@ -196,6 +196,14 @@ print(response.json())
         "sha256": "<64 位内容哈希>",
         "downloaded_at": "2026-08-25T09:00:00",
         "last_seen_at": "2026-08-25T09:00:00",
+        "mp3_video_workflow": {
+          "submitted": true,
+          "job_id": "<MP3 视频工作流任务 ID>",
+          "status": "processing",
+          "step": "landscape_video_waiting",
+          "submitted_at": "2026-08-25T12:00:00",
+          "completed": false
+        },
         "success": true
       }
     ],
@@ -217,6 +225,9 @@ print(response.json())
 或 `dedupe_key`，不要自行把它当成侧边栏来源清单。`unified_submissions` 是本次
 从三种上游共享账本读取到的记录数；`source_files`、`trusted_source_files` 和
 `ignored_untrusted_manifests` 仅保留给旧侧边栏 manifest 迁移兼容与审计。
+当 `kind=mp3` 时，每条记录都包含 `mp3_video_workflow`：`submitted` 表示该
+MP3 是否曾投递到 MP3 视频工作流，其余字段描述最近一次投递；取消或失败的
+任务仍属于曾投递，状态通过 `status` 原样返回。PDF 历史不包含该属性。
 若 `complete=false`，调用方不得把结果当作完整历史进行去重判断，应在下一次
 轮询前重试。
 
