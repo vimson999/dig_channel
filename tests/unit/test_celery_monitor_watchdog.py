@@ -42,7 +42,7 @@ class CeleryMonitorWatchdogTest(unittest.TestCase):
                 "pid": 202,
                 "etime": "02:00",
                 "command": (
-                    "/Users/v9/Documents/workspace/v9/code/dig_ytb_data_claude_v1/"
+                    "/tmp/foreign-checkout/"
                     "venv/bin/celery -A celery_config.celery_app worker "
                     "-Q mp3_video_workflow --hostname=mp3_video_workflow@%h"
                 ),

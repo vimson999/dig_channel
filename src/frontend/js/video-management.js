@@ -102,7 +102,7 @@ function showToast(message, type = 'info', duration = 3000) {
     toast.innerHTML = `
         <div class="flex items-center">
             <i class="${icons[type] || icons.info} mr-3"></i>
-            <span class="flex-1 text-sm font-medium text-gray-800">${message}</span>
+            <span class="flex-1 text-sm font-medium text-gray-800">${escapeVideoText(message)}</span>
             <button onclick="this.parentElement.parentElement.remove()" class="ml-2 text-gray-400 hover:text-gray-600">
                 <i class="fas fa-times"></i>
             </button>
@@ -130,11 +130,27 @@ function showToast(message, type = 'info', duration = 3000) {
 }
 
 // 视频管理页面功能
+function escapeVideoText(value) {
+    return String(value ?? '').replace(/[&<>"']/g, char => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[char]);
+}
+
+function safeVideoUrl(value, fallback = '#') {
+    try {
+        const url = new URL(value);
+        return ['http:', 'https:'].includes(url.protocol) ? escapeVideoText(url.href) : fallback;
+    } catch { return fallback; }
+}
+
 class VideoManager {
     constructor() {
         this.currentPage = 1;
         this.pageSize = 20;
         this.totalRecords = 0;
+        this.totalPages = 0;
+        this.isLoading = false;
+        this.detailRequestId = 0;
         this.currentFilters = {
             search: '',
             channel: '',
@@ -189,10 +205,9 @@ class VideoManager {
         // 搜索功能
         const searchInput = document.getElementById('search-videos');
         if (searchInput) {
-            let searchTimeout;
             searchInput.addEventListener('input', (e) => {
-                clearTimeout(searchTimeout);
-                searchTimeout = setTimeout(() => {
+                clearTimeout(this.searchTimeout);
+                this.searchTimeout = setTimeout(() => {
                     this.currentFilters.search = e.target.value.trim();
                     this.currentPage = 1;
                     this.loadVideos();
@@ -241,6 +256,25 @@ class VideoManager {
                 this.loadVideos();
             });
         }
+
+        document.getElementById('videos-grid')?.addEventListener('click', event => {
+            const button = event.target.closest('[data-video-action]');
+            if (!button || button.disabled) return;
+            const video = this.currentVideos?.find(item => String(item.id) === button.dataset.id);
+            if (!video) return;
+            if (button.dataset.videoAction === 'detail') this.showVideoDetail(video.id);
+            if (button.dataset.videoAction === 'favorite') this.toggleFavorite(video.video_id, video.title, button);
+        });
+        document.getElementById('video-detail-content')?.addEventListener('click', event => {
+            const button = event.target.closest('[data-detail-action]');
+            if (button?.dataset.detailAction === 'retry') this.showVideoDetail(this.detailVideoId);
+            if (button?.dataset.detailAction === 'share') this.shareVideo(button.dataset.url);
+        });
+        document.addEventListener('keydown', event => this.handleDetailKeydown(event));
+        document.addEventListener('click', event => {
+            const menu = document.getElementById('video-management-menu');
+            if (menu?.open && !menu.contains(event.target)) menu.open = false;
+        });
     }
     
     async loadInitialData() {
@@ -503,6 +537,12 @@ class VideoManager {
     async loadVideos() {
         const requestId = this.videoRequestGate.next();
         const container = document.getElementById('videos-grid');
+        this.isLoading = true;
+        document.getElementById('pagination')?.querySelectorAll('button').forEach(button => { button.disabled = true; });
+        for (const id of ['prev-page', 'next-page']) {
+            const button = document.getElementById(id);
+            if (button) button.disabled = true;
+        }
         container?.classList.add('is-loading');
         container?.setAttribute('aria-busy', 'true');
         try {
@@ -566,6 +606,7 @@ class VideoManager {
             showToast('加载视频列表失败：' + error.message, 'error');
         } finally {
             if (this.videoRequestGate.isCurrent(requestId)) {
+                this.isLoading = false;
                 container?.classList.remove('is-loading');
                 container?.setAttribute('aria-busy', 'false');
             }
@@ -595,23 +636,13 @@ class VideoManager {
             const videoId = button.getAttribute('data-video-id');
             const isFavorited = this.favoriteStatus.get(videoId);
             
-            if (isFavorited) {
-                button.classList.remove('bg-pink-500/90', 'hover:bg-pink-600');
-                button.classList.add('bg-red-500/90', 'hover:bg-red-600');
-                button.querySelector('i').classList.remove('far');
-                button.querySelector('i').classList.add('fas');
-                button.title = '取消收藏';
-            } else {
-                button.classList.remove('bg-red-500/90', 'hover:bg-red-600');
-                button.classList.add('bg-pink-500/90', 'hover:bg-pink-600');
-                button.querySelector('i').classList.remove('fas');
-                button.querySelector('i').classList.add('far');
-                button.title = '收藏视频';
-            }
+            this.updateButtonState(button, Boolean(isFavorited));
         });
     }
     
     async toggleFavorite(videoId, videoTitle, buttonElement) {
+        if (buttonElement.disabled) return;
+        buttonElement.disabled = true;
         try {
             const isFavorited = this.favoriteStatus.get(videoId);
             
@@ -657,23 +688,19 @@ class VideoManager {
         } catch (error) {
             console.error('切换收藏状态失败:', error);
             showToast('操作失败：' + error.message, 'error');
+        } finally {
+            buttonElement.disabled = false;
         }
     }
     
     updateButtonState(buttonElement, isFavorited) {
-        if (isFavorited) {
-            buttonElement.classList.remove('bg-pink-500/90', 'hover:bg-pink-600');
-            buttonElement.classList.add('bg-red-500/90', 'hover:bg-red-600');
-            buttonElement.querySelector('i').classList.remove('far');
-            buttonElement.querySelector('i').classList.add('fas');
-            buttonElement.title = '取消收藏';
-        } else {
-            buttonElement.classList.remove('bg-red-500/90', 'hover:bg-red-600');
-            buttonElement.classList.add('bg-pink-500/90', 'hover:bg-pink-600');
-            buttonElement.querySelector('i').classList.remove('fas');
-            buttonElement.querySelector('i').classList.add('far');
-            buttonElement.title = '收藏视频';
-        }
+        buttonElement.classList.toggle('is-favorited', isFavorited);
+        buttonElement.querySelector('i').classList.toggle('fas', isFavorited);
+        buttonElement.querySelector('i').classList.toggle('far', !isFavorited);
+        buttonElement.title = isFavorited ? '取消收藏' : '收藏视频';
+        buttonElement.setAttribute('aria-pressed', String(isFavorited));
+        const label = buttonElement.querySelector('[data-favorite-label]');
+        if (label) label.textContent = isFavorited ? '已收藏' : '收藏';
     }
     
     findVideoDataById(videoId) {
@@ -692,11 +719,16 @@ class VideoManager {
         this.currentVideos = videos;
         
         if (videos.length === 0) {
+            const filtered = this.currentFilters.search || this.currentFilters.channel || this.currentFilters.category || this.currentFilters.timePeriod !== 'all';
             container.innerHTML = `
-                <div class="flex flex-col items-center justify-center py-12">
-                    <i class="fas fa-video-slash text-4xl text-gray-300 mb-4"></i>
-                    <p class="text-gray-500 text-lg mb-2">暂无视频数据</p>
-                    <p class="text-gray-400 text-sm">请先同步频道视频数据</p>
+                <div class="video-empty" role="status">
+                    <i class="fas fa-video-slash text-4xl text-gray-300 mb-4" aria-hidden="true"></i>
+                    <h2>${filtered ? '没有符合筛选条件的视频' : '尚未收录视频'}</h2>
+                    <p>${filtered ? '试试其他关键词、频道，或扩大时间范围。' : '可通过「同步视频」获取已添加频道的视频数据。'}</p>
+                    ${filtered ? `<div class="video-empty-actions">
+                        <button type="button" onclick="clearFilters()" class="video-action">重置筛选</button>
+                        ${this.currentFilters.timePeriod !== 'all' ? '<button type="button" onclick="videoManager.showAllTime()" class="video-action video-action-primary">查看全部时间</button>' : ''}
+                    </div>` : ''}
                 </div>
             `;
             return;
@@ -714,6 +746,7 @@ class VideoManager {
     }
     
     renderVideoCard(video, index = 0) {
+        const title = escapeVideoText(video.title || '未命名视频');
         const publishedDate = new Date(video.published_at);
         const formattedDate = publishedDate.toLocaleDateString('zh-CN', {
             year: 'numeric',
@@ -722,54 +755,35 @@ class VideoManager {
         });
         
         return `
-            <div class="bg-white rounded-xl shadow-soft border border-gray-100 overflow-hidden hover:shadow-medium transition-all duration-300 hover:-translate-y-1 group">
+            <article class="video-card bg-white rounded-xl shadow-soft border border-gray-100 overflow-hidden hover:shadow-medium transition-shadow duration-300">
                 <!-- 视频缩略图 -->
                 <div class="relative">
-                    <img src="${video.thumbnail_url || '/images/video-placeholder.jpg'}" 
-                         alt="${video.title}" 
+                    <img src="${safeVideoUrl(video.thumbnail_url, '/images/video-placeholder.jpg')}"
+                         alt="${title}"
                          width="480"
                          height="270"
                          loading="${index < 4 ? 'eager' : 'lazy'}"
                          decoding="async"
                          fetchpriority="${index < 4 ? 'high' : 'low'}"
-                         class="w-full h-48 object-cover">
+                         class="video-card-thumbnail">
                     <div class="absolute bottom-2 right-2 bg-black/80 text-white px-2 py-1 rounded text-xs font-medium">
-                        ${this.formatDuration(video.duration)}
+                        ${escapeVideoText(this.formatDuration(video.duration))}
                     </div>
                     <div class="absolute top-2 left-2">
                         <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-white/90 text-gray-800">
-                            ${video.category_name || '未分类'}
+                            ${escapeVideoText(video.category_name || '未分类')}
                         </span>
-                    </div>
-                    <!-- 悬停时显示操作按钮 -->
-                    <div class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center gap-3">
-                        <button onclick="videoManager.showVideoDetail(${video.id})" 
-                                class="bg-white/90 hover:bg-white text-gray-800 p-2.5 rounded-full transition-colors" 
-                                title="查看详情">
-                            <i class="fas fa-eye"></i>
-                        </button>
-                        <button onclick="videoManager.toggleFavorite('${video.video_id}', '${video.title.replace(/'/g, "\\'")}', this)"
-                                class="bg-pink-500/90 hover:bg-pink-600 text-white p-2.5 rounded-full transition-colors favorite-btn"
-                                data-video-id="${video.video_id}"
-                                title="收藏视频">
-                            <i class="far fa-heart"></i>
-                        </button>
-                        <a href="${video.url}" target="_blank" 
-                           class="bg-red-600/90 hover:bg-red-600 text-white p-2.5 rounded-full transition-colors" 
-                           title="在YouTube查看">
-                            <i class="fab fa-youtube"></i>
-                        </a>
                     </div>
                 </div>
                 
                 <!-- 视频信息 -->
-                <div class="p-4">
-                    <h3 class="text-sm font-semibold text-gray-900 line-clamp-2 mb-2" title="${video.title}">
-                        ${video.title}
+                <div class="video-card-body p-4">
+                    <h3 class="text-sm font-semibold text-gray-900 line-clamp-2 mb-2" title="${title}">
+                        ${title}
                     </h3>
                     
                     <div class="text-xs text-gray-600 mb-3">
-                        ${video.channel_name || '未知频道'}
+                        ${escapeVideoText(video.channel_name || '未知频道')}
                     </div>
                     
                     <!-- 数据统计 -->
@@ -793,7 +807,7 @@ class VideoManager {
                         <div class="flex flex-wrap gap-1 mb-3">
                             ${video.tags.slice(0, 2).map(tag => `
                                 <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
-                                    ${tag}
+                                    ${escapeVideoText(tag)}
                                 </span>
                             `).join('')}
                             ${video.tags.length > 2 ? `<span class="text-xs text-gray-400">+${video.tags.length - 2}</span>` : ''}
@@ -805,13 +819,31 @@ class VideoManager {
                         发布于 ${formattedDate}
                     </div>
                 </div>
-            </div>
+                <div class="video-card-actions">
+                    <button type="button" class="video-card-action" data-video-action="detail" data-id="${Number(video.id)}">
+                        <i class="fas fa-eye" aria-hidden="true"></i>查看详情
+                    </button>
+                    <button type="button" class="video-card-action favorite-btn" data-video-action="favorite" data-id="${Number(video.id)}"
+                            data-video-id="${escapeVideoText(video.video_id)}" aria-pressed="false" title="收藏视频">
+                        <i class="far fa-heart" aria-hidden="true"></i><span data-favorite-label>收藏</span>
+                    </button>
+                    <a class="video-card-action" href="${safeVideoUrl(video.url)}" target="_blank" rel="noopener noreferrer" aria-label="在 YouTube 打开（新标签页）">
+                        <i class="fab fa-youtube" aria-hidden="true"></i>原视频
+                    </a>
+                </div>
+            </article>
         `;
     }
     
     renderErrorState() {
         const container = document.getElementById('videos-grid');
         if (!container) return;
+        this.currentVideos = [];
+        this.totalPages = 0;
+        const pagination = document.getElementById('pagination');
+        if (pagination) pagination.hidden = true;
+        const count = document.getElementById('videos-count');
+        if (count) count.textContent = '—';
         
         container.innerHTML = `
             <div class="flex flex-col items-center justify-center py-12">
@@ -841,13 +873,17 @@ class VideoManager {
     
     updatePagination(pagination) {
         this.totalRecords = pagination.total;
+        this.totalPages = pagination.pages;
+        this.currentPage = pagination.page;
+        const container = document.getElementById('pagination');
+        if (container) container.hidden = false;
         
         // 更新页面信息
         const pageStart = document.getElementById('page-start');
         const pageEnd = document.getElementById('page-end');
         const totalRecords = document.getElementById('total-records');
         
-        if (pageStart) pageStart.textContent = ((pagination.page - 1) * pagination.per_page + 1);
+        if (pageStart) pageStart.textContent = pagination.total === 0 ? 0 : ((pagination.page - 1) * pagination.per_page + 1);
         if (pageEnd) pageEnd.textContent = Math.min(pagination.page * pagination.per_page, pagination.total);
         if (totalRecords) totalRecords.textContent = this.formatNumber(pagination.total);
         
@@ -892,6 +928,8 @@ class VideoManager {
         for (let i = startPage; i <= endPage; i++) {
             const button = document.createElement('button');
             button.textContent = i;
+            button.setAttribute('aria-label', `第 ${i} 页`);
+            if (i === currentPage) button.setAttribute('aria-current', 'page');
             button.className = i === currentPage 
                 ? 'px-3 py-2 bg-primary-600 text-white rounded-button text-sm font-medium'
                 : 'px-3 py-2 border border-gray-300 rounded-button text-sm text-gray-700 bg-white hover:bg-gray-50';
@@ -901,26 +939,39 @@ class VideoManager {
     }
     
     goToPage(page) {
+        if (this.isLoading || !Number.isInteger(page) || page < 1 || page > this.totalPages || page === this.currentPage) return;
         this.currentPage = page;
+        this.loadVideos();
+    }
+
+    showAllTime() {
+        this.currentFilters.timePeriod = 'all';
+        document.getElementById('time-period').value = 'all';
+        this.currentPage = 1;
         this.loadVideos();
     }
     
     async showVideoDetail(videoId) {
+        const requestId = ++this.detailRequestId;
+        this.detailVideoId = videoId;
+        const content = document.getElementById('video-detail-content');
+        this.showVideoDetailModal();
+        content.innerHTML = '<div class="video-empty" role="status">正在加载视频详情…</div>';
+        content.setAttribute('aria-busy', 'true');
         try {
-            showStatusBar('正在加载视频详情...');
-            
             const response = await api.getVideo(videoId);
+            if (requestId !== this.detailRequestId) return;
             if (response.success) {
                 this.renderVideoDetail(response.data.video);
-                this.showVideoDetailModal();
             } else {
                 throw new Error(response.message);
             }
         } catch (error) {
+            if (requestId !== this.detailRequestId) return;
             console.error('加载视频详情失败:', error);
-            showToast('加载视频详情失败：' + error.message, 'error');
+            content.innerHTML = '<div class="video-empty" role="alert"><h2>详情加载失败</h2><p>请检查连接后重试。</p><button type="button" data-detail-action="retry" class="video-action">重试</button></div>';
         } finally {
-            hideStatusBar();
+            if (requestId === this.detailRequestId) content.setAttribute('aria-busy', 'false');
         }
     }
     
@@ -929,24 +980,25 @@ class VideoManager {
         if (!content) return;
         
         const publishedDate = new Date(video.published_at).toLocaleString('zh-CN');
+        const videoUrl = safeVideoUrl(video.url);
         
         content.innerHTML = `
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <!-- 视频基本信息 -->
                 <div class="space-y-4">
                     <div class="relative">
-                        <img src="${video.thumbnail_url || '/images/video-placeholder.jpg'}" 
-                             alt="${video.title}" 
+                        <img src="${safeVideoUrl(video.thumbnail_url, '/images/video-placeholder.jpg')}"
+                             alt="${escapeVideoText(video.title)}"
                              class="w-full rounded-lg border border-gray-200">
                         <span class="absolute bottom-2 right-2 bg-black/80 text-white px-2 py-1 rounded text-sm">
-                            ${video.duration_display || this.formatDuration(video.duration)}
+                            ${escapeVideoText(video.duration_display || this.formatDuration(video.duration))}
                         </span>
                     </div>
                     
                     <div>
-                        <h3 class="text-lg font-bold text-gray-900 mb-2">${video.title}</h3>
-                        <p class="text-sm text-gray-600 leading-relaxed">
-                            ${video.description || '暂无描述'}
+                        <h3 class="text-lg font-bold text-gray-900 mb-2">${escapeVideoText(video.title)}</h3>
+                        <p class="text-sm text-gray-600 leading-relaxed whitespace-pre-line break-words">
+                            ${escapeVideoText(video.description || '暂无描述')}
                         </p>
                     </div>
                     
@@ -956,7 +1008,7 @@ class VideoManager {
                             <div class="flex flex-wrap gap-2">
                                 ${video.tags.map(tag => `
                                     <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                                        ${tag}
+                                        ${escapeVideoText(tag)}
                                     </span>
                                 `).join('')}
                             </div>
@@ -980,7 +1032,7 @@ class VideoManager {
                             <div class="text-sm text-purple-800">评论数</div>
                         </div>
                         <div class="bg-orange-50 rounded-lg p-4">
-                            <div class="text-2xl font-bold text-orange-600">${video.engagement_rate || 0}%</div>
+                            <div class="text-2xl font-bold text-orange-600">${escapeVideoText(video.engagement_rate || 0)}%</div>
                             <div class="text-sm text-orange-800">互动率</div>
                         </div>
                     </div>
@@ -990,11 +1042,11 @@ class VideoManager {
                         <div class="grid grid-cols-1 gap-2 text-sm">
                             <div class="flex justify-between">
                                 <span class="text-gray-500">频道：</span>
-                                <span class="font-medium">${video.channel_name || '未知'}</span>
+                                <span class="font-medium">${escapeVideoText(video.channel_name || '未知')}</span>
                             </div>
                             <div class="flex justify-between">
                                 <span class="text-gray-500">分类：</span>
-                                <span class="font-medium">${video.category_name || '未分类'}</span>
+                                <span class="font-medium">${escapeVideoText(video.category_name || '未分类')}</span>
                             </div>
                             <div class="flex justify-between">
                                 <span class="text-gray-500">发布时间：</span>
@@ -1002,21 +1054,21 @@ class VideoManager {
                             </div>
                             <div class="flex justify-between">
                                 <span class="text-gray-500">时长：</span>
-                                <span class="font-medium">${video.duration_display || this.formatDuration(video.duration)}</span>
+                                <span class="font-medium">${escapeVideoText(video.duration_display || this.formatDuration(video.duration))}</span>
                             </div>
                             <div class="flex justify-between">
                                 <span class="text-gray-500">语言：</span>
-                                <span class="font-medium">${video.language || '未知'}</span>
+                                <span class="font-medium">${escapeVideoText(video.language || '未知')}</span>
                             </div>
                         </div>
                     </div>
                     
                     <div class="flex gap-3">
-                        <a href="${video.url}" target="_blank" 
+                        <a href="${videoUrl}" target="_blank" rel="noopener noreferrer"
                            class="flex-1 bg-red-600 text-white px-4 py-2 rounded-button text-center hover:bg-red-700 transition-colors">
                             <i class="fab fa-youtube mr-2"></i>在YouTube查看
                         </a>
-                        <button onclick="videoManager.shareVideo('${video.url}')" 
+                        <button data-detail-action="share" data-url="${videoUrl}"
                                 class="px-4 py-2 border border-gray-300 rounded-button hover:bg-gray-50 transition-colors">
                             <i class="fas fa-share mr-2"></i>分享
                         </button>
@@ -1031,11 +1083,13 @@ class VideoManager {
         const content = document.getElementById('videoModalContent');
         
         if (modal && content) {
+            if (modal.classList.contains('hidden')) {
+                this.detailTrigger = document.activeElement;
+                this.detailPreviousOverflow = document.body.style.overflow;
+            }
+            document.body.style.overflow = 'hidden';
             modal.classList.remove('hidden');
-            setTimeout(() => {
-                content.classList.remove('scale-95', 'opacity-0');
-                content.classList.add('scale-100', 'opacity-100');
-            }, 10);
+            document.getElementById('video-detail-close').focus();
         }
     }
     
@@ -1044,11 +1098,36 @@ class VideoManager {
         const content = document.getElementById('videoModalContent');
         
         if (modal && content) {
-            content.classList.remove('scale-100', 'opacity-100');
-            content.classList.add('scale-95', 'opacity-0');
-            setTimeout(() => {
-                modal.classList.add('hidden');
-            }, 300);
+            if (modal.classList.contains('hidden')) return;
+            this.detailRequestId++;
+            modal.classList.add('hidden');
+            document.body.style.overflow = this.detailPreviousOverflow || '';
+            const returnTarget = this.detailTrigger?.isConnected ? this.detailTrigger : document.getElementById('search-videos');
+            returnTarget?.focus();
+        }
+    }
+
+    handleDetailKeydown(event) {
+        const menu = document.getElementById('video-management-menu');
+        if (event.key === 'Escape' && menu?.open) {
+            menu.open = false;
+            menu.querySelector('summary').focus();
+        }
+        const modal = document.getElementById('videoDetailModal');
+        if (!modal || modal.classList.contains('hidden')) return;
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            this.closeVideoDetailModal();
+        } else if (event.key === 'Tab') {
+            const items = Array.from(modal.querySelectorAll('button, a[href], input, select, textarea, [tabindex="0"]'))
+                .filter(item => !item.disabled && item.getClientRects().length);
+            const first = items[0], last = items[items.length - 1];
+            if (!first) { event.preventDefault(); return; }
+            if (!items.includes(document.activeElement) || (event.shiftKey && document.activeElement === first)) {
+                event.preventDefault(); (event.shiftKey ? last : first).focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault(); first.focus();
+            }
         }
     }
     
@@ -1098,6 +1177,7 @@ class VideoManager {
 
 // 全局函数
 function clearFilters() {
+    clearTimeout(videoManager.searchTimeout);
     const searchInput = document.getElementById('search-videos');
     const channelFilter = document.getElementById('filter-channel');
     const categoryFilter = document.getElementById('filter-category');

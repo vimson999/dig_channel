@@ -79,9 +79,8 @@ class ZsxqAnalysisFrontendContractTest(unittest.TestCase):
         script = (
             PROJECT_ROOT / "src/frontend/js/shared-navigation.js"
         ).read_text()
-        self.assertIn("filename === 'zsxq-analysis.html'", script)
-        self.assertIn("id: 'zsxq-analysis'", script)
-        self.assertIn("href: 'zsxq-analysis.html'", script)
+        self.assertIn('"id": "zsxq-analysis"', script)
+        self.assertIn('"href": "zsxq-analysis.html"', script)
 
 
 if __name__ == "__main__":

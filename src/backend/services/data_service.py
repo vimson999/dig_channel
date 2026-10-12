@@ -158,6 +158,7 @@ class DataService:
                     if channel_data:
                         row['channels_data'].append({
                             'channel_id': channel.id,
+                            'has_data': True,
                             'subscribers': channel_data.subscribers,
                             'total_views': channel_data.total_views,
                             'video_count': channel_data.video_count,
@@ -170,6 +171,7 @@ class DataService:
                         # 没有数据的情况
                         row['channels_data'].append({
                             'channel_id': channel.id,
+                            'has_data': False,
                             'subscribers': 0,
                             'total_views': 0,
                             'video_count': 0,
@@ -479,10 +481,11 @@ class DataService:
                             else:
                                 value = 0
                         else:
-                            value = 0
+                            value = None
                         series_data.append(value)
 
                     chart_data['series'].append({
+                        'id': channel.id,
                         'name': channel.name,
                         'channel_id': channel.channel_id,
                         'data': series_data
@@ -520,17 +523,22 @@ class DataService:
                             else:
                                 value = 0
                         else:
-                            value = 0
+                            value = None
 
                         series_data.append(value)
 
                     chart_data['series'].append({
+                        'id': channel.id,
                         'name': channel.name,
                         'channel_id': channel.channel_id,
                         'data': series_data
                     })
 
             response_meta = {
+                'latest_data_date': max((record.date for record in data_records), default=None),
+                'pending_channels': len(channels) - len({
+                    record.channel_id for record in data_records if record.date == end_date
+                }),
                 'chart_type': chart_type,
                 'time_range': time_range,
                 'months': months if grouping == 'monthly' else None,
@@ -541,6 +549,8 @@ class DataService:
                 },
                 'granularity': chart_data.get('granularity', 'daily')
             }
+            if response_meta['latest_data_date'] is not None:
+                response_meta['latest_data_date'] = response_meta['latest_data_date'].isoformat()
 
             return {
                 'success': True,

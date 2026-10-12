@@ -21,6 +21,10 @@
                 <input id="audio-file" type="file" accept=".mp3,.m4a,.wav,.aac,.flac,.ogg,.opus" class="block text-xs w-full mt-4">
             </label>
             <p id="file-info" class="text-sm text-slate-600 break-all">尚未选择音频</p>
+            <div class="rounded-lg bg-slate-50 border border-slate-200 p-3">
+                <p class="text-sm font-medium text-slate-700">当前模型：Whisper medium</p>
+                <p class="text-xs text-slate-500 mt-1">固定使用该模型进行转写，无需手动选择。</p>
+            </div>
             <details><summary class="text-sm cursor-pointer text-slate-600">识别提示词（可选）</summary>
                 <label for="prompt" class="block text-xs text-slate-500 mt-3">可填写人名、产品名等参考词语</label>
                 <textarea id="prompt" maxlength="1000" rows="3" class="mt-2 border rounded-lg w-full p-2 text-sm"></textarea>
@@ -50,7 +54,7 @@
     </section>
 </main>
 <script src="js/env.js"></script>
-<script src="js/shared-navigation.js"></script>
+<script src="js/shared-navigation.js?v=20261004-navigation-2"></script>
 <script src="js/audio-transcription.js?v=20260914"></script>
 </body>
 </html>

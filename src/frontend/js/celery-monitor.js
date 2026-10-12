@@ -7,6 +7,20 @@ const state = {
     watchdog: null,
     watchdogError: '',
     refreshPollingController: null,
+    refreshPromise: null,
+    refreshing: false,
+    inspecting: false,
+    pollingPaused: false,
+    lastStatusAt: null,
+    statusError: '',
+    broker: null,
+    search: '',
+    filter: 'all',
+    logRequestId: 0,
+    logLoading: false,
+    logServiceId: null,
+    noticeTimer: null,
+    expandedDetails: new Set(),
 };
 
 const WORKFLOW_SERVICE_ORDER = ['report_audio_workflow', 'report_script_material_workflow', 'report_top10_workflow', 'mp3_video_workflow'];
@@ -27,42 +41,130 @@ const els = {
     logSubtitle: document.getElementById('log-subtitle'),
     logOutput: document.getElementById('log-output'),
     refreshLogBtn: document.getElementById('refresh-log-btn'),
+    statusSummary: document.getElementById('status-summary'),
+    serviceSearch: document.getElementById('service-search'),
+    serviceFilters: document.getElementById('service-filters'),
+    filterCount: document.getElementById('filter-count'),
+    inspectBtn: document.getElementById('inspect-btn'),
+    togglePollingBtn: document.getElementById('toggle-polling-btn'),
+    pollingStatus: document.getElementById('polling-status'),
+    logsSection: document.getElementById('logs-section'),
+    logLines: document.getElementById('log-lines'),
+    logFollow: document.getElementById('log-follow'),
 };
 
 document.addEventListener('DOMContentLoaded', () => {
     bindEvents();
+    render();
     refreshStatus({ loadLogs: true });
     state.refreshPollingController = window.VisibilityPolling.create({
         intervalMs: 15000,
-        poll: () => refreshStatus({ silent: true }),
+        poll: () => isActionBusy() ? Promise.resolve() : refreshStatus({ silent: true }),
     });
     state.refreshPollingController.start();
+    document.addEventListener('visibilitychange', renderFreshness);
 });
 
 function bindEvents() {
     els.refreshBtn.addEventListener('click', () => refreshStatus({ loadLogs: true }));
     els.restartAllBtn.addEventListener('click', restartAll);
     els.refreshLogBtn.addEventListener('click', () => loadLogs(state.selectedServiceId));
+    els.logLines.addEventListener('change', () => loadLogs(state.selectedServiceId));
+    els.inspectBtn.addEventListener('click', () => refreshStatus({ inspect: true }));
+    els.togglePollingBtn.addEventListener('click', () => {
+        state.pollingPaused = !state.pollingPaused;
+        if (state.pollingPaused) state.refreshPollingController.stop();
+        else {
+            state.refreshPollingController.start();
+            if (!document.hidden && !isActionBusy()) refreshStatus({ silent: true });
+        }
+        renderFreshness();
+    });
+    els.serviceSearch.addEventListener('input', () => {
+        state.search = els.serviceSearch.value.trim().toLowerCase();
+        renderCards();
+    });
+    els.serviceFilters.addEventListener('click', event => {
+        const button = event.target.closest('[data-filter]');
+        if (!button) return;
+        state.filter = button.dataset.filter;
+        renderCards();
+    });
+    els.serviceGrid.addEventListener('toggle', rememberDetails, true);
+    els.watchdogCard.addEventListener('toggle', rememberDetails, true);
     els.watchdogCard.addEventListener('click', handleWatchdogAction);
     els.serviceGrid.addEventListener('click', handleServiceAction);
     els.serviceList.addEventListener('click', (event) => {
         const button = event.target.closest('[data-select-service]');
         if (!button) return;
-        state.selectedServiceId = button.dataset.selectService;
-        render();
-        loadLogs(state.selectedServiceId);
+        selectService(button.dataset.selectService);
     });
 }
 
 async function handleServiceAction(event) {
+    const logButton = event.target.closest('[data-view-logs]');
+    if (logButton) {
+        selectService(logButton.dataset.viewLogs, true);
+        return;
+    }
+    if (event.target.closest('[data-clear-filters]')) {
+        state.search = '';
+        state.filter = 'all';
+        els.serviceSearch.value = '';
+        renderCards();
+        els.serviceSearch.focus();
+        return;
+    }
     const button = event.target.closest('[data-action]');
-    if (!button) return;
+    if (!button || button.disabled || isActionBusy()) return;
     const serviceId = button.dataset.serviceId;
     const action = button.dataset.action;
     if (action === 'purge' && !confirmPurge(serviceId)) {
         return;
     }
+    if (['stop', 'restart'].includes(action) && !window.confirm(
+        `确认${action === 'stop' ? '停止' : '重启'}「${serviceLabel(serviceId)}」？\n正在执行的任务可能中断，队列中尚未领取的消息会保留。`
+    )) return;
     await runAction(serviceId, action);
+}
+
+function selectService(serviceId, scroll = false) {
+    state.selectedServiceId = serviceId;
+    renderCards();
+    renderServiceList();
+    loadLogs(serviceId);
+    if (scroll) {
+        els.logsSection.scrollIntoView({ block: 'start' });
+        els.logTitle.focus({ preventScroll: true });
+    }
+}
+
+function rememberDetails(event) {
+    const details = event.target;
+    if (!details.isConnected || !details.dataset.detailId) return;
+    if (details.open) state.expandedDetails.add(details.dataset.detailId);
+    else state.expandedDetails.delete(details.dataset.detailId);
+}
+
+function isActionBusy() {
+    return Boolean(state.busyServiceId || state.busyWatchdogAction || state.busyRestartAll);
+}
+
+function updatePanel(container, html) {
+    const focused = document.activeElement;
+    const ownsFocus = focused && container.contains?.(focused);
+    const isSummary = focused?.tagName === 'SUMMARY';
+    const owner = isSummary ? focused.parentElement : focused;
+    const identity = ownsFocus ? Object.entries(owner.dataset || {}) : [];
+    const scrollTop = container.scrollTop;
+    container.innerHTML = html;
+    container.scrollTop = scrollTop;
+    if (!identity.length) return;
+    const selector = isSummary ? '[data-detail-id]' : 'button';
+    const replacement = Array.from(container.querySelectorAll(selector)).find(candidate =>
+        identity.every(([key, value]) => candidate.dataset[key] === value));
+    const target = isSummary ? replacement?.querySelector('summary') : replacement;
+    target?.focus({ preventScroll: true });
 }
 
 async function apiFetch(path, options = {}) {
@@ -96,7 +198,22 @@ function apiBaseUrl() {
     return window.API_BASE_URL || window.CONFIG?.API_BASE_URL || 'http://localhost:5001/api/v1';
 }
 
-async function refreshStatus(options = {}) {
+function refreshStatus(options = {}) {
+    if (state.refreshPromise) return state.refreshPromise;
+    state.refreshing = true;
+    state.inspecting = options.inspect === true;
+    renderGlobalControls();
+    state.refreshPromise = fetchStatus(options).finally(() => {
+        state.refreshPromise = null;
+        state.refreshing = false;
+        state.inspecting = false;
+        renderGlobalControls();
+        renderFreshness();
+    });
+    return state.refreshPromise;
+}
+
+async function fetchStatus(options = {}) {
     if (!options.silent) setNotice('正在刷新 Celery 状态...', 'muted');
     const includeInspect = options.inspect === true;
     const [statusResult, watchdogResult] = await Promise.all([
@@ -116,25 +233,41 @@ async function refreshStatus(options = {}) {
     }
 
     if (statusResult.error) {
-        renderWatchdog();
+        state.statusError = statusResult.error.message;
+        render();
         setNotice(`刷新 Worker 状态失败：${statusResult.error.message}`, 'error');
         return;
     }
 
     try {
         const data = statusResult.data;
+        if (!data || !Array.isArray(data.services)) throw new Error('状态响应缺少 Worker 列表');
+        const recovered = Boolean(state.statusError);
         state.services = data.services || [];
+        state.broker = data.broker || {};
+        state.lastStatusAt = new Date();
+        state.statusError = '';
+        const previousSelection = state.selectedServiceId;
         if (!state.services.some(service => service.id === state.selectedServiceId)) {
-            state.selectedServiceId = state.services[0]?.id || 'render';
+            state.selectedServiceId = state.services[0]?.id || null;
         }
-        render(data.broker || {});
-        if (options.loadLogs) {
-            await loadLogs(state.selectedServiceId);
+        if (!state.selectedServiceId) {
+            state.logRequestId++;
+            state.logLoading = false;
+            state.logServiceId = null;
+            els.logTitle.textContent = '运行日志';
+            els.logSubtitle.textContent = '当前没有可查看的 Worker。';
+            els.logOutput.textContent = '暂无日志。';
+            els.logOutput.setAttribute('aria-busy', 'false');
         }
-        if (!options.silent) setNotice('状态已刷新。', 'success');
+        render();
+        if (options.loadLogs || previousSelection !== state.selectedServiceId) {
+            if (state.services.length) await loadLogs(state.selectedServiceId);
+        }
+        if (!options.silent || recovered) setNotice(recovered ? '连接已恢复，状态已刷新。' : '状态已刷新。', 'success');
     } catch (error) {
-        state.watchdogError = error.message;
-        renderWatchdog();
+        state.statusError = error.message;
+        render();
         setNotice(`刷新失败：${error.message}`, 'error');
     }
 }
@@ -147,7 +280,7 @@ async function handleWatchdogAction(event) {
 }
 
 async function runWatchdogAction(action) {
-    if (state.busyRestartAll) return;
+    if (isActionBusy()) return;
     state.busyWatchdogAction = action;
     render();
     const actionLabel = {
@@ -166,6 +299,7 @@ async function runWatchdogAction(action) {
         } else {
             setNotice(`Watchdog 已${actionLabel.replace('守护', '')}。`, 'success');
         }
+        await state.refreshPromise;
         await refreshStatus({ silent: true });
     } catch (error) {
         setNotice(`${actionLabel}失败：${error.message}`, 'error');
@@ -176,7 +310,7 @@ async function runWatchdogAction(action) {
 }
 
 async function runAction(serviceId, action) {
-    if (state.busyRestartAll) return;
+    if (isActionBusy()) return;
     state.busyServiceId = serviceId;
     render();
     const actionLabel = { start: '启动', stop: '停止', restart: '重启', purge: '清空积压' }[action] || action;
@@ -188,6 +322,7 @@ async function runAction(serviceId, action) {
         } else {
             setNotice(`${serviceLabel(serviceId)} 已${actionLabel}。`, 'success');
         }
+        await state.refreshPromise;
         await refreshStatus({ silent: true, loadLogs: state.selectedServiceId === serviceId });
     } catch (error) {
         if (action === 'purge' && (error.status === 405 || error.message.includes('POST 不被允许'))) {
@@ -202,9 +337,9 @@ async function runAction(serviceId, action) {
 }
 
 async function restartAll() {
-    if (state.busyRestartAll) return;
+    if (isActionBusy()) return;
     const ok = window.confirm(
-        '确认一键重启全部 Celery Worker、Celery Watchdog，以及当前正在运行的 scheduler？\n\n' +
+        '确认重启未暂停的 Celery Worker、Celery Watchdog，以及当前正在运行的 scheduler？已暂停的 Worker 会跳过。\n\n' +
         '正在执行中的任务可能会被中断，尚未被 worker 取走的队列消息会保留。'
     );
     if (!ok) return;
@@ -226,6 +361,7 @@ async function restartAll() {
             `scheduler ${summary.schedulers_started ?? 0} 个已重启，${summary.schedulers_skipped ?? 0} 个未运行已跳过。`,
             'success'
         );
+        await state.refreshPromise;
         await refreshStatus({ silent: true, loadLogs: true });
     } catch (error) {
         setNotice(`一键重启失败：${error.message}`, 'error');
@@ -247,137 +383,162 @@ function confirmPurge(serviceId) {
 
 async function loadLogs(serviceId) {
     if (!serviceId) return;
+    const requestId = ++state.logRequestId;
+    const changedService = state.logServiceId !== serviceId;
+    state.logServiceId = serviceId;
+    state.logLoading = true;
+    els.logTitle.textContent = `${serviceLabel(serviceId)} 日志`;
+    els.logSubtitle.textContent = '正在读取日志…';
+    els.logOutput.setAttribute('aria-busy', 'true');
+    if (changedService) els.logOutput.textContent = '正在读取日志…';
+    renderGlobalControls();
+    const scrollTop = els.logOutput.scrollTop;
     try {
-        const data = await apiFetch(`/celery/logs/${serviceId}?lines=160`);
-        const service = state.services.find(item => item.id === serviceId);
-        els.logTitle.textContent = `${service?.label || serviceId} 日志`;
-        els.logSubtitle.textContent = data.log_file || '';
+        const lines = Number(els.logLines.value) || 160;
+        const data = await apiFetch(`/celery/logs/${encodeURIComponent(serviceId)}?lines=${lines}`);
+        if (requestId !== state.logRequestId || serviceId !== state.selectedServiceId) return;
+        els.logSubtitle.textContent = `${data.log_file || '运行日志'} · 更新于 ${formatTime(new Date())} · 手动刷新`;
         els.logOutput.textContent = data.logs || '暂无日志。';
-        els.logOutput.scrollTop = els.logOutput.scrollHeight;
+        els.logOutput.scrollTop = els.logFollow.checked ? els.logOutput.scrollHeight : (changedService ? 0 : scrollTop);
     } catch (error) {
-        els.logOutput.textContent = `日志读取失败：${error.message}`;
+        if (requestId !== state.logRequestId || serviceId !== state.selectedServiceId) return;
+        els.logSubtitle.textContent = `日志读取失败：${error.message} · 可点击刷新日志重试`;
+        if (changedService) els.logOutput.textContent = `日志读取失败：${error.message}`;
+    } finally {
+        if (requestId === state.logRequestId) {
+            state.logLoading = false;
+            els.logOutput.setAttribute('aria-busy', 'false');
+            renderGlobalControls();
+        }
     }
 }
 
-function render(broker = null) {
-    if (broker) renderBroker(broker);
+function render() {
+    if (state.broker) renderBroker(state.broker);
+    if (state.statusError) {
+        els.brokerStatus.className = 'rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700';
+        els.brokerStatus.textContent = '连接待确认 · 状态刷新失败';
+        els.brokerStatus.title = state.statusError;
+    }
     renderGlobalControls();
+    renderSummary();
     renderWatchdog();
     renderCards();
     renderServiceList();
-    els.lastUpdated.textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    renderFreshness();
+}
+
+function renderFreshness() {
+    els.lastUpdated.textContent = state.lastStatusAt
+        ? `${state.statusError ? '刷新失败 · 上次成功' : '上次成功刷新'} ${formatTime(state.lastStatusAt)}`
+        : (state.statusError ? '状态获取失败，请重试' : '正在获取状态…');
+    els.lastUpdated.dataset.stale = String(Boolean(state.statusError));
+    els.pollingStatus.textContent = state.pollingPaused ? '自动刷新已暂停'
+        : document.hidden ? '页面不可见，刷新已暂停' : '状态每 15 秒刷新';
+    els.togglePollingBtn.textContent = state.pollingPaused ? '恢复自动刷新' : '暂停自动刷新';
+    els.togglePollingBtn.setAttribute('aria-pressed', String(state.pollingPaused));
 }
 
 function renderGlobalControls() {
-    if (!els.restartAllBtn) return;
-    els.restartAllBtn.disabled = Boolean(state.busyRestartAll);
+    const busy = isActionBusy();
+    els.restartAllBtn.disabled = busy || !state.services.length || Boolean(state.statusError);
     els.restartAllBtn.innerHTML = state.busyRestartAll
-        ? '<i class="fas fa-spinner fa-spin mr-2"></i>重启中'
-        : '<i class="fas fa-power-off mr-2"></i>重启全部';
-    els.refreshBtn.disabled = Boolean(state.busyRestartAll);
-    els.refreshBtn.classList.toggle('opacity-50', Boolean(state.busyRestartAll));
-    els.refreshBtn.classList.toggle('cursor-not-allowed', Boolean(state.busyRestartAll));
+        ? '<i class="fas fa-spinner fa-spin mr-2" aria-hidden="true"></i>重启中'
+        : '<i class="fas fa-power-off mr-2" aria-hidden="true"></i>重启全部';
+    els.refreshBtn.disabled = busy || state.refreshing;
+    els.refreshBtn.innerHTML = state.refreshing
+        ? '<i class="fas fa-spinner fa-spin mr-2" aria-hidden="true"></i>刷新中'
+        : '<i class="fas fa-rotate mr-2" aria-hidden="true"></i>刷新';
+    els.inspectBtn.disabled = busy || state.refreshing;
+    els.inspectBtn.textContent = state.inspecting ? '检查中…' : '检查实时任务';
+    els.refreshLogBtn.disabled = state.logLoading || !state.services.length;
+    els.serviceGrid.setAttribute('aria-busy', String(state.refreshing));
+}
+
+function needsAttention(service) {
+    return Boolean(service.queue_error || service.business_tasks_error || service.report_video_stats_error ||
+        service.consumer_warning || (!service.running && !service.paused) ||
+        (!service.running && Number(service.queue_length) > 0));
+}
+
+function renderSummary() {
+    const services = state.services;
+    const loaded = Boolean(state.lastStatusAt);
+    const online = services.filter(service => service.running).length;
+    const attention = services.filter(needsAttention).length;
+    const paused = services.filter(service => service.paused).length;
+    const queueUnknown = services.some(service => service.queue_error || service.queue_length == null);
+    const businessUnknown = services.some(service => service.business_tasks_error);
+    const backlog = services.reduce((sum, service) => sum + Number(service.queue_length || 0), 0);
+    const business = services.reduce((sum, service) => sum + Number(service.business_active_count || 0), 0);
+    const cards = [
+        { label: '在线 Worker', icon: 'server', value: loaded ? `${online} <small>/ ${services.length}</small>` : '—', note: loaded ? `${paused} 个已暂停 · 进程状态` : '等待状态数据' },
+        { label: '需关注', icon: 'triangle-exclamation', value: loaded ? attention : '—', note: loaded ? (attention ? '离线、消费告警或读取失败' : '当前没有 Worker 告警') : '等待状态数据', alert: attention > 0 },
+        { label: '队列积压', icon: 'layer-group', value: loaded ? `${backlog}${queueUnknown ? '+' : ''}` : '—', note: queueUnknown ? '部分队列读取失败，显示已知数量' : '尚未被 Worker 领取的消息' },
+        { label: '业务进行中', icon: 'bars-progress', value: loaded ? `${business}${businessUnknown ? '+' : ''}` : '—', note: businessUnknown ? '部分业务数据读取失败' : '当前返回的业务任务数' },
+    ];
+    els.statusSummary.innerHTML = cards.map(card => `
+        <div class="monitor-stat ${card.alert ? 'monitor-stat-alert' : ''}">
+            <div class="monitor-stat-label"><span>${card.label}</span><i class="fas fa-${card.icon}" aria-hidden="true"></i></div>
+            <div class="monitor-stat-value">${card.value}</div>
+            <div class="monitor-stat-note">${state.statusError ? '数据已过期 · 等待重新连接' : card.note}</div>
+        </div>
+    `).join('');
 }
 
 function renderWatchdog() {
-    if (!els.watchdogCard) return;
     if (state.watchdogError) {
-        els.watchdogCard.innerHTML = `
-            <div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-700">
-                Watchdog 状态接口不可用：${escapeHtml(state.watchdogError)}。请重启后端服务加载新接口。
-            </div>
-        `;
+        els.watchdogCard.innerHTML = `<div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700" role="status">Watchdog 状态获取失败：${escapeHtml(state.watchdogError)}。可刷新重试。</div>`;
         return;
     }
-    const watchdog = state.watchdog || {};
+    if (!state.watchdog) {
+        els.watchdogCard.innerHTML = '<div class="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500">正在获取 Watchdog 状态…</div>';
+        return;
+    }
+    const watchdog = state.watchdog;
     const config = watchdog.config || {};
     const events = Array.isArray(watchdog.state?.events) ? watchdog.state.events.slice(-3).reverse() : [];
     const running = Boolean(watchdog.running);
-    const busy = Boolean(state.busyWatchdogAction || state.busyRestartAll);
-    const statusClass = running
-        ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-        : 'border-slate-200 bg-slate-50 text-slate-500';
-    const serviceText = Array.isArray(config.services) && config.services.length
-        ? config.services.map(serviceLabel).join('、')
-        : '-';
-    els.watchdogCard.innerHTML = `
-        <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-            <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-                <div class="min-w-0">
-                    <div class="flex flex-wrap items-center gap-2">
-                        <h2 class="text-base font-black">Celery Watchdog</h2>
-                        <span class="rounded-full border px-2.5 py-1 text-xs font-black ${statusClass}">
-                            ${running ? '运行中' : '未运行'}
-                        </span>
-                        <span class="rounded-full ${config.enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'} px-2.5 py-1 text-xs font-black">
-                            ${config.enabled ? '自动重启已开启' : '只告警'}
-                        </span>
-                    </div>
-                    <div class="mt-2 grid gap-2 text-xs text-slate-500 md:grid-cols-2 xl:grid-cols-4">
-                        <div class="rounded-md bg-slate-50 px-3 py-2">
-                            <div class="text-slate-400">PID</div>
-                            <div class="mt-1 font-black text-slate-700">${watchdog.pids?.length ? watchdog.pids.map(escapeHtml).join(', ') : '-'}</div>
-                        </div>
-                        <div class="rounded-md bg-slate-50 px-3 py-2">
-                            <div class="text-slate-400">确认次数</div>
-                            <div class="mt-1 font-black text-slate-700">${config.confirmations ?? '-'}</div>
-                        </div>
-                        <div class="rounded-md bg-slate-50 px-3 py-2">
-                            <div class="text-slate-400">轮询间隔</div>
-                            <div class="mt-1 font-black text-slate-700">${config.poll_seconds ?? '-'}s</div>
-                        </div>
-                        <div class="rounded-md bg-slate-50 px-3 py-2">
-                            <div class="text-slate-400">冷却时间</div>
-                            <div class="mt-1 font-black text-slate-700">${formatDuration(config.cooldown_seconds)}</div>
-                        </div>
-                    </div>
-                    <div class="mt-2 text-xs text-slate-500">监控：${escapeHtml(serviceText)}</div>
-                    ${events.length ? `
-                        <div class="mt-3 space-y-1">
-                            ${events.map(event => `
-                                <div class="rounded-md border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
-                                    <span class="font-black text-slate-700">${escapeHtml(event.service_id || '-')}</span>
-                                    <span class="mx-1 text-slate-300">·</span>
-                                    <span class="text-slate-500">${escapeHtml(event.message || event.event_type || '-')}</span>
-                                    <span class="ml-2 text-slate-400">${escapeHtml(formatTime(event.created_at))}</span>
-                                </div>
-                            `).join('')}
-                        </div>
-                    ` : ''}
+    const busy = isActionBusy();
+    const serviceText = Array.isArray(config.services) ? config.services.map(serviceLabel).join('、') : '未配置';
+    updatePanel(els.watchdogCard, `
+        <div class="rounded-lg border border-slate-200 bg-white px-4 py-3">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <div class="flex flex-wrap items-center gap-2">
+                    <h2 class="text-sm font-bold"><i class="fas fa-shield-halved mr-2 text-slate-400" aria-hidden="true"></i>Celery Watchdog</h2>
+                    <span class="rounded-full px-2.5 py-1 text-xs font-bold ${running ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}">${running ? '运行中' : '未运行'}</span>
+                    <span class="text-xs text-slate-500">${config.enabled ? '自动恢复已开启' : '仅告警'} · 每 ${escapeHtml(config.poll_seconds ?? '—')} 秒检查</span>
                 </div>
-                <div class="grid min-w-[300px] grid-cols-2 gap-2">
-                    <button data-watchdog-action="start" ${busy || running ? 'disabled' : ''} class="rounded-md bg-emerald-600 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">
-                        <i class="fas fa-play mr-1"></i>启动守护
-                    </button>
-                    <button data-watchdog-action="stop" ${busy || !running ? 'disabled' : ''} class="rounded-md bg-slate-800 px-3 py-2 text-xs font-bold text-white hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-40">
-                        <i class="fas fa-stop mr-1"></i>停止守护
-                    </button>
-                    <button data-watchdog-action="restart" ${busy ? 'disabled' : ''} class="rounded-md border border-slate-300 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">
-                        <i class="fas fa-rotate mr-1"></i>重启守护
-                    </button>
-                    <button data-watchdog-action="run-once" ${busy ? 'disabled' : ''} class="rounded-md border border-blue-200 px-3 py-2 text-xs font-bold text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-40">
-                        <i class="fas fa-stethoscope mr-1"></i>立即检查
-                    </button>
+                <div class="monitor-watchdog-actions">
+                    <button data-watchdog-action="${running ? 'stop' : 'start'}" ${busy ? 'disabled' : ''} class="monitor-button">${running ? '停止守护' : '启动守护'}</button>
+                    <button data-watchdog-action="restart" ${busy ? 'disabled' : ''} class="monitor-button">重启守护</button>
+                    <button data-watchdog-action="run-once" ${busy ? 'disabled' : ''} class="monitor-button" title="检查队列并按当前策略执行自动恢复">立即检查</button>
                 </div>
             </div>
+            <details class="monitor-details mt-1" data-detail-id="watchdog" ${state.expandedDetails.has('watchdog') ? 'open' : ''}>
+                <summary>守护配置与最近事件${events.length ? ` · ${events.length} 条` : ''}</summary>
+                <div class="mb-2 leading-6">PID ${watchdog.pids?.length ? watchdog.pids.map(escapeHtml).join(', ') : '—'} · 连续确认 ${escapeHtml(config.confirmations ?? '—')} 次 · 冷却 ${formatDuration(config.cooldown_seconds)}</div>
+                <p class="mb-2 leading-5">监控：${escapeHtml(serviceText)}</p>
+                ${events.map(event => `<div class="mt-1 rounded bg-slate-50 px-3 py-2"><span class="font-semibold text-slate-700">${escapeHtml(serviceLabel(event.service_id))}</span> · ${escapeHtml(event.message || event.event_type || '—')} <span class="text-slate-500">${escapeHtml(formatTime(event.created_at))}</span></div>`).join('') || '<p class="py-2">暂无守护事件。</p>'}
+            </details>
         </div>
-    `;
+    `);
 }
 
 function renderBroker(broker) {
     const ok = Boolean(broker.ok);
-    const inspectError = broker.inspect_error;
+    const inspectError = broker.inspect_error && broker.inspect_error !== 'skipped' ? broker.inspect_error : '';
     els.brokerStatus.className = ok
         ? (inspectError
             ? 'rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700'
             : 'rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700')
         : 'rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-bold text-red-600';
     els.brokerStatus.innerHTML = ok && inspectError
-        ? `<i class="fas fa-triangle-exclamation mr-2"></i>Broker 正常，任务检查暂时超时`
+        ? `<i class="fas fa-triangle-exclamation mr-2"></i>Broker 正常 · 任务检查不完整`
         : ok
-            ? `<i class="fas fa-circle-check mr-2"></i>Broker 正常 · ${escapeHtml(broker.url_masked || '')}`
+            ? `<i class="fas fa-circle-check mr-2"></i>Broker 正常`
         : `<i class="fas fa-triangle-exclamation mr-2"></i>Broker 异常`;
-    els.brokerStatus.title = inspectError || broker.error || '';
+    els.brokerStatus.title = inspectError || broker.error || broker.url_masked || '';
 }
 
 function renderTaskPanel(service) {
@@ -389,25 +550,30 @@ function renderTaskPanel(service) {
     const hasTasks = active.length || reserved.length || scheduled.length || businessTasks.length;
     const consumerWarning = service.consumer_warning;
     const businessError = service.business_tasks_error;
+    const inspected = !service.inspect_error;
+    const unknown = service.inspect_error === 'skipped' ? '未检查' : '未知';
 
     return `
         <div class="mt-3 rounded-md border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
             <div class="grid grid-cols-4 gap-2">
-                ${renderTaskCount('执行中', active.length, 'text-emerald-700')}
-                ${renderTaskCount('已领取', reserved.length, 'text-blue-700')}
-                ${renderTaskCount('定时', scheduled.length, 'text-slate-700')}
-                ${renderTaskCount('业务进行中', businessTasks.length, businessTasks.length ? 'text-indigo-700' : 'text-slate-700')}
+                ${renderTaskCount('执行中', inspected ? active.length : unknown, inspected ? 'text-emerald-700' : 'text-slate-500')}
+                ${renderTaskCount('已领取', inspected ? reserved.length : unknown, inspected ? 'text-blue-700' : 'text-slate-500')}
+                ${renderTaskCount('定时', inspected ? scheduled.length : unknown, 'text-slate-500')}
+                ${renderTaskCount('业务', businessError ? '未知' : businessTasks.length, businessTasks.length ? 'text-indigo-700' : 'text-slate-700')}
             </div>
             ${consumerWarning ? `<div class="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 font-bold leading-5 text-amber-700">${escapeHtml(consumerWarning)}</div>` : ''}
             ${businessError ? `<div class="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 font-bold leading-5 text-amber-700">业务任务读取失败：${escapeHtml(businessError)}</div>` : ''}
+            ${service.consumer_note ? `<p class="mt-2 leading-5 text-slate-500">${escapeHtml(service.consumer_note)}</p>` : ''}
+            ${service.inspect_error && service.inspect_error !== 'skipped' ? `<p class="mt-2 text-amber-700">实时任务检查未完成：${escapeHtml(service.inspect_error)}</p>` : ''}
             ${hasTasks ? `
-                <div class="mt-2 space-y-1">
+                <details class="monitor-details mt-2" data-detail-id="tasks-${escapeHtml(service.id)}" ${state.expandedDetails.has(`tasks-${service.id}`) ? 'open' : ''}>
+                    <summary>查看任务详情</summary>
                     ${renderTaskRows('执行中', active, 'border-emerald-200 bg-emerald-50')}
                     ${renderTaskRows('已领取', reserved, 'border-blue-200 bg-blue-50')}
                     ${renderTaskRows('定时', scheduled, 'border-slate-200 bg-white')}
                     ${renderBusinessTaskRows('业务进行中', businessTasks, 'border-indigo-200 bg-indigo-50')}
-                </div>
-            ` : '<div class="mt-2 text-slate-400">当前没有 worker 已领取或业务进行中的任务。</div>'}
+                </details>
+            ` : inspected ? '<div class="mt-2 text-slate-500">当前没有已领取或进行中的任务。</div>' : ''}
         </div>
     `;
 }
@@ -535,14 +701,35 @@ function taskRuntimeText(task) {
 
 function renderCards() {
     els.serviceGrid.dataset.count = String(state.services.length);
+    const services = state.services.filter(service => {
+        const matchesSearch = [service.label, service.queue, service.id, service.description]
+            .some(value => String(value || '').toLowerCase().includes(state.search));
+        const matchesFilter = state.filter === 'all'
+            || (state.filter === 'attention' && needsAttention(service))
+            || (state.filter === 'backlog' && Number(service.queue_length) > 0)
+            || (state.filter === 'paused' && service.paused)
+            || (state.filter === 'offline' && !service.running);
+        return matchesSearch && matchesFilter;
+    });
+    els.filterCount.textContent = `${services.length} / ${state.services.length} 个 Worker`;
+    els.serviceFilters.querySelectorAll('[data-filter]').forEach(button => {
+        button.setAttribute('aria-pressed', String(button.dataset.filter === state.filter));
+    });
+    if (!services.length) {
+        els.serviceGrid.innerHTML = `<div class="monitor-empty">${!state.lastStatusAt
+            ? (state.statusError ? '无法获取 Worker 状态，请点击顶部刷新重试。' : '正在获取 Worker 状态…')
+            : state.services.length ? '没有符合条件的 Worker。' : '当前没有可用的 Worker。'}
+            ${state.services.length ? '<button data-clear-filters class="monitor-text-button block mx-auto mt-2">清除筛选</button>' : ''}</div>`;
+        return;
+    }
     const workflowServices = WORKFLOW_SERVICE_ORDER
-        .map(id => state.services.find(service => service.id === id))
+        .map(id => services.find(service => service.id === id))
         .filter(Boolean);
     const zsxqSupportServices = ZSXQ_SUPPORT_SERVICE_ORDER
-        .map(id => state.services.find(service => service.id === id))
+        .map(id => services.find(service => service.id === id))
         .filter(Boolean);
     const groupedIds = new Set([...WORKFLOW_SERVICE_IDS, ...ZSXQ_SUPPORT_SERVICE_IDS]);
-    const otherServices = state.services.filter(service => !groupedIds.has(service.id));
+    const otherServices = services.filter(service => !groupedIds.has(service.id));
     const groups = [
         workflowServices.length
             ? renderServiceGroup({
@@ -567,7 +754,7 @@ function renderCards() {
             })
             : '',
     ];
-    els.serviceGrid.innerHTML = groups.filter(Boolean).join('');
+    updatePanel(els.serviceGrid, groups.filter(Boolean).join(''));
 }
 
 function renderServiceGroup({ title, subtitle, services, layout = 'grid' }) {
@@ -590,48 +777,51 @@ function renderServiceGroup({ title, subtitle, services, layout = 'grid' }) {
 
 function renderServiceCard(service) {
     const running = Boolean(service.running);
-    const busy = state.busyServiceId === service.id || state.busyRestartAll;
+    const busy = isActionBusy() || Boolean(state.statusError);
     const businessActive = Number(service.business_active_count || 0);
-    const statusClass = running
+    const statusClass = service.paused
+        ? 'border-amber-200 bg-amber-50 text-amber-700'
+        : running
         ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
         : 'border-slate-200 bg-slate-50 text-slate-500';
     const risk = !running && Number(service.queue_length || 0) > 0;
     return `
-        <article class="celery-service-card flex h-full flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <article data-attention="${needsAttention(service)}" data-selected="${state.selectedServiceId === service.id}" class="celery-service-card flex h-full flex-col rounded-lg border border-slate-200 bg-white p-4">
             <div class="flex items-start justify-between gap-3">
                 <div class="min-w-0">
-                    <h2 class="truncate text-base font-black">${escapeHtml(service.label)}</h2>
-                    <p class="celery-service-desc mt-1 text-xs leading-4 text-slate-500">${escapeHtml(service.description || '')}</p>
+                    <h3 class="text-sm font-bold" title="${escapeHtml(service.label)}">${escapeHtml(service.label)}</h3>
                 </div>
                 <span class="shrink-0 rounded-full border px-2.5 py-1 text-xs font-black ${statusClass}">
-                    ${running ? '在线' : '离线'}
+                    ${service.paused ? (running ? '已暂停 · 在线' : '已暂停') : running ? '在线' : '离线'}
                 </span>
             </div>
-            <div class="mt-4 grid grid-cols-3 gap-2 text-xs">
-                <div class="rounded-md bg-slate-50 px-3 py-2">
-                    <div class="text-slate-400">队列</div>
-                    <div class="mt-1 font-black text-slate-700">${escapeHtml(service.queue)}</div>
-                </div>
+            <code class="monitor-queue" title="${escapeHtml(service.queue)}">${escapeHtml(service.queue)}</code>
+            <p class="celery-service-desc mt-2 text-xs leading-4 text-slate-500" title="${escapeHtml(service.description || '')}">${escapeHtml(service.description || '')}</p>
+            <div class="mt-3 grid grid-cols-2 gap-2 text-xs">
                 <div class="rounded-md bg-slate-50 px-3 py-2">
                     <div class="text-slate-400">积压</div>
-                    <div class="mt-1 font-black ${risk ? 'text-red-600' : 'text-slate-700'}">${service.queue_length ?? '-'}</div>
+                    <div class="mt-1 text-lg font-bold ${risk ? 'text-red-600' : 'text-slate-700'}">${service.queue_error ? '未知' : service.queue_length ?? '—'}</div>
                 </div>
                 <div class="rounded-md bg-slate-50 px-3 py-2">
                     <div class="text-slate-400">业务进行中</div>
-                    <div class="mt-1 font-black ${businessActive ? 'text-indigo-700' : 'text-slate-700'}">${businessActive}</div>
+                    <div class="mt-1 text-lg font-bold ${businessActive ? 'text-indigo-700' : 'text-slate-700'}">${service.business_tasks_error ? '未知' : businessActive}</div>
                 </div>
             </div>
             <div class="mt-3 text-xs text-slate-500">
-                <div>PID：${service.pids?.length ? service.pids.map(escapeHtml).join(', ') : '-'}</div>
-                <div class="mt-1">运行时长：${service.processes?.length ? escapeHtml(service.processes[0].etime) : '-'}</div>
+                <details class="monitor-details" data-detail-id="process-${escapeHtml(service.id)}" ${state.expandedDetails.has(`process-${service.id}`) ? 'open' : ''}>
+                    <summary>进程信息${service.pids?.length ? ` · ${service.pids.length} 个` : ''}</summary>
+                    <div>PID：${service.pids?.length ? service.pids.map(escapeHtml).join(', ') : '—'}</div>
+                    <div class="mt-1">运行时长：${service.processes?.length ? escapeHtml(service.processes[0].etime) : '—'}</div>
+                </details>
                 ${risk ? '<div class="mt-2 rounded-md bg-red-50 px-2 py-1 font-bold text-red-600">队列有积压，但 worker 离线</div>' : ''}
                 ${service.queue_error ? `<div class="mt-2 rounded-md bg-amber-50 px-2 py-1 font-bold text-amber-700">队列读取失败：${escapeHtml(service.queue_error)}</div>` : ''}
             </div>
             ${renderTaskPanel(service)}
             ${renderReportVideoBusinessPanel(service)}
             <div class="mt-auto grid grid-cols-2 gap-2 pt-4">
-                <button data-action="start" data-service-id="${escapeHtml(service.id)}" ${busy || running ? 'disabled' : ''} class="rounded-md bg-emerald-600 px-2 py-2 text-xs font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">
-                    <i class="fas fa-play mr-1"></i>启动
+                <button data-view-logs="${escapeHtml(service.id)}" class="col-span-2 rounded-md border border-blue-200 bg-blue-50 px-2 py-2 text-xs font-bold text-blue-700 hover:bg-blue-100"><i class="fas fa-file-lines mr-1" aria-hidden="true"></i>查看日志</button>
+                <button data-action="start" data-service-id="${escapeHtml(service.id)}" ${busy || (running && !service.paused) ? 'disabled' : ''} class="rounded-md bg-emerald-600 px-2 py-2 text-xs font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">
+                    <i class="fas fa-play mr-1" aria-hidden="true"></i>${service.paused ? '恢复运行' : '启动'}
                 </button>
                 <button data-action="stop" data-service-id="${escapeHtml(service.id)}" ${busy || !running ? 'disabled' : ''} class="rounded-md bg-slate-800 px-2 py-2 text-xs font-bold text-white hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-40">
                     <i class="fas fa-stop mr-1"></i>停止
@@ -691,7 +881,7 @@ function renderBusinessStat(label, count, valueClass = 'text-slate-700') {
 }
 
 function renderServiceList() {
-    els.serviceList.innerHTML = state.services.map(service => {
+    updatePanel(els.serviceList, state.services.map(service => {
         const selected = service.id === state.selectedServiceId;
         const running = Boolean(service.running);
         const active = Number(service.active_count || 0);
@@ -699,16 +889,16 @@ function renderServiceList() {
         const scheduled = Number(service.scheduled_count || 0);
         const businessActive = Number(service.business_active_count || 0);
         return `
-            <button data-select-service="${escapeHtml(service.id)}" class="w-full rounded-lg border px-3 py-3 text-left transition-colors ${selected ? 'border-blue-300 bg-blue-50' : 'border-slate-200 hover:bg-slate-50'}">
+            <button data-select-service="${escapeHtml(service.id)}" aria-pressed="${selected}" class="w-full rounded-lg border px-3 py-3 text-left transition-colors ${selected ? 'border-blue-300 bg-blue-50' : 'border-slate-200 hover:bg-slate-50'}">
                 <div class="flex items-center justify-between gap-2">
                     <span class="text-sm font-black">${escapeHtml(service.label)}</span>
-                    <span class="h-2.5 w-2.5 rounded-full ${running ? 'bg-emerald-500' : 'bg-slate-300'}"></span>
+                    <span class="shrink-0 text-xs ${service.paused ? 'text-amber-700' : running ? 'text-emerald-700' : 'text-slate-500'}">${service.paused ? '已暂停' : running ? '在线' : '离线'}</span>
                 </div>
-                <div class="mt-1 text-xs text-slate-500">队列 ${escapeHtml(service.queue)} · 积压 ${service.queue_length ?? '-'}</div>
-                <div class="mt-1 text-xs ${active || businessActive ? 'font-bold text-emerald-700' : 'text-slate-400'}">执行 ${active} · 已领取 ${reserved} · 定时 ${scheduled} · 业务 ${businessActive}</div>
+                <div class="mt-1 truncate text-xs text-slate-500" title="${escapeHtml(service.queue)}">${escapeHtml(service.queue)}</div>
+                <div class="mt-1 text-xs text-slate-500">积压 ${service.queue_error ? '未知' : service.queue_length ?? '—'} · 业务 ${service.business_tasks_error ? '未知' : businessActive}${service.inspect_error ? '' : ` · 执行 ${active} · 已领取 ${reserved} · 定时 ${scheduled}`}</div>
             </button>
         `;
-    }).join('');
+    }).join(''));
 }
 
 function serviceLabel(serviceId) {
@@ -716,6 +906,8 @@ function serviceLabel(serviceId) {
 }
 
 function setNotice(message, type) {
+    clearTimeout(state.noticeTimer);
+    state.noticeTimer = null;
     const classes = {
         muted: 'border-slate-200 bg-white text-slate-600',
         success: 'border-emerald-200 bg-emerald-50 text-emerald-700',
@@ -725,7 +917,7 @@ function setNotice(message, type) {
     els.notice.textContent = message;
     els.notice.classList.remove('hidden');
     if (type === 'success') {
-        setTimeout(() => els.notice.classList.add('hidden'), 1800);
+        state.noticeTimer = setTimeout(() => els.notice.classList.add('hidden'), 4000);
     }
 }
 

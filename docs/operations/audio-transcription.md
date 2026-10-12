@@ -38,3 +38,17 @@ venv/bin/python scripts/dev/check-celery-revoke-boundary.py
 2026-09-14 16:59 最终验收：独立只读评审发现数据库瞬断可能遗留活动任务，已修复并复核。新增故障注入覆盖首次查询、失败写回、恢复后同投递继续完成、预算耗尽收口，以及真实 Celery retry 超过默认重试次数时仍保留投递。后端 44 项测试通过，前端与两项 AST 门禁通过。数据库重试执行预算为 5 次，退避 15–300 秒；预算用尽后不再执行 ASR，只等待数据库恢复以记录失败，随后允许用户手动重试。
 
 最终运行边界：Flask PID 46802、report_audio_workflow Worker PID 47138，均通过项目安全检查后重载，无强制终止。新任务 `cffb6c7f-4cf4-42a4-b1ac-21fea2ac9306` 于 16:59:11 完成，100%、无错误、4 个片段；TXT 102 字节、SRT 234 字节。冷详情仅返回输出字节数与统计，`poll=1` 不读取输出 JSON。浏览器 SRT 下载已捕获 download 事件。
+
+## 2026-10-03：Intel Mac 模型加载修复
+
+本机 `.env` 中的代理指向未监听的 `127.0.0.1:7890`，导致 Faster-Whisper medium 首次下载权重失败。已按实际监听配置修正为 `7897`；其他机器应核实自己的代理端口。模型权重已写入项目 `data/models/whisper` 缓存，大小为 1,527,906,378 字节，SHA-256 与发布方一致：`9b45e1009dcc4ab601eff815b61d80e60ce3fd8c74c1a14f4a282258286b51ae`。
+
+补齐模型后发现第二个故障：macOS 13.5 x86_64 环境中，ASR 为检测 CUDA 而提前导入 PyTorch，导致它与 CTranslate2 的 OpenMP 运行库冲突，模型加载进程以 SIGSEGV 退出。对照实验复现了“先导入 torch 崩溃、直接加载 Faster-Whisper 成功”。ASR 现使用 CTranslate2 自己的 `get_cuda_device_count()`，不再主动引入 PyTorch。上游同类问题见 [Faster-Whisper #137](https://github.com/SYSTRAN/faster-whisper/issues/137) 和 [PyTorch #60094](https://github.com/pytorch/pytorch/issues/60094)。
+
+回归验证：以下命令 28 项通过，1 项按需执行的 2 GiB 磁盘边界测试跳过；包含真实缓存模型的独立进程加载，修复前该测试退出码为 `-11`，修复后为 `0`。
+
+```sh
+RUN_NATIVE_ASR_TEST=1 venv/bin/python -m pytest tests/unit/test_asr_backend_selection.py tests/integration/test_asr_native_backend.py tests/unit/test_audio_transcription_service.py tests/unit/test_audio_transcription_workflow.py -q
+```
+
+真实任务验收：确认音频队列空闲后，仅优雅重载 `report_audio_workflow` Worker。对已确认崩溃的旧投递按任务 ID、投递 ID 和 processing 状态条件恢复，再通过正常 retry 接口重试。任务 `c2336f54-b5c7-433e-88bc-7839354515a2` 于北京时间 2026-10-03 22:20:36 完成，100%、无错误；71.49 秒音频生成 38 条字幕，TXT 953 字节、SRT 2236 字节。两个预览/下载接口均返回成功，预览与附件内容一致；SRT 编号连续、时间戳单调，末条结束于 71.38 秒，逐条字幕文本与 TXT 一致。

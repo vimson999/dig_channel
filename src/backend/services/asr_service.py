@@ -1,7 +1,6 @@
 import os
 import logging
 import platform
-import torch
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -22,6 +21,7 @@ except ImportError:
     pass
 
 try:
+    from ctranslate2 import get_cuda_device_count
     from faster_whisper import WhisperModel
     HAS_FASTER_WHISPER = True
 except ImportError:
@@ -115,7 +115,9 @@ class ASRService:
             elif HAS_FASTER_WHISPER:
                 logger.info(f"🚀 [ASR] Loading Faster-Whisper model: {self.model_size}...")
                 device = "cpu"
-                if torch.cuda.is_available():
+                # Query the inference engine directly. Importing PyTorch first
+                # loads a competing OpenMP runtime and can crash Intel macOS.
+                if get_cuda_device_count() > 0:
                     device = "cuda"
                 
                 self.model = WhisperModel(

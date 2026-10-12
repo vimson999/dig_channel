@@ -103,6 +103,19 @@ class BilibiliChargingDashboardTest(unittest.TestCase):
         self.assertEqual(us_stock_latest["daily_cash"], 60)
         self.assertEqual(us_stock_latest["monthly_income"], 2060)
 
+    def test_first_snapshot_and_nonconsecutive_snapshot_do_not_invent_daily_growth(self):
+        account = self._add_account("baseline", "999", "新账号")
+        self._add_snapshot(account, date(2026, 9, 1), 100)
+        self._add_snapshot(account, date(2026, 9, 3), 120)
+        db.session.commit()
+        with patch.object(service, "business_date", return_value=date(2026, 9, 3)):
+            points = service.charging_dashboard_payload(days=3)["accounts"][0]["points"]
+        for point in points:
+            self.assertIsNone(point["daily_growth"])
+            self.assertIsNone(point["daily_revenue"])
+            self.assertIsNone(point["daily_cash"])
+        self.assertEqual(points[-1]["monthly_income"], 1200)
+
     def test_dashboard_returns_rankings_for_rolling_day_week_and_month(self):
         alpha = self._add_account("alpha", "100", "甲账号")
         beta = self._add_account("beta", "200", "乙账号")

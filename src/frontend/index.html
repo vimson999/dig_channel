@@ -158,6 +158,7 @@ input::-webkit-inner-spin-button {
 margin: 0;
 }
 </style>
+<link rel="stylesheet" href="css/home-dashboard.css?v=20261003-1">
     <!-- 状态提示栏 -->
     <style>
         .toast-container { position: fixed; top: 1rem; right: 1rem; z-index: 9999; }
@@ -240,8 +241,9 @@ margin: 0;
 <!-- 主页面内容 -->
 <main id="dashboard-page" class="max-w-[1440px] mx-auto px-6 pb-8" role="main">
     <!-- 页面标题 -->
-    <section class="mb-8" aria-labelledby="dashboard-title">
-        <h1 id="dashboard-title" class="sr-only">YouTube频道数据分析仪表板</h1>
+    <section class="mb-6" aria-labelledby="dashboard-title">
+        <h1 id="dashboard-title" class="text-2xl font-bold text-slate-800">频道数据概览</h1>
+        <p class="text-sm text-slate-500 mt-2">YouTube 与 B站充电监控 · 金额均为估算值，不代表平台实际结算</p>
         <div class="hidden">
             <h2>实时监控YouTube频道表现数据</h2>
             <p>追踪频道收入、订阅增长、播放量趋势，优化内容策略</p>
@@ -249,15 +251,15 @@ margin: 0;
     </section>
 
 
-<div class="grid grid-cols-4 gap-6 mb-8">
+<div id="home-rankings" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
 <div class="bg-white rounded-xl shadow-lg border border-gray-100 p-6 hover:shadow-xl transition-shadow duration-300">
 <div class="flex items-center gap-3 mb-5">
 <div class="w-10 h-10 bg-gradient-to-br from-green-400 to-green-600 rounded-lg flex items-center justify-center">
 <i class="fas fa-dollar-sign text-white text-lg"></i>
 </div>
 <div>
-<h3 class="text-lg font-bold text-gray-800">日收入排行</h3>
-<p class="text-sm text-gray-500">今日收入表现</p>
+<h3 class="text-lg font-bold text-gray-800">日估算收入</h3>
+<p class="text-sm text-gray-500">今日 · USD · Top 10</p>
 </div>
 </div>
 <div id="daily-revenue-ranking" class="space-y-4">
@@ -279,8 +281,8 @@ margin: 0;
 <i class="fas fa-chart-bar text-white text-lg"></i>
 </div>
 <div>
-<h3 class="text-lg font-bold text-gray-800">月收入排行</h3>
-<p class="text-sm text-gray-500">本月累计收入</p>
+<h3 class="text-lg font-bold text-gray-800">月估算收入</h3>
+<p class="text-sm text-gray-500">本月已采集累计 · USD · Top 10</p>
 </div>
 </div>
 <div id="monthly-revenue-ranking" class="space-y-4">
@@ -303,7 +305,7 @@ margin: 0;
 </div>
 <div>
 <h3 class="text-lg font-bold text-gray-800">日新增订阅</h3>
-<p class="text-sm text-gray-500">今日订阅增长</p>
+<p class="text-sm text-gray-500">今日净增 · Top 10</p>
 </div>
 </div>
 <div id="daily-subscriber-ranking" class="space-y-4">
@@ -326,7 +328,7 @@ margin: 0;
 </div>
 <div>
 <h3 class="text-lg font-bold text-gray-800">月新增订阅</h3>
-<p class="text-sm text-gray-500">本月订阅增长</p>
+<p class="text-sm text-gray-500">本月已采集净增 · Top 10</p>
 </div>
 </div>
 <div id="monthly-subscriber-ranking" class="space-y-4">
@@ -345,17 +347,20 @@ margin: 0;
 
 <div class="bg-white rounded-xl shadow-medium border border-gray-100 mb-8 overflow-hidden">
 <div class="p-6 border-b border-gray-100 bg-gradient-to-r from-gray-50 to-white">
-<div class="flex items-center justify-between">
+<div id="home-chart-toolbar" class="flex items-center justify-between gap-4 flex-wrap">
 <div class="flex items-center gap-3">
 <div class="w-8 h-8 bg-gradient-to-br from-indigo-400 to-indigo-600 rounded-lg flex items-center justify-center">
 <i class="fas fa-chart-area text-white text-sm"></i>
 </div>
 <div>
 <h3 class="text-lg font-bold text-gray-800">数据趋势图表</h3>
-<p class="text-sm text-gray-500">可视化频道数据变化趋势</p>
+<p class="text-sm text-gray-500">默认对比最新有效值最高的 5 个频道</p>
 </div>
 </div>
-        <div class="flex items-center gap-4">
+        <div class="flex items-center gap-3 flex-wrap">
+        <select id="chart-metric" aria-label="趋势指标" class="px-3 py-2 border border-gray-300 rounded-button bg-white text-sm">
+            <option value="revenue">估算收入（USD）</option><option value="subscribers">订阅人数</option><option value="views">累计播放量</option>
+        </select>
         <div class="flex items-center gap-1 bg-gray-50 rounded-button p-1 border border-gray-200">
         <button id="chart-type-line" class="px-3 py-2 text-primary-600 bg-white border border-primary-200 rounded-md font-medium shadow-sm hover:bg-primary-50 transition-all duration-200" onclick="switchChartType('line')" title="折线图">
         <i class="fas fa-chart-line"></i>
@@ -367,7 +372,8 @@ margin: 0;
         <i class="fas fa-chart-pie"></i>
         </button>
         </div>
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-2 flex-wrap">
+            <button id="chart-reset" class="px-3 py-2 text-sm text-blue-600 rounded-button border border-blue-200">重置 Top 5</button>
             <button onclick="app.openChartChannelFilter()" class="flex items-center gap-2 bg-white border border-gray-300 text-gray-700 px-3 py-2 rounded-button font-medium hover:bg-gray-50 transition-all duration-200" title="筛选显示的频道">
                 <i class="fas fa-filter text-xs text-purple-500"></i>
                 <span>筛选频道</span>
@@ -382,7 +388,7 @@ margin: 0;
                 </button>
             </div>
             <div class="relative" id="time-range-wrapper">
-                <select id="time-range" class="appearance-none px-4 py-2 pr-10 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none bg-white font-medium text-gray-700 cursor-pointer transition-all">
+                <select id="time-range" aria-label="趋势天数范围" class="appearance-none px-4 py-2 pr-10 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none bg-white font-medium text-gray-700 cursor-pointer transition-all">
                     <option value="7" selected>最近 7 天</option>
                     <option value="30">最近 30 天</option>
                     <option value="90">最近 90 天</option>
@@ -390,7 +396,7 @@ margin: 0;
                 <i class="fas fa-chevron-down absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 pointer-events-none"></i>
             </div>
             <div class="relative hidden" id="month-range-wrapper">
-                <select id="month-range" class="appearance-none px-4 py-2 pr-10 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none bg-white font-medium text-gray-700 cursor-pointer transition-all">
+                <select id="month-range" aria-label="趋势月份范围" class="appearance-none px-4 py-2 pr-10 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none bg-white font-medium text-gray-700 cursor-pointer transition-all">
                     <option value="3">最近 3 个月</option>
                     <option value="6" selected>最近 6 个月</option>
                     <option value="12">最近 12 个月</option>
@@ -401,6 +407,7 @@ margin: 0;
         </div>
 </div>
 </div>
+<p id="chart-data-status" role="status" class="px-6 pt-4 text-xs text-slate-500">正在读取数据状态...</p>
 <div id="main-chart" class="w-full h-[450px] p-4"></div>
 </div>
 
@@ -417,9 +424,9 @@ margin: 0;
                     <p class="text-sm text-gray-500">跟踪情报页监控 UP 主的充电人数、日增和收入估算</p>
                 </div>
             </div>
-            <div class="flex items-center gap-2">
-                <span id="bilibili-charging-updated-at" class="hidden md:inline text-xs text-gray-400"></span>
-                <select id="bilibili-charging-range" class="px-3 py-2 border border-gray-300 rounded-button bg-white text-sm font-medium text-gray-700">
+            <div class="flex items-center gap-2 flex-wrap">
+                <span id="bilibili-charging-updated-at" class="text-xs text-gray-500"></span>
+                <select id="bilibili-charging-range" aria-label="充电趋势天数范围" class="px-3 py-2 border border-gray-300 rounded-button bg-white text-sm font-medium text-gray-700">
                     <option value="31" selected>最近 31 天</option>
                     <option value="90">最近 90 天</option>
                     <option value="366">最近一年</option>
@@ -430,7 +437,8 @@ margin: 0;
             </div>
         </div>
     </div>
-    <div id="bilibili-charging-status" class="px-6 pt-5 text-sm text-gray-500">正在加载充电人数...</div>
+    <div id="bilibili-charging-status" role="status" class="px-6 pt-5 text-sm text-gray-500">正在加载充电人数...</div>
+    <div id="bilibili-charging-sync-result" role="status" class="px-6 pt-2 text-sm"></div>
     <div id="bilibili-charging-chart" class="w-full h-[360px] px-3"></div>
     <div class="border-t border-gray-100 bg-slate-50/60 px-6 py-5">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
@@ -454,10 +462,10 @@ margin: 0;
                 <tr class="bg-gray-50 text-xs font-semibold text-gray-500">
                     <th class="px-6 py-3 text-left">UP 主</th>
                     <th class="px-4 py-3 text-right">最新充电人数</th>
-                    <th class="px-4 py-3 text-right">日增人数</th>
-                    <th class="px-4 py-3 text-right">日增金额</th>
-                    <th class="px-4 py-3 text-right">日增到手</th>
-                    <th class="px-6 py-3 text-right">当月收入</th>
+                    <th class="px-4 py-3 text-right">快照日净增</th>
+                    <th class="px-4 py-3 text-right">净增估算金额（CNY）</th>
+                    <th class="px-4 py-3 text-right">净增估算分成（CNY）</th>
+                    <th class="px-6 py-3 text-right">按人数估算月收入（CNY）</th>
                 </tr>
             </thead>
             <tbody id="bilibili-charging-summary" class="divide-y divide-gray-100">
@@ -465,6 +473,11 @@ margin: 0;
             </tbody>
         </table>
     </div>
+    <details class="px-6 py-4 text-xs text-slate-500 border-t border-gray-100">
+        <summary class="cursor-pointer font-medium">估算口径与数据说明</summary>
+        <p class="mt-2">日净增仅比较连续两天快照，缺少基准显示“—”。净增人数不等于新增付费人数，无法区分续费、流失与退款，金额不代表实际到账；各账号单价及分成比例见下方。</p>
+        <div id="bilibili-charging-pricing" class="mt-2 space-y-1"></div>
+    </details>
 </section>
 
 <div class="bg-white rounded-xl shadow-medium border border-gray-100 overflow-hidden">
@@ -475,8 +488,8 @@ margin: 0;
 <i class="fas fa-table text-white text-sm"></i>
 </div>
 <div>
-<h3 class="text-lg font-bold text-gray-800">频道管理</h3>
-<p class="text-sm text-gray-500">管理频道和查看详细数据</p>
+<h3 class="text-lg font-bold text-gray-800">频道快照</h3>
+<p class="text-sm text-gray-500">一行一个频道，快速对比最新快照</p>
 </div>
 </div>
 <div class="flex items-center gap-2">
@@ -501,7 +514,17 @@ margin: 0;
 </div>
 
 </div>
-<div class="table-container overflow-x-auto">
+<div id="home-table-controls" class="flex flex-wrap items-center gap-3 px-6 py-4">
+    <input id="home-table-search" aria-label="搜索快照频道" placeholder="搜索频道名称" class="px-3 py-2 border border-gray-300 rounded-button text-sm">
+    <select id="home-table-sort" aria-label="快照排序" class="px-3 py-2 border border-gray-300 rounded-button text-sm">
+        <option value="estimated_revenue">估算收入 ↓</option><option value="subscribers">订阅人数 ↓</option><option value="subscriber_change">新增订阅 ↓</option><option value="name">频道名称</option>
+    </select>
+    <select id="home-table-view" aria-label="快照视图" class="px-3 py-2 border border-gray-300 rounded-button text-sm">
+        <option value="summary">最新日期摘要</option><option value="detail">完整明细（按日期）</option>
+    </select>
+    <p id="home-table-status" class="w-full text-xs text-slate-500" role="status"></p>
+</div>
+<div class="table-container overflow-x-auto" tabindex="0" aria-label="频道数据，可横向滚动">
 <table id="data-table" class="w-full border-collapse">
 <thead>
 <tr class="bg-gray-50">
@@ -515,6 +538,7 @@ margin: 0;
 </tbody>
 </table>
 </div>
+<div id="home-detail-pagination" hidden class="px-6 py-4 border-t border-gray-100" aria-label="明细日期分页"></div>
 </div>
 </main>
 
@@ -1016,7 +1040,7 @@ chart.setOption(option);
 
 <!-- 频道筛选弹层 -->
 <div id="channelFilterModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm hidden flex items-center justify-center z-50 p-4">
-    <div class="bg-white rounded-2xl shadow-strong max-w-2xl w-full mx-4 max-h-[80vh] overflow-hidden transform transition-all duration-300 scale-95 opacity-0" id="channelFilterContent">
+    <div role="dialog" aria-modal="true" aria-labelledby="channelFilterTitle" aria-describedby="channelFilterDescription" tabindex="-1" class="bg-white rounded-2xl shadow-strong max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden" id="channelFilterContent">
         <div class="p-6 border-b border-gray-100 bg-gradient-to-r from-purple-50 to-indigo-50">
             <div class="flex items-center justify-between">
                 <div class="flex items-center gap-3">
@@ -1024,17 +1048,17 @@ chart.setOption(option);
                         <i class="fas fa-filter text-white"></i>
                     </div>
                     <div>
-                        <h3 class="text-xl font-bold text-gray-800">筛选频道</h3>
-                        <p class="text-sm text-gray-600">选择要在数据表格中显示的频道</p>
+                        <h3 id="channelFilterTitle" class="text-xl font-bold text-gray-800">筛选频道</h3>
+                        <p id="channelFilterDescription" class="text-sm text-gray-600">选择要显示的频道</p>
                     </div>
                 </div>
-                <button onclick="closeChannelFilterModal()" class="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
+                <button onclick="closeChannelFilterModal()" aria-label="关闭频道筛选" class="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
                     <i class="fas fa-times text-lg"></i>
                 </button>
             </div>
         </div>
         
-        <div class="p-6 flex-1 overflow-y-auto">
+        <div class="p-6 flex-1 min-h-0 overflow-y-auto">
             <!-- 操作按钮区域 -->
             <div class="mb-6 flex items-center justify-between">
                 <div class="flex items-center gap-3">
@@ -1056,7 +1080,7 @@ chart.setOption(option);
             <!-- 搜索框 -->
             <div class="mb-4">
                 <div class="relative">
-                    <input type="text" id="channelFilterSearch" placeholder="搜索频道名称..." 
+                    <input type="text" id="channelFilterSearch" aria-label="搜索频道名称" placeholder="搜索频道名称..."
                            class="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-button focus:border-purple-500 focus:ring-2 focus:ring-purple-200 focus:outline-none transition-all">
                     <i class="fas fa-search absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400"></i>
                 </div>
@@ -1065,7 +1089,7 @@ chart.setOption(option);
             <!-- 筛选条件 -->
             <div class="mb-4 grid grid-cols-2 gap-4">
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-2">按分类筛选</label>
+                    <label for="categoryFilter" class="block text-sm font-medium text-gray-700 mb-2">按分类筛选</label>
                     <select id="categoryFilter" class="w-full px-3 py-2 border border-gray-300 rounded-button focus:border-purple-500 focus:ring-2 focus:ring-purple-200 focus:outline-none">
                         <option value="">所有分类</option>
                         <option value="科技">科技</option>
@@ -1082,7 +1106,7 @@ chart.setOption(option);
                     </select>
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-2">按状态筛选</label>
+                    <label for="statusFilter" class="block text-sm font-medium text-gray-700 mb-2">按状态筛选</label>
                     <select id="statusFilter" class="w-full px-3 py-2 border border-gray-300 rounded-button focus:border-purple-500 focus:ring-2 focus:ring-purple-200 focus:outline-none">
                         <option value="">所有状态</option>
                         <option value="active">活跃频道</option>
@@ -1092,7 +1116,7 @@ chart.setOption(option);
             </div>
             
             <!-- 频道列表 -->
-            <div class="border border-gray-200 rounded-lg max-h-80 overflow-y-auto">
+            <div class="border border-gray-200 rounded-lg">
                 <div id="channelFilterList" class="divide-y divide-gray-100">
                     <!-- 加载状态 -->
                     <div id="channelFilterLoading" class="p-8 text-center text-gray-500">
@@ -1105,7 +1129,7 @@ chart.setOption(option);
         
         <div class="p-6 border-t border-gray-100 bg-gray-50 flex items-center justify-between">
             <div class="text-sm text-gray-600">
-                提示：取消选择的频道将不会在数据表格中显示
+                清空后不显示频道，可通过全选恢复
             </div>
             <div class="flex items-center gap-3">
                 <button onclick="closeChannelFilterModal()" class="px-4 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-button hover:bg-gray-100 transition-colors">
@@ -1129,11 +1153,12 @@ window.DEFER_DATA_TABLE_INIT = true;
 <script src="js/config.js?v=20250110-001"></script>
 <script src="js/utils.js?v=20250110-001"></script>
 <script src="js/api.js?v=20250110-002"></script>
-<script src="js/data-table.js?v=20260516-002"></script>
-<script src="js/dashboard.js?v=20250110-001"></script>
-<script src="js/bilibili-charging-dashboard.js?v=20260908-growth-rankings"></script>
-<script src="js/new-main.js?v=20260516-002"></script>
+<script src="js/visibility-polling.js?v=20261003-1"></script>
+<script src="js/home-channel-dialog.js?v=20261003-1"></script>
+<script src="js/data-table.js?v=20261003-1"></script>
+<script src="js/bilibili-charging-dashboard.js?v=20261003-1"></script>
+<script src="js/new-main.js?v=20261003-2"></script>
 <script src="js/channel-management.js?v=20250110-003"></script>
-<script src="js/shared-navigation.js?v=20260516-003"></script>
+<script src="js/shared-navigation.js?v=20261004-navigation-2"></script>
 </body>
 </html>

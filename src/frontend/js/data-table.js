@@ -16,6 +16,10 @@ class DataTable {
         this.tableData = null;
         this.selectedChannelIds = []; // 已选择的频道ID列表
         this.allChannels = []; // 所有可用频道
+        this.viewMode = document.getElementById('home-table-view') ? 'summary' : 'detail';
+        this.summarySearch = '';
+        this.summarySort = 'estimated_revenue';
+        this.explicitSelection = false;
         
         this.init();
     }
@@ -30,6 +34,27 @@ class DataTable {
 
     // 绑定事件
     bindEvents() {
+        document.getElementById('home-table-view')?.addEventListener('change', event => {
+            this.viewMode = event.target.value;
+            for (const id of ['home-table-search', 'home-table-sort']) {
+                document.getElementById(id).disabled = this.viewMode !== 'summary';
+            }
+            if (this.viewMode === 'summary' && this.currentPage !== 1) {
+                this.currentPage = 1;
+                this.loadTableData();
+                return;
+            }
+            this.renderTable();
+            this.renderPagination(this.tableData?.pagination);
+        });
+        document.getElementById('home-table-search')?.addEventListener('input', event => {
+            this.summarySearch = event.target.value.trim().toLowerCase();
+            this.renderTable();
+        });
+        document.getElementById('home-table-sort')?.addEventListener('change', event => {
+            this.summarySort = event.target.value;
+            this.renderTable();
+        });
         const startDateInput = document.getElementById('start-date');
         const endDateInput = document.getElementById('end-date');
         
@@ -65,6 +90,12 @@ class DataTable {
 
     // 加载表格数据
     async loadTableData() {
+        const requestId = this.requestId = (this.requestId || 0) + 1;
+        if (this.explicitSelection && this.selectedChannelIds.length === 0) {
+            this.tableData = { channels: [], rows: [] };
+            this.renderTable();
+            return;
+        }
         try {
             this.showLoading('正在加载数据表格...');
             
@@ -80,6 +111,8 @@ class DataTable {
             }
             
             const response = await api.getTableData(params);
+            if (requestId !== this.requestId) return;
+            if (!response?.success) throw new Error(response?.message || '接口返回失败');
             dataTableLog('📊 [DataTable] API响应:', response);
             this.tableData = response.data;
             dataTableLog('📊 [DataTable] 处理后的数据:', this.tableData);
@@ -91,6 +124,7 @@ class DataTable {
             dataTableLog('📊 [DataTable] 数据加载完成，已隐藏加载状态');
             
         } catch (error) {
+            if (requestId !== this.requestId) return;
             console.error('加载表格数据失败:', error);
             this.hideLoading();
             this.showError('加载表格数据失败');
@@ -111,6 +145,12 @@ class DataTable {
         // 清空tbody，移除"正在加载数据..."
         dataTableLog('📊 [DataTable] 清空tbody，移除加载状态...');
         tbody.innerHTML = '';
+        if (this.viewMode === 'summary') {
+            this.renderSummaryTable(thead, tbody);
+            return;
+        }
+        const status = document.getElementById('home-table-status');
+        if (status) status.textContent = `按日期明细 · ${this.startDate} 至 ${this.endDate} · 金额单位 USD；横向滚动查看频道，底部可翻页`;
         dataTableLog('📊 [DataTable] tbody已清空');
         
         if (!this.tableData || !this.tableData.channels || this.tableData.channels.length === 0) {
@@ -125,6 +165,45 @@ class DataTable {
         // 使用和new-main.js完全相同的渲染逻辑
         this.renderComplexTable(thead, tbody, this.tableData);
         dataTableLog('📊 [DataTable] 复杂表格渲染完成');
+    }
+
+    escapeText(value) {
+        return String(value ?? '').replace(/[&<>"']/g, char => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        })[char]);
+    }
+
+    renderSummaryTable(thead, tbody) {
+        const snapshot = this.tableData?.rows?.[0];
+        const byChannel = new Map((snapshot?.channels_data || []).map(item => [item.channel_id, item]));
+        const search = this.summarySearch || '';
+        const rows = (this.tableData?.channels || [])
+            .filter(channel => (channel.channel_name || '').toLowerCase().includes(search))
+            .map(channel => ({ channel, data: byChannel.get(channel.channel_id) }))
+            .sort((a, b) => {
+                if (this.summarySort === 'name') return a.channel.channel_name.localeCompare(b.channel.channel_name, 'zh-CN');
+                const value = row => row.data?.has_data === false || !row.data ? -Infinity : Number(row.data[this.summarySort] || 0);
+                return value(b) - value(a);
+            });
+        const status = document.getElementById('home-table-status');
+        if (status) status.textContent = snapshot
+            ? `所选范围最新日期 ${snapshot.date} · ${rows.length} 个频道 · 空缺标记为待同步；更多日期请切换完整明细`
+            : '所选范围暂无快照';
+        thead.innerHTML = `<tr class="bg-gray-50">${['频道', '快照日期', '订阅人数', '累计播放', '新增订阅', '新增播放', '估算收入（USD）'].map((label, i) =>
+            `<th scope="col" class="px-4 py-3 ${i === 0 ? 'sticky left-0 bg-gray-50 text-left' : 'text-right'}">${label}</th>`).join('')}</tr>`;
+        tbody.innerHTML = rows.map(({ channel, data }) => {
+            const present = data && data.has_data !== false;
+            const number = key => present ? Utils.formatNumber(data[key] ?? 0) : '—';
+            return `<tr class="border-t border-gray-100 hover:bg-slate-50">
+                <td class="sticky left-0 bg-white px-4 py-3"><span class="block max-w-[220px] truncate" title="${this.escapeText(channel.channel_name)}">${this.escapeText(channel.channel_name)}</span></td>
+                <td class="px-4 py-3 text-right text-gray-500">${present ? this.escapeText(snapshot.date) : '待同步'}</td>
+                <td class="px-4 py-3 text-right">${number('subscribers')}</td>
+                <td class="px-4 py-3 text-right">${number('total_views')}</td>
+                <td class="px-4 py-3 text-right">${number('subscriber_change')}</td>
+                <td class="px-4 py-3 text-right">${number('view_change')}</td>
+                <td class="px-4 py-3 text-right font-semibold text-blue-600">${present ? Utils.formatCurrency(data.estimated_revenue ?? 0) : '—'}</td>
+            </tr>`;
+        }).join('') || '<tr><td colspan="7" class="p-8 text-center text-gray-500">暂无匹配频道</td></tr>';
     }
 
     // 复杂表格渲染方法 - 完全复制new-main.js的逻辑
@@ -168,6 +247,10 @@ class DataTable {
                     </td>
             `;
             row.channels_data.forEach((channelData, channelIndex) => {
+                if (channelData.has_data === false) {
+                    bodyHtml += '<td colspan="7" class="px-4 py-4 text-center text-gray-400 border-b border-gray-200">待同步</td>';
+                    return;
+                }
                 const subsciberChange = channelData.subscriber_change || 0;
                 const viewChange = channelData.view_change || 0;
                 const videoChange = channelData.video_change || 0;
@@ -257,10 +340,19 @@ class DataTable {
 
     // 渲染分页
     renderPagination(pagination) {
+        const home = document.getElementById('home-detail-pagination');
+        if (home) {
+            home.hidden = this.viewMode !== 'detail' || !pagination || pagination.pages <= 1;
+            if (!home.hidden) home.innerHTML = `
+                <button type="button" ${!pagination.has_prev ? 'disabled' : ''} onclick="dataTableInstance.goToPage(${pagination.page - 1})">上一页</button>
+                <span>第 ${pagination.page} / ${pagination.pages} 页（日期）</span>
+                <button type="button" ${!pagination.has_next ? 'disabled' : ''} onclick="dataTableInstance.goToPage(${pagination.page + 1})">下一页</button>`;
+            return;
+        }
         const container = document.querySelector('#table-pagination .pagination');
         if (!container) return;
 
-        if (pagination.pages <= 1) {
+        if (!pagination || pagination.pages <= 1) {
             container.innerHTML = '';
             return;
         }
@@ -302,6 +394,7 @@ class DataTable {
 
     // 跳转页面
     goToPage(page) {
+        if (page < 1 || page > (this.tableData?.pagination?.pages || 1)) return;
         this.currentPage = page;
         this.loadTableData();
     }
@@ -402,6 +495,7 @@ class DataTable {
 
     // 设置选中的频道
     setSelectedChannels(channelIds) {
+        this.explicitSelection = true;
         this.selectedChannelIds = channelIds || [];
         this.currentPage = 1; // 重置到第一页
         this.loadTableData();
@@ -446,6 +540,7 @@ function initializeDataTable() {
         if (!dataTableInstance) {
             dataTableLog('📊 [DataTable] 创建DataTable实例...');
             dataTableInstance = new DataTable();
+            window.dataTableInstance = dataTableInstance;
         } else {
             dataTableInstance.refresh();
         }
@@ -561,12 +656,13 @@ function populateCategoryFilterOptions() {
     }
 }
 
-async function loadChannelFilterCategories() {
+async function loadChannelFilterCategories(isCurrent = () => true) {
     const select = document.getElementById('categoryFilter');
     if (!select) return;
 
     try {
         const response = await api.getChannelCategories();
+        if (!isCurrent()) return;
         if (response.success && response.data && Array.isArray(response.data.categories) && response.data.categories.length) {
             channelFilterCategories = response.data.categories.filter(category => {
                 const name = category && (category.name || category.category);
@@ -577,6 +673,7 @@ async function loadChannelFilterCategories() {
             channelFilterCategories = [];
         }
     } catch (error) {
+        if (!isCurrent()) return;
         console.error('加载频道分类失败:', error);
         channelFilterCategories = [];
     }
@@ -593,33 +690,38 @@ async function openChannelFilterModal() {
     
     if (modal && content) {
         // 显式绑定全局函数，确保不会被 new-main.js 的绑定覆盖
-        window.selectAllChannels = selectAllChannels;
-        window.clearAllChannels = clearAllChannels;
-        window.toggleAllChannelSelection = toggleAllChannelSelection;
-        window.toggleChannelSelection = toggleChannelSelection;
-        window.applyChannelFilter = applyChannelFilter;
-        window.closeChannelFilterModal = closeChannelFilterModal;
+        Object.assign(window, tableChannelFilterActions);
 
-        // 显示弹层
-        modal.classList.remove('hidden');
-        setTimeout(() => {
+        let token;
+        if (window.homeChannelDialog) {
+            token = window.homeChannelDialog.open('数据表格', tableChannelFilterActions.closeChannelFilterModal);
+        } else {
+            modal.classList.remove('hidden');
             content.classList.remove('scale-95', 'opacity-0');
-            content.classList.add('scale-100', 'opacity-100');
-        }, 10);
+        }
         
         // 加载频道列表
-        await loadChannelFilterList();
+        const isCurrent = () => !window.homeChannelDialog?.isActive || window.homeChannelDialog.isActive(token);
+        await loadChannelFilterList(isCurrent);
+        if (!isCurrent()) return;
 
         // 同步加载频道分类
-        await loadChannelFilterCategories();
+        await loadChannelFilterCategories(isCurrent);
+        if (!isCurrent()) return;
         
         // 绑定搜索和分类筛选事件
         bindChannelFilterEvents();
+        window.homeChannelDialog?.setBusy?.(false);
+        window.homeChannelDialog?.focus();
     }
 }
 
 // 关闭频道筛选弹层
 function closeChannelFilterModal() {
+    if (window.homeChannelDialog) {
+        window.homeChannelDialog.close();
+        return;
+    }
     const modal = document.getElementById('channelFilterModal');
     const content = document.getElementById('channelFilterContent');
     
@@ -634,7 +736,7 @@ function closeChannelFilterModal() {
 }
 
 // 加载频道筛选列表
-async function loadChannelFilterList() {
+async function loadChannelFilterList(isCurrent = () => true) {
     try {
         const loadingEl = document.getElementById('channelFilterLoading');
         const listEl = document.getElementById('channelFilterList');
@@ -645,11 +747,13 @@ async function loadChannelFilterList() {
         let channels = [];
         if (dataTableInstance) {
             channels = await dataTableInstance.loadAllChannels();
+            if (!isCurrent()) return;
             // 复制一份，避免直接操作 DataTable 的私有状态
             channelFilterData.selectedChannelIds = [...(dataTableInstance.getSelectedChannels() || [])];
         } else {
             // 请求所有频道（包括非活跃的）用于筛选
             const response = await api.getChannels({ include_inactive: true, per_page: 1000 });
+            if (!isCurrent()) return;
             channels = response.data.channels || [];
             // 初始加载时不默认选择任何频道，除非通过 DataTable 获取
             if (!channelFilterData.selectedChannelIds || channelFilterData.selectedChannelIds.length === 0) {
@@ -658,6 +762,9 @@ async function loadChannelFilterList() {
         }
         
         channelFilterData.allChannels = channels;
+        if (!dataTableInstance?.explicitSelection && channelFilterData.selectedChannelIds.length === 0) {
+            channelFilterData.selectedChannelIds = channels.filter(channel => channel.is_active).map(channel => channel.id);
+        }
         channelFilterData.filteredChannels = channels;
 
         populateCategoryFilterOptions();
@@ -668,6 +775,7 @@ async function loadChannelFilterList() {
         updateSelectedChannelCount();
         
     } catch (error) {
+        if (!isCurrent()) return;
         console.error('加载频道列表失败:', error);
         showToast('加载频道列表失败', 'error');
     }
@@ -694,12 +802,12 @@ function renderChannelFilterList() {
         const isSelected = selectedChannelIds.includes(channel.id);
         const isActive = channel.is_active;
         return `
-            <div class="p-4 hover:bg-gray-50 transition-colors cursor-pointer ${!isActive ? 'opacity-75' : ''}" onclick="toggleChannelSelection(${channel.id})">
+            <label class="block p-4 hover:bg-gray-50 transition-colors cursor-pointer ${!isActive ? 'opacity-75' : ''}">
                 <div class="flex items-center gap-3">
                     <div class="flex-shrink-0">
                         <input type="checkbox" ${isSelected ? 'checked' : ''} 
-                               class="w-4 h-4 text-purple-600 border-gray-300 rounded focus:ring-purple-500 pointer-events-none"
-                               readonly>
+                               class="w-4 h-4 text-purple-600 border-gray-300 rounded focus:ring-purple-500"
+                               data-channel-id="${channel.id}" onchange="toggleChannelSelection(${channel.id})">
                     </div>
                     <div class="flex-1 min-w-0">
                         <div class="font-medium ${isActive ? 'text-gray-900' : 'text-gray-500'} truncate">
@@ -717,7 +825,7 @@ function renderChannelFilterList() {
                         ${isSelected ? '<i class="fas fa-check text-purple-600"></i>' : ''}
                     </div>
                 </div>
-            </div>
+            </label>
         `;
     }).join('');
     
@@ -798,6 +906,7 @@ function toggleChannelSelection(channelId) {
     
     renderChannelFilterList();
     updateSelectedChannelCount();
+    document.querySelector(`#channelFilterList input[data-channel-id="${channelId}"]`)?.focus();
 }
 
 // 全选频道
@@ -856,7 +965,7 @@ function applyChannelFilter() {
         dataTableInstance.setSelectedChannels(selectedChannelIds);
         
         if (selectedChannelIds.length === 0) {
-            showToast('已重置为显示全部频道', 'success');
+            showToast('已清空频道选择', 'success');
         } else {
             showToast(`已筛选 ${selectedChannelIds.length} 个频道`, 'success');
         }
@@ -878,8 +987,14 @@ function applyChannelFilter() {
     }
     
     // 关闭弹层
-    closeChannelFilterModal();
+    tableChannelFilterActions.closeChannelFilterModal();
 }
+
+// Keep stable references: classic-script function declarations alias window properties.
+const tableChannelFilterActions = {
+    selectAllChannels, clearAllChannels, toggleAllChannelSelection,
+    toggleChannelSelection, applyChannelFilter, closeChannelFilterModal,
+};
 
 // 导出
 if (typeof module !== 'undefined' && module.exports) {

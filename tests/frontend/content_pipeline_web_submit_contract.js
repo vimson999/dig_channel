@@ -5,11 +5,11 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..', '..');
 const htmlPath = path.join(root, 'src', 'frontend', 'content-pipeline-submit.html');
 const scriptPath = path.join(root, 'src', 'frontend', 'js', 'content-pipeline-submit.js');
-const navigationPath = path.join(root, 'src', 'frontend', 'js', 'shared-navigation.js');
+const { navigationHarness } = require('./helpers/shared-navigation-harness.cjs');
 
 const html = fs.readFileSync(htmlPath, 'utf8');
 const script = fs.readFileSync(scriptPath, 'utf8');
-const navigation = fs.readFileSync(navigationPath, 'utf8');
+const navigation = navigationHarness('/content-pipeline-submit.html').nav;
 
 assert(html.includes('选择文件夹'), 'the page must expose a folder-select mode');
 assert(html.includes('上传文件'), 'the page must expose a multi-file upload mode');
@@ -24,7 +24,7 @@ assert(script.includes("'/content-pipeline/web-submit'"), 'the page must use the
 assert(html.includes('auto publish'), 'the page must explain that the shared pipeline will auto publish after cleaning');
 assert(script.includes('selectFiles'), 'the page must render a local file preview before submission');
 
-assert(navigation.includes("'content-pipeline-submit': '网页内容投递'"), 'the page must have a navigation title');
-assert(navigation.includes("id: 'content-pipeline-submit'"), 'the page must be reachable from the shared navigation');
+assert.equal(navigation.getPageTitle(), '网页内容投递', 'the page must have a navigation title');
+assert(navigation.getMenuItems().includes('href="content-pipeline-submit.html"'), 'the page must be reachable from the shared navigation');
 
 console.log('content pipeline web submit contract: ok');

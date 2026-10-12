@@ -7,7 +7,8 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
 const html = read('src/frontend/pdf-merge-workflow.html');
 const script = read('src/frontend/js/pdf-merge-workflow.js');
-const navigation = read('src/frontend/js/shared-navigation.js');
+const { navigationHarness } = require('./helpers/shared-navigation-harness.cjs');
+const navigation = navigationHarness('/pdf-merge-workflow.html').nav;
 const pdfTools = read('src/frontend/pdf-tools.html');
 const constructorBody = script.match(/constructor\(\) \{([\s\S]*?)\n    \}/)?.[1] || '';
 
@@ -59,13 +60,11 @@ assert(
   'PDF asset area must explain explicit search and empty-search-all behavior',
 );
 assert(
-  navigation.includes("filename === 'pdf-merge-workflow.html'")
-    && navigation.includes("return 'pdf-merge-workflow'"),
+  navigation.currentPage === 'pdf-merge-workflow',
   'shared navigation must recognize the PDF merge workbench',
 );
 assert(
-  navigation.includes("id: 'pdf-merge-workflow'")
-    && navigation.includes("href: 'pdf-merge-workflow.html'"),
+  navigation.getMenuItems().includes('href="pdf-merge-workflow.html"'),
   'shared navigation must expose the PDF merge workbench',
 );
 assert(

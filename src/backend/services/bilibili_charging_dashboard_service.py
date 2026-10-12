@@ -502,15 +502,23 @@ def charging_dashboard_payload(*, days=31) -> Dict[str, Any]:
         )
         rule = _pricing_for_uid(pricing, account["uid"])
         previous_count = None
+        previous_date = None
         points = []
         latest_fetched_at = None
         for row in ordered:
-            delta = 0 if previous_count is None else row.charger_count - previous_count
+            # A daily delta needs yesterday's snapshot; a gap is not zero growth.
+            delta = (
+                row.charger_count - previous_count
+                if previous_count is not None
+                and previous_date == row.snapshot_date - timedelta(days=1)
+                else None
+            )
             previous_count = row.charger_count
+            previous_date = row.snapshot_date
             if row.snapshot_date < start_date:
                 continue
-            daily_revenue = Decimal(delta) * _decimal(rule["revenue_per_new"], 30)
-            daily_cash = daily_revenue * _decimal(rule["cash_rate"], 0.4)
+            daily_revenue = Decimal(delta) * _decimal(rule["revenue_per_new"], 30) if delta is not None else None
+            daily_cash = daily_revenue * _decimal(rule["cash_rate"], 0.4) if daily_revenue is not None else None
             monthly_income = Decimal(row.charger_count) * _decimal(
                 rule["monthly_per_charger"],
                 10,
@@ -520,8 +528,8 @@ def charging_dashboard_payload(*, days=31) -> Dict[str, Any]:
                 "date": row.snapshot_date.isoformat(),
                 "charger_count": row.charger_count,
                 "daily_growth": delta,
-                "daily_revenue": _money(daily_revenue),
-                "daily_cash": _money(daily_cash),
+                "daily_revenue": _money(daily_revenue) if daily_revenue is not None else None,
+                "daily_cash": _money(daily_cash) if daily_cash is not None else None,
                 "monthly_income": _money(monthly_income),
             })
         latest = points[-1] if points else None

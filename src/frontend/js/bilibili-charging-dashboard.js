@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    const COLORS = ['#ec4899', '#2563eb', '#f59e0b', '#10b981', '#8b5cf6', '#06b6d4'];
+    const COLORS = ['#ec4899', '#2563eb', '#f59e0b', '#10b981', '#8b5cf6', '#06b6d4', '#b45309', '#475569'];
 
     class BilibiliChargingDashboard {
         constructor() {
@@ -32,14 +32,17 @@
         }
 
         async load() {
+            const requestId = this.requestId = (this.requestId || 0) + 1;
             this.setStatus('正在加载充电人数...');
             try {
                 const response = await api.get('/bilibili-intelligence/charging-dashboard', { days: this.days });
+                if (requestId !== this.requestId) return;
                 if (!response?.success) {
                     throw new Error(response?.message || '接口返回失败');
                 }
                 this.render(response.data || {});
             } catch (error) {
+                if (requestId !== this.requestId) return;
                 console.error('[BilibiliChargingDashboard] load failed:', error);
                 this.setStatus(`加载失败：${error.message}`, true);
                 this.renderEmpty('暂时无法读取充电人数');
@@ -52,7 +55,7 @@
             const button = document.getElementById('bilibili-charging-sync');
             button?.setAttribute('disabled', 'disabled');
             button?.classList.add('opacity-60', 'cursor-not-allowed');
-            this.setStatus('正在从 B站同步 5 个 UP 主的充电人数...');
+            this.setSyncResult(`正在从 B站同步${this.accountCount ? ` ${this.accountCount} 个` : ''} UP 主的充电人数...`);
             try {
                 const response = await api.post('/bilibili-intelligence/charging-dashboard/sync', {});
                 if (!response?.success) {
@@ -60,11 +63,12 @@
                 }
                 const result = response.data || {};
                 const suffix = result.failed ? `，${result.failed} 个失败` : '';
-                this.setStatus(`同步完成：${result.synced || 0} 个成功${suffix}`);
+                const errors = (result.errors || []).map(item => `${item.name || item.uid}：${item.error}`).join('；');
+                this.setSyncResult(`同步完成：${result.synced || 0} 个成功${suffix}${errors ? `。${errors}` : ''}`, Boolean(result.failed));
                 await this.load();
             } catch (error) {
                 console.error('[BilibiliChargingDashboard] sync failed:', error);
-                this.setStatus(`同步失败：${error.message}`, true);
+                this.setSyncResult(`同步失败：${error.message}`, true);
             } finally {
                 this.loading = false;
                 button?.removeAttribute('disabled');
@@ -74,9 +78,16 @@
 
         render(payload) {
             const accounts = Array.isArray(payload.accounts) ? payload.accounts : [];
+            this.accountCount = accounts.length;
+            this.asOfDate = payload.range?.end_date || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
             const dates = Array.isArray(payload.dates) ? payload.dates : [];
             this.renderChart(accounts, dates);
             this.renderSummary(accounts);
+            const pricing = document.getElementById('bilibili-charging-pricing');
+            if (pricing) pricing.innerHTML = accounts.map(account => {
+                const rule = account.pricing || {};
+                return `<p>${this.escape(account.name)}：净增 × ¥${this.number(rule.revenue_per_new)}；估算分成 × ${this.number(Number(rule.cash_rate) * 100)}%；月收入估算 = 人数 × ¥${this.number(rule.monthly_per_charger)}</p>`;
+            }).join('');
             this.growthRankings = payload.growth_rankings && typeof payload.growth_rankings === 'object'
                 ? payload.growth_rankings
                 : {};
@@ -88,7 +99,8 @@
                 updatedElement.textContent = updated ? `最近同步 ${updated}` : '';
             }
             if (payload.has_data) {
-                this.setStatus(`已跟踪 ${accounts.length} 个 UP 主；同一天重复同步会更新当天快照`);
+                const pending = accounts.filter(account => !account.latest || account.latest.date < this.asOfDate).length;
+                this.setStatus(`已跟踪 ${accounts.length} 个 UP 主${pending ? ` · ${pending} 个今日待同步，快照日期见下表` : ' · 今日快照已齐'}；金额仅供估算`);
             } else {
                 this.setStatus('尚无快照，点击“立即同步”生成今天的第一份数据');
             }
@@ -196,8 +208,8 @@
                     symbolSize: 7,
                     connectNulls: false,
                     showSymbol: dates.length <= 31,
-                    itemStyle: { color: COLORS[index % COLORS.length] },
-                    lineStyle: { width: 2.5, color: COLORS[index % COLORS.length] },
+                    itemStyle: { color: this.accountColor(account.uid) },
+                    lineStyle: { width: 2.5, color: this.accountColor(account.uid) },
                     data: dates.map((day) => values.has(day) ? values.get(day) : null)
                 };
             });
@@ -243,19 +255,22 @@
                 body.innerHTML = '<tr><td colspan="6" class="px-6 py-8 text-center text-gray-400">情报页尚未配置监控 UP 主</td></tr>';
                 return;
             }
-            body.innerHTML = accounts.map((account, index) => {
+            body.innerHTML = [...accounts].sort((a, b) => (b.latest?.charger_count ?? -1) - (a.latest?.charger_count ?? -1)).map((account, index) => {
                 const latest = account.latest;
                 const growth = latest?.daily_growth;
                 const growthClass = growth > 0 ? 'text-emerald-600' : (growth < 0 ? 'text-rose-600' : 'text-gray-500');
-                const sourceUrl = this.escape(account.source_url || `https://space.bilibili.com/${account.uid}`);
+                const sourceUrl = this.profileUrl(account.source_url, account.uid);
+                const snapshotNote = latest ? `快照 ${latest.date}${this.asOfDate && latest.date < this.asOfDate ? ' · 今日待同步' : ''}` : '尚无快照';
                 return `
                     <tr class="hover:bg-slate-50 transition-colors">
                         <td class="px-6 py-4">
                             <a href="${sourceUrl}" target="_blank" rel="noopener noreferrer" class="flex items-center gap-3 group">
-                                <span class="w-8 h-8 rounded-lg flex items-center justify-center text-white text-xs font-bold" style="background:${COLORS[index % COLORS.length]}">${index + 1}</span>
+                                <span class="w-8 h-8 shrink-0 rounded-lg flex items-center justify-center text-white text-xs font-bold" style="background:${this.accountColor(account.uid)}">${index + 1}</span>
                                 <span>
                                     <span class="block font-semibold text-gray-800 group-hover:text-pink-600">${this.escape(account.name)}</span>
                                     <span class="block text-xs text-gray-400">UID ${this.escape(account.uid)}</span>
+                                    <span class="block text-xs text-slate-500">${this.escape(snapshotNote)}</span>
+                                    <span class="block text-xs text-slate-400">${account.last_fetched_at ? `同步 ${this.formatDateTime(account.last_fetched_at)}` : ''}</span>
                                 </span>
                             </a>
                         </td>
@@ -289,15 +304,30 @@
             element.className = `px-6 pt-5 text-sm ${isError ? 'text-rose-600' : 'text-gray-500'}`;
         }
 
+        setSyncResult(message, isError = false) {
+            const element = document.getElementById('bilibili-charging-sync-result');
+            if (!element) return;
+            element.textContent = message;
+            element.className = `px-6 pt-2 text-sm ${isError ? 'text-rose-600' : 'text-emerald-700'}`;
+        }
+
+        accountColor(uid) {
+            let hash = 2166136261;
+            for (const char of String(uid)) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619) >>> 0;
+            return `hsl(${Math.round((hash * 137.508) % 360)}, 65%, 42%)`;
+        }
+
         number(value) {
             return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(Number(value) || 0);
         }
 
         currency(value) {
+            if (value == null) return '—';
             return `¥${this.number(value)}`;
         }
 
         signed(value) {
+            if (value == null) return '—';
             const number = Number(value) || 0;
             return `${number > 0 ? '+' : ''}${this.number(number)}`;
         }

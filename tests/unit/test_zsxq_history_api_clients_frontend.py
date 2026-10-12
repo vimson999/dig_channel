@@ -42,8 +42,9 @@ class ZsxqHistoryApiClientsFrontendTests(unittest.TestCase):
     def test_navigation_exposes_the_admin_page(self):
         source = NAV_PATH.read_text(encoding="utf-8")
 
-        self.assertIn("zsxq-history-api-clients.html", source)
-        self.assertIn("'zsxq-history-api-clients': '知识星球 API 调用方'", source)
+        self.assertIn('"id": "zsxq-history-api-clients"', source)
+        self.assertIn('"name": "星球 API 调用方"', source)
+        self.assertIn('"href": "zsxq-history-api-clients.html"', source)
 
     def test_script_has_valid_javascript_syntax(self):
         result = subprocess.run(

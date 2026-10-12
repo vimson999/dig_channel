@@ -1,0 +1,59 @@
+.celery-console { --monitor-blue: #2563eb; }
+.celery-console .text-slate-400 { color: #64748b; }
+.celery-console button, .celery-console a, .celery-console input, .celery-console select { -webkit-tap-highlight-color: transparent; }
+.celery-console :is(button, a, input, select, summary, pre):focus-visible { outline: 3px solid #60a5fa; outline-offset: 3px; }
+.celery-console button:disabled { cursor: not-allowed; opacity: .45; }
+.monitor-button, .monitor-select { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; border: 1px solid #cbd5e1; border-radius: 8px; padding: 7px 12px; background: #fff; color: #475569; font-size: 12px; font-weight: 600; }
+.monitor-button:hover { background: #f8fafc; }
+.monitor-text-button { min-height: 32px; color: #2563eb; font-size: 12px; font-weight: 600; padding: 4px 8px; border-radius: 6px; }
+.monitor-text-button:hover { background: #eff6ff; }
+.monitor-danger { color: #be123c; margin-left: auto; white-space: nowrap; }
+.monitor-danger:hover { background: #fff1f2; }
+.monitor-refresh-bar, .monitor-refresh-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.monitor-refresh-bar { justify-content: space-between; margin: -4px 0 16px; font-size: 12px; color: #64748b; }
+.monitor-refresh-bar [data-stale="true"] { color: #be123c; font-weight: 600; }
+.monitor-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 20px; }
+.monitor-stat { padding: 16px 18px; background: white; border: 1px solid #e2e8f0; border-radius: 10px; }
+.monitor-stat-label { display: flex; justify-content: space-between; align-items: center; color: #64748b; font-size: 12px; }
+.monitor-stat-value { margin-top: 8px; color: #0f172a; font-size: 28px; line-height: 1.15; font-weight: 750; font-variant-numeric: tabular-nums; }
+.monitor-stat-value small { color: #64748b; font-size: 14px; font-weight: 500; }
+.monitor-stat-note { margin-top: 7px; color: #64748b; font-size: 11px; }
+.monitor-stat-alert .monitor-stat-value { color: #b45309; }
+.monitor-stat-alert { border-color: #fcd34d; background: #fffdf6; }
+.monitor-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 24px 0 20px; }
+.monitor-search { display: flex; align-items: center; gap: 10px; min-width: 220px; flex: 1; padding: 0 12px; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: #64748b; }
+.monitor-search input { width: 100%; min-width: 0; height: 38px; background: transparent; color: #0f172a; font-size: 13px; }
+.monitor-filters { display: flex; flex-wrap: wrap; gap: 3px; padding: 3px; border: 1px solid #e2e8f0; border-radius: 8px; background: #e9eef5; }
+.monitor-filters button { min-height: 32px; padding: 4px 12px; border-radius: 5px; color: #475569; font-size: 12px; white-space: nowrap; }
+.monitor-filters button[aria-pressed="true"] { background: #fff; color: #1d4ed8; box-shadow: 0 1px 3px #0f172a12; font-weight: 700; }
+.celery-service-grid, .celery-workflow-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; align-items: stretch; }
+.celery-service-card { min-width: 0; overflow-wrap: anywhere; }
+.celery-service-card[data-attention="true"] { border-color: #fcd34d; }
+.celery-service-card[data-selected="true"] { box-shadow: 0 0 0 2px #93c5fd; }
+.celery-service-desc { display: -webkit-box; min-height: 32px; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.monitor-queue { display: block; margin-top: 10px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 11px; color: #64748b; font-family: ui-monospace, SFMono-Regular, monospace; }
+.monitor-details { font-size: 12px; color: #64748b; }
+.monitor-details summary { cursor: pointer; padding: 8px 0; font-weight: 600; }
+.monitor-details[open] summary { color: #334155; }
+.monitor-watchdog-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.monitor-watchdog-actions button { min-height: 32px; }
+.monitor-empty { grid-column: 1 / -1; padding: 40px 20px; text-align: center; border: 1px dashed #cbd5e1; border-radius: 10px; background: #fff; color: #64748b; font-size: 14px; }
+.monitor-logs { scroll-margin-top: 96px; }
+.monitor-log-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+#service-list { max-height: 540px; overflow: auto; padding: 2px; }
+#log-output { overflow-wrap: anywhere; }
+@media (max-width: 1180px) { .celery-service-grid, .celery-workflow-row { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 900px) { .celery-service-grid, .celery-workflow-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } .monitor-summary { gap: 10px; } }
+@media (max-width: 600px) {
+    .celery-console { padding: 16px; }
+    .monitor-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .monitor-stat { padding: 12px; }
+    .monitor-stat-value { font-size: 25px; }
+    .celery-service-grid, .celery-workflow-row { grid-template-columns: minmax(0, 1fr); }
+    .monitor-search { flex-basis: 100%; }
+    .monitor-refresh-bar, .monitor-refresh-controls { gap: 8px; }
+    .monitor-filters { width: 100%; }
+    .monitor-filters button { flex: 1; padding: 4px 6px; }
+    #service-list { max-height: 220px; }
+    #log-output { min-height: 300px; }
+}

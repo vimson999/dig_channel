@@ -56,7 +56,7 @@ boxShadow: {
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <style>
 body {
-min-height: 1024px;
+min-height: 100vh;
 }
 .toast-container { position: fixed; top: 1rem; right: 1rem; z-index: 9999; }
 .status-bar { position: fixed; top: 0; left: 0; right: 0; z-index: 50; }
@@ -242,8 +242,9 @@ min-height: 1024px;
     .searchable-combobox__panel { width: 100%; }
 }
 </style>
+<link rel="stylesheet" href="css/videos-page.css?v=20261003-1">
 </head>
-<body class="bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 min-h-screen font-sans">
+<body class="videos-page bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 min-h-screen font-sans">
     <!-- 状态提示栏 -->
     <div id="status-bar" class="hidden status-bar bg-blue-500 text-white p-3 text-center">
         <div class="flex items-center justify-center">
@@ -258,9 +259,9 @@ min-height: 1024px;
     <!-- 导航由 shared-navigation.js 统一管理，实现真正的组件复用 -->
 
     <!-- 面包屑导航 -->
-    <div class="max-w-[1440px] mx-auto px-6 py-4">
+    <div class="video-breadcrumb max-w-[1440px] mx-auto px-6 py-4">
         <nav class="flex items-center gap-2 text-sm text-gray-500">
-            <a href="index.html" class="hover:text-primary-600 transition-colors">
+            <a href="index.html" aria-label="首页" class="hover:text-primary-600 transition-colors">
                 <i class="fas fa-home"></i>
             </a>
             <span class="mx-2">/</span>
@@ -269,28 +270,32 @@ min-height: 1024px;
     </div>
 
     <!-- 主内容区域 -->
-    <main class="max-w-[1440px] mx-auto px-6 pb-8">
+    <main class="video-workspace max-w-[1440px] mx-auto px-6 pb-8">
 
 
 
         <!-- 视频列表 -->
         <div class="bg-white rounded-xl shadow-medium border border-gray-100 overflow-hidden">
-            <div class="p-6 border-b border-gray-100">
+            <div class="video-toolbar p-6 border-b border-gray-100">
                 <!-- 搜索和功能区域 -->
                 <div class="flex flex-col gap-4">
+                    <div>
+                        <h1 class="text-xl font-bold text-gray-900">视频管理</h1>
+                        <p class="text-sm text-gray-500 mt-1">筛选频道、发现视频，随时查看详情与收藏。</p>
+                    </div>
                     <!-- 第一行：搜索框 -->
                     <div class="w-full">
                         <div class="relative">
-                            <input type="text" id="search-videos" placeholder="搜索视频标题、描述或标签..." 
+                            <input type="search" id="search-videos" aria-label="搜索视频标题、描述或标签" placeholder="搜索视频标题、描述或标签..."
                                    class="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none transition-all">
                             <i class="fas fa-search absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400"></i>
                         </div>
                     </div>
                     
                     <!-- 第二行：筛选和操作区域 -->
-                    <div class="flex flex-col xl:flex-row items-start xl:items-center gap-3">
+                    <div class="video-filters">
                         <!-- 基础筛选 -->
-                        <div class="flex flex-col sm:flex-row items-start sm:items-center gap-2">
+                        <div class="video-source-filters">
                             <select id="filter-category" class="px-3 py-2 border border-gray-300 rounded-button focus:border-primary-500 focus:ring-2 focus:ring-primary-200 focus:outline-none text-sm min-w-[140px]" aria-label="按频道分类筛选">
                                 <option value="">所有频道分类</option>
                             </select>
@@ -301,8 +306,9 @@ min-height: 1024px;
                         </div>
                         
                         <!-- 时间段和排序控件 -->
-                        <div class="flex items-center gap-2 bg-gray-50 px-3 py-2 rounded-button border border-gray-300">
-                            <label class="text-xs text-gray-600 whitespace-nowrap">时间段:</label>
+                        <div class="video-order-filters">
+                            <div class="video-select-field">
+                            <label for="time-period">时间段</label>
                             
                             <!-- 时间段选择 -->
                             <select id="time-period" class="px-2 py-1 border border-gray-200 rounded text-xs focus:border-primary-500 focus:ring-1 focus:ring-primary-200 focus:outline-none min-w-[80px]">
@@ -314,9 +320,9 @@ min-height: 1024px;
                                 <option value="90">最近90天</option>
                                 <option value="365">最近1年</option>
                             </select>
-                            
-                            <span class="text-xs text-gray-400">|</span>
-                            <label class="text-xs text-gray-600 whitespace-nowrap">排序:</label>
+                            </div>
+                            <div class="video-select-field">
+                            <label for="sort-rule">排序</label>
                             
                             <!-- 排序规则 -->
                             <select id="sort-rule" class="px-2 py-1 border border-gray-200 rounded text-xs focus:border-primary-500 focus:ring-1 focus:ring-primary-200 focus:outline-none min-w-[80px]">
@@ -329,38 +335,43 @@ min-height: 1024px;
                                 <option value="comment_count:desc">评论最多</option>
                                 <option value="comment_count:asc">评论最少</option>
                             </select>
-                        </div>
-                        
-                        <!-- 操作按钮组 -->
-                        <div class="flex items-center gap-2 ml-auto">
-                            <button onclick="clearFilters()" class="px-3 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-button hover:bg-gray-50 transition-colors" title="清除筛选">
-                                <i class="fas fa-times"></i>
-                            </button>
-                            
-                            <button onclick="refreshVideos()" class="px-3 py-2 text-gray-600 hover:text-primary-600 hover:bg-primary-50 rounded-button transition-colors" title="刷新列表">
-                                <i class="fas fa-sync-alt"></i>
-                            </button>
-                            
-                            <button onclick="syncAllVideos()" class="flex items-center gap-2 bg-gradient-to-r from-green-500 to-green-600 text-white px-3 py-2 rounded-button font-medium shadow-lg hover:from-green-600 hover:to-green-700 hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200 text-sm">
-                                <i class="fas fa-sync-alt text-xs"></i>
-                                同步
-                            </button>
-                            
-                            <button onclick="cleanShortVideos()" class="flex items-center gap-2 bg-gradient-to-r from-red-500 to-red-600 text-white px-3 py-2 rounded-button font-medium shadow-lg hover:from-red-600 hover:to-red-700 hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200 text-sm">
-                                <i class="fas fa-trash text-xs"></i>
-                                清理短视频
-                            </button>
-                            
-                            <div class="text-sm text-gray-500 ml-2">
-                                共 <span id="videos-count">0</span> 个
                             </div>
+                        </div>
+                    </div>
+                    <div class="video-results-toolbar">
+                        <p class="video-result-count text-sm text-gray-500" role="status" aria-live="polite" aria-atomic="true">
+                            当前结果 <strong id="videos-count" class="text-gray-800">—</strong> 个视频
+                        </p>
+                        <!-- 操作按钮组 -->
+                        <div class="video-toolbar-actions">
+                            <button type="button" onclick="clearFilters()" class="video-action" title="恢复最近 7 天、最新发布，并清空其他条件">
+                                <i class="fas fa-times" aria-hidden="true"></i>重置筛选
+                            </button>
+                            
+                            <button type="button" onclick="refreshVideos()" class="video-action">
+                                <i class="fas fa-sync-alt" aria-hidden="true"></i>刷新
+                            </button>
+                            
+                            <button type="button" onclick="syncAllVideos()" class="video-action video-action-primary">
+                                <i class="fas fa-sync-alt" aria-hidden="true"></i>同步视频
+                            </button>
+                            
+                            <details id="video-management-menu" class="video-management-menu">
+                                <summary class="video-action"><i class="fas fa-ellipsis" aria-hidden="true"></i>管理</summary>
+                                <div class="video-management-panel">
+                                    <p>以下操作影响全部视频，不限于当前筛选。</p>
+                                    <button type="button" onclick="cleanShortVideos()" class="video-action video-action-danger">
+                                        <i class="fas fa-trash" aria-hidden="true"></i>清理短视频
+                                    </button>
+                                </div>
+                            </details>
                         </div>
                     </div>
                 </div>
             </div>
             
             <!-- 视频卡片网格 -->
-            <div id="videos-grid" class="p-6">
+            <div id="videos-grid" class="p-6" aria-label="视频列表" aria-busy="true">
                 <!-- 加载状态 -->
                 <div class="flex flex-col items-center justify-center py-12">
                     <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600 mb-4"></div>
@@ -369,11 +380,11 @@ min-height: 1024px;
             </div>
             
             <!-- 分页 -->
-            <div id="pagination" class="px-6 py-4 border-t border-gray-200 bg-gray-50 flex items-center justify-between">
+            <div id="pagination" hidden class="px-6 py-4 border-t border-gray-200 bg-gray-50 flex items-center justify-between">
                 <div class="text-sm text-gray-500">
-                    显示第 <span id="page-start">1</span> - <span id="page-end">20</span> 条，共 <span id="total-records">0</span> 条记录
+                    显示第 <span id="page-start">0</span> - <span id="page-end">0</span> 条，共 <span id="total-records">0</span> 条记录
                 </div>
-                <div class="flex items-center gap-2">
+                <nav class="video-pagination-actions flex items-center gap-2" aria-label="视频分页">
                     <button id="prev-page" onclick="changePage(-1)" disabled class="px-3 py-2 border border-gray-300 rounded-button text-sm text-gray-500 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
                         <i class="fas fa-chevron-left mr-1"></i>上一页
                     </button>
@@ -383,26 +394,26 @@ min-height: 1024px;
                     <button id="next-page" onclick="changePage(1)" disabled class="px-3 py-2 border border-gray-300 rounded-button text-sm text-gray-500 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
                         下一页 <i class="fas fa-chevron-right ml-1"></i>
                     </button>
-                </div>
+                </nav>
             </div>
         </div>
     </main>
 
     <!-- 视频详情模态框 -->
-    <div id="videoDetailModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm hidden flex items-center justify-center z-50 p-4">
-        <div class="bg-white rounded-2xl shadow-strong max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto transform transition-all duration-300 scale-95 opacity-0" id="videoModalContent">
-            <div class="p-6 border-b border-gray-100">
+    <div id="videoDetailModal" role="dialog" aria-modal="true" aria-labelledby="video-detail-title" class="fixed inset-0 bg-black/60 backdrop-blur-sm hidden flex items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-2xl shadow-strong max-w-4xl w-full" id="videoModalContent">
+            <div class="video-detail-header p-6 border-b border-gray-100">
                 <div class="flex items-center justify-between">
                     <div class="flex items-center gap-3">
                         <div class="w-10 h-10 bg-gradient-to-br from-purple-500 to-purple-600 rounded-xl flex items-center justify-center">
                             <i class="fas fa-play text-white"></i>
                         </div>
                         <div>
-                            <h3 class="text-xl font-bold text-gray-800">视频详情</h3>
+                            <h2 id="video-detail-title" class="text-xl font-bold text-gray-800">视频详情</h2>
                             <p class="text-sm text-gray-600">查看视频详细信息和数据</p>
                         </div>
                     </div>
-                    <button onclick="closeVideoDetailModal()" class="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
+                    <button id="video-detail-close" type="button" aria-label="关闭视频详情" onclick="closeVideoDetailModal()" class="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
                         <i class="fas fa-times text-lg"></i>
                     </button>
                 </div>
@@ -509,7 +520,7 @@ min-height: 1024px;
     <script src="js/utils.js"></script>
     <script src="js/api.js"></script>
     <script src="js/searchable-combobox.js?v=20260914c"></script>
-    <script src="js/video-management.js?v=20260914c"></script>
-    <script src="js/shared-navigation.js"></script>
+    <script src="js/video-management.js?v=20261003-1"></script>
+    <script src="js/shared-navigation.js?v=20261004-navigation-2"></script>
 </body>
 </html>

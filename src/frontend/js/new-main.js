@@ -15,7 +15,7 @@ class YouTubeDataApp {
         this.channels = [];
         this.chartData = {};
         this.chartMeta = {};
-        this.selectedChartChannelIds = []; // 选中的图表频道ID
+        this.selectedChartChannelIds = null; // null: 自动 Top 5；[]: 明确不选频道
         this.channelCategories = [];
         this.channelCategoryDefaults = {};
         this.defaultChannelCpm = 2.5;
@@ -45,26 +45,40 @@ class YouTubeDataApp {
         // 绑定事件
         this.bindEvents();
 
-        // 预加载频道分类与默认CPM
-        await this.loadChannelMetadata();
-
-        // 初始化Dashboard（排行榜功能）
-        if (typeof Dashboard !== 'undefined') {
-            this.dashboard = new Dashboard();
-            console.log('✅ [Main] Dashboard已初始化');
-        }
-        
-        // 加载初始数据
-        await this.loadInitialData();
+        // 首页只保留一个加载入口，分类元数据不阻塞图表和排行榜。
+        await Promise.all([this.loadChannelMetadata(), this.loadInitialData()]);
 
         if (typeof initializeDataTable === 'function') {
             initializeDataTable();
         }
+        this.startAutoRefresh();
         
         console.log('✅ 应用初始化完成');
     }
 
+    startAutoRefresh() {
+        if (this.refreshPoller || !window.VisibilityPolling) return;
+        this.refreshPoller = window.VisibilityPolling.create({
+            intervalMs: 5 * 60 * 1000,
+            poll: () => Promise.all([
+                this.loadRankings(), this.loadChartData(),
+                window.dataTableInstance?.loadTableData(),
+                window.bilibiliChargingDashboard?.load(),
+            ]),
+        });
+        this.refreshPoller.start();
+    }
+
     bindEvents() {
+        window.addEventListener('resize', () => this.chart?.resize());
+        document.getElementById('chart-metric')?.addEventListener('change', (event) => {
+            this.chartMetric = event.target.value;
+            this.loadChartData();
+        });
+        document.getElementById('chart-reset')?.addEventListener('click', () => {
+            this.selectedChartChannelIds = null;
+            this.loadChartData();
+        });
         // 时间范围选择
         const timeRangeSelect = document.getElementById('time-range');
         if (timeRangeSelect) {
@@ -219,6 +233,7 @@ class YouTubeDataApp {
     }
 
     formatChartValue(value) {
+        if (value == null || value === '-') return '待同步';
         const numeric = typeof value === 'number' ? value : Number(value) || 0;
         switch (this.chartMetric) {
             case 'revenue':
@@ -300,21 +315,29 @@ class YouTubeDataApp {
             // 设置当前筛选模式为图表
             this.channelFilterMode = 'chart';
             
-            // 显示弹层
-            modal.classList.remove('hidden');
-            setTimeout(() => {
-                content.classList.remove('scale-95', 'opacity-0');
-                content.classList.add('scale-100', 'opacity-100');
-            }, 10);
+            const token = window.homeChannelDialog?.open('图表', () => this.closeFilterModal());
+            this.filterDialogToken = token;
+            const isCurrent = () => !window.homeChannelDialog?.isActive || window.homeChannelDialog.isActive(token);
 
             // 初始化筛选数据（如果还没有的话）
-            if (!this.allChannelsForFilter || this.allChannelsForFilter.length === 0) {
-                const response = await api.getChannels({ include_inactive: true, per_page: 1000 });
-                this.allChannelsForFilter = response.data.channels || [];
+            try {
+                if (!this.allChannelsForFilter || this.allChannelsForFilter.length === 0) {
+                    const response = await api.getChannels({ per_page: 1000 });
+                    if (!isCurrent()) return;
+                    if (!response?.success) throw new Error(response?.message || '频道列表加载失败');
+                    this.allChannelsForFilter = response.data.channels || [];
+                }
+            } catch (error) {
+                if (!isCurrent()) return;
+                this.showToast('频道列表加载失败，请关闭后重试', 'error');
+                this.closeFilterModal();
+                return;
             }
+            if (!isCurrent()) return;
             
-            // 同步当前选中的频道 (如果为空则代表全选，我们不再默认全选，而是从空开始)
-            this.tempSelectedIds = [...(this.selectedChartChannelIds || [])];
+            this.tempSelectedIds = this.selectedChartChannelIds === null
+                ? this.getVisibleChartSeries().map(series => series.id)
+                : [...this.selectedChartChannelIds];
             
             this.filterSearchTerm = '';
             this.filterSelectedCategory = '';
@@ -326,6 +349,8 @@ class YouTubeDataApp {
             
             // 绑定弹层内特有的临时事件
             this.bindFilterModalEvents();
+            window.homeChannelDialog?.setBusy?.(false);
+            window.homeChannelDialog?.focus();
         }
     }
 
@@ -393,37 +418,36 @@ class YouTubeDataApp {
             return matchesSearch && matchesCategory && matchesStatus;
         });
 
+        this.currentFilteredIds = filtered.map(c => c.id);
         if (filtered.length === 0) {
             listEl.innerHTML = '<div class="p-8 text-center text-gray-500">没有找到匹配的频道</div>';
             return;
         }
 
-        this.currentFilteredIds = filtered.map(c => c.id);
-
         const html = filtered.map(channel => {
             const isSelected = this.tempSelectedIds.includes(channel.id);
             const isActive = channel.is_active;
             return `
-                <div class="p-4 hover:bg-gray-50 transition-colors cursor-pointer ${!isActive ? 'opacity-75' : ''}" onclick="toggleChannelSelection(${channel.id})">
+                <label class="block p-4 hover:bg-gray-50 transition-colors cursor-pointer ${!isActive ? 'opacity-75' : ''}">
                     <div class="flex items-center gap-3">
                         <div class="flex-shrink-0">
                             <input type="checkbox" ${isSelected ? 'checked' : ''} 
-                                   class="w-4 h-4 text-purple-600 border-gray-300 rounded focus:ring-purple-500 pointer-events-none"
-                                   readonly>
+                                   class="w-4 h-4 text-purple-600 border-gray-300 rounded focus:ring-purple-500"
+                                   data-channel-id="${channel.id}" onchange="toggleChannelSelection(${channel.id})" aria-label="选择 ${this.sanitizeTooltipText(channel.name || channel.channel_name)}">
                         </div>
                         <div class="flex-1 min-w-0">
                             <div class="font-medium ${isActive ? 'text-gray-900' : 'text-gray-500'} truncate">
-                                ${channel.name || channel.channel_name}
+                                ${this.sanitizeTooltipText(channel.name || channel.channel_name)}
                                 ${!isActive ? '<span class="text-xs text-gray-400 ml-2">(已暂停)</span>' : ''}
                             </div>
                             <div class="text-sm text-gray-500 flex items-center gap-2">
                                 <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${isActive ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}">
-                                    ${isActive ? '活跃' : '暂停'} • ${channel.category || '未分类'}
+                                    ${isActive ? '活跃' : '暂停'} • ${this.sanitizeTooltipText(channel.category || '未分类')}
                                 </span>
                             </div>
                         </div>
                     </div>
-                </div>
+                </label>
             `;
         }).join('');
 
@@ -439,6 +463,7 @@ class YouTubeDataApp {
         }
         this.renderFilterList();
         this.updateFilterCount();
+        document.querySelector(`#channelFilterList input[data-channel-id="${id}"]`)?.focus();
     }
 
     filterSelectAll() {
@@ -478,6 +503,10 @@ class YouTubeDataApp {
     }
 
     closeFilterModal() {
+        if (window.homeChannelDialog) {
+            window.homeChannelDialog.close();
+            return;
+        }
         const modal = document.getElementById('channelFilterModal');
         const content = document.getElementById('channelFilterContent');
         if (modal && content) {
@@ -491,12 +520,15 @@ class YouTubeDataApp {
     }
 
     async applyChartChannelFilter() {
+        const token = this.filterDialogToken;
         this.selectedChartChannelIds = [...this.tempSelectedIds];
         this.showLoading('正在更新图表...');
         try {
-            await this.loadChartData();
+            const loaded = await this.loadChartData();
             this.hideLoading();
-            this.showToast(this.selectedChartChannelIds.length === 0 ? '已重置为显示全部频道' : `已筛选 ${this.selectedChartChannelIds.length} 个频道`, 'success');
+            if (loaded === false) return;
+            if (window.homeChannelDialog?.isActive && !window.homeChannelDialog.isActive(token)) return;
+            this.showToast(`已筛选 ${this.selectedChartChannelIds.length} 个频道`, 'success');
             this.closeFilterModal();
         } catch (error) {
             this.hideLoading();
@@ -528,9 +560,10 @@ class YouTubeDataApp {
 
     async loadChannels() {
         try {
-            const response = await api.getChannels();
+            const response = await api.getChannels({ per_page: 1000 });
             if (response.success) {
                 this.channels = response.data.channels;
+                this.allChannelsForFilter = this.channels.filter(channel => channel.is_active);
                 return true;
             }
             return false;
@@ -547,9 +580,12 @@ class YouTubeDataApp {
                 this.updateRankings(response.data);
                 return true;
             }
-            return false;
+            throw new Error(response.message || '排行榜接口返回失败');
         } catch (error) {
             console.error('加载排行榜失败:', error);
+            for (const type of ['daily-revenue', 'monthly-revenue', 'daily-subscriber', 'monthly-subscriber']) {
+                this.renderRanking(`${type}-ranking`, [], type.includes('revenue') ? 'revenue' : 'subscriber', '加载失败，请点击刷新重试');
+            }
             return false;
         }
     }
@@ -745,17 +781,19 @@ class YouTubeDataApp {
         this.renderRanking('monthly-subscriber-ranking', data.monthly_subscriber?.rankings || [], 'subscriber');
     }
 
-    renderRanking(containerId, rankings, type) {
+    renderRanking(containerId, rankings, type, emptyMessage = '所选周期暂无数据') {
         const container = document.getElementById(containerId);
         if (!container) return;
+        const rankingType = containerId.replace('-ranking', '').replaceAll('-', '_');
+        const detailLink = `<a href="rankings.html?type=${rankingType}" class="ranking-more">查看全部 <i class="fas fa-arrow-right text-xs" aria-hidden="true"></i></a>`;
 
         if (!rankings || rankings.length === 0) {
             container.innerHTML = `
-                <div class="text-center text-gray-400 py-8">
+                <div class="text-center text-gray-400 py-3">
                     <i class="fas fa-chart-line text-2xl mb-2 opacity-50"></i>
-                    <div>暂无数据</div>
+                    <div>${this.sanitizeTooltipText(emptyMessage)}</div><div class="text-xs mt-1">缺失数据不会计作零</div>
                 </div>
-            `;
+            ` + detailLink;
             return;
         }
 
@@ -777,11 +815,11 @@ class YouTubeDataApp {
             return '';
         };
 
-        const html = rankings.map((item, index) => {
+        const html = rankings.slice(0, 10).map((item, index) => {
             const rank = index + 1;
             const value = type === 'revenue' 
-                ? Utils.formatCurrency(item.revenue || item.total_revenue)
-                : Utils.formatChange(item.subscriber_change || item.total_subscriber_change, true);
+                ? Utils.formatCurrency(item.revenue ?? item.total_revenue ?? 0)
+                : Utils.formatChange(item.subscriber_change ?? item.total_subscriber_change ?? 0, true);
 
             const isTop3 = rank <= 3;
             const cardClass = isTop3 
@@ -802,15 +840,15 @@ class YouTubeDataApp {
             return `
                 <a href="${videoPageUrl}" class="ranking-item ${cardClass} rounded-lg p-3 transition-all duration-200 cursor-pointer hover:shadow-md transform hover:-translate-y-0.5 block">
                     <div class="flex items-center justify-between">
-                        <div class="flex items-center gap-3">
-                            <div class="w-8 h-8 flex items-center justify-center">
+                        <div class="flex items-center gap-2 min-w-0 flex-1">
+                            <div class="w-6 h-8 shrink-0 flex items-center justify-center">
                                 ${getRankIcon(rank)}
                             </div>
-                            <span class="${channelClass} truncate max-w-[120px]" title="${item.channel_name}">
-                                ${item.channel_name}
+                            <span class="${channelClass} truncate" title="${this.sanitizeTooltipText(item.channel_name)}">
+                                ${this.sanitizeTooltipText(item.channel_name)}
                             </span>
                         </div>
-                        <div class="flex items-center">
+                        <div class="flex items-center shrink-0 ml-2 tabular-nums">
                             <span class="${valueClass}">${value}</span>
                             ${getTrendIcon(value, type)}
                         </div>
@@ -819,10 +857,12 @@ class YouTubeDataApp {
             `;
         }).join('');
 
-        container.innerHTML = `<div class="space-y-3">${html}</div>`;
+        container.innerHTML = `<div class="space-y-2">${html}</div>${detailLink}`;
     }
 
     async loadChartData() {
+        const requestId = this.chartRequestId = (this.chartRequestId || 0) + 1;
+        this.chartError = null;
         try {
             const params = {
                 time_range: this.currentTimeRange,
@@ -839,22 +879,42 @@ class YouTubeDataApp {
             }
 
             const response = await api.getChartData(this.chartMetric, params);
+            if (requestId !== this.chartRequestId) return false;
 
             if (response.success && response.data) {
                 const { chart_data: chartData, ...meta } = response.data;
                 this.chartData = chartData || {};
                 this.chartMeta = meta || {};
                 this.refreshChart();
+                return true;
             } else {
                 this.chartData = { dates: [], series: [] };
+                this.chartMeta = {};
+                this.chartError = response.message || '所选频道暂无可用数据';
                 this.refreshChart();
+                return false;
             }
         } catch (error) {
+            if (requestId !== this.chartRequestId) return false;
             console.error('加载图表数据失败:', error);
             this.chartData = { dates: [], series: [] };
+            this.chartMeta = {};
+            this.chartError = '加载失败，请调整筛选或点击刷新重试';
             this.refreshChart();
             this.showToast('加载图表数据失败: ' + (error.message || '服务器内部错误'), 'error');
+            return false;
         }
+    }
+
+    getVisibleChartSeries() {
+        const series = (this.chartData.series || []).map(item => ({
+            ...item, id: item.id ?? (this.allChannelsForFilter || this.channels).find(channel => channel.channel_id === item.channel_id)?.id,
+        }));
+        if (this.selectedChartChannelIds === null) {
+            const last = item => [...(item.data || [])].reverse().find(value => value != null) ?? -Infinity;
+            return [...series].sort((a, b) => last(b) - last(a)).slice(0, 5);
+        }
+        return series.filter(item => this.selectedChartChannelIds.includes(item.id));
     }
 
     refreshChart() {
@@ -863,9 +923,18 @@ class YouTubeDataApp {
         }
 
         const isPieChart = this.currentChartType === 'pie';
-        const legendData = Array.isArray(this.chartData.series)
-            ? this.chartData.series.map(series => series.name)
-            : [];
+        const visibleSeries = this.getVisibleChartSeries();
+        const legendData = visibleSeries.map(series => series.name);
+        const metricTitle = { revenue: '估算收入（USD）', subscribers: '订阅人数', views: '累计播放量' }[this.chartMetric];
+        const status = document.getElementById('chart-data-status');
+        if (status) {
+            const latest = this.chartMeta.latest_data_date;
+            const freshness = 'latest_data_date' in this.chartMeta
+                ? (latest ? `范围内最新快照 ${latest}` : '所选范围暂无快照')
+                : '后端尚未提供快照日期，请重启后端以启用缺失值识别';
+            status.textContent = `${this.selectedChartChannelIds === null ? '自动 Top 5' : '自选频道'} · 显示 ${visibleSeries.length} 个频道 · ${freshness}${'latest_data_date' in this.chartMeta ? ' · 缺失数据留空，不计为 0' : ''}${this.chartMeta.pending_channels ? ` · ${this.chartMeta.pending_channels} 个频道今日待同步` : ''}`;
+            if (this.chartError) status.textContent = this.chartError;
+        }
 
         const tooltipFormatter = (params) => {
             if (Array.isArray(params)) {
@@ -930,7 +999,7 @@ class YouTubeDataApp {
 
         const option = {
             animation: false,
-            title: { text: '频道数据趋势' },
+            title: { text: isPieChart ? `${metricTitle} · 各频道最新有效值` : metricTitle, textStyle: { fontSize: 14 } },
             tooltip: {
                 trigger: isPieChart ? 'item' : 'axis',
                 formatter: tooltipFormatter,
@@ -939,11 +1008,13 @@ class YouTubeDataApp {
                 extraCssText: 'max-height:540px;max-width:780px;overflow:auto;border-radius:18px;border:1px solid rgba(148,163,184,0.45);box-shadow:0 20px 48px rgba(15,23,42,0.2);padding:18px 22px 20px;background:rgba(255,255,255,0.98);color:#1f2937;'
             },
             legend: {
+                type: 'scroll', top: 32, left: 8, right: 8,
                 data: legendData
             },
             grid: {
                 left: '3%',
                 right: '4%',
+                top: 90,
                 bottom: '3%',
                 containLabel: true
             }
@@ -951,7 +1022,7 @@ class YouTubeDataApp {
 
         if (isPieChart) {
             // 取每个系列最后一个非空值用于饼图展示
-            const pieData = (this.chartData.series || []).map(series => {
+            const pieData = visibleSeries.filter(series => series.data.some(value => value != null)).map(series => {
                 const dataPoints = Array.isArray(series.data) ? [...series.data] : [];
                 let value = 0;
                 while (dataPoints.length) {
@@ -988,11 +1059,12 @@ class YouTubeDataApp {
                 }
             };
 
-            option.yAxis = { type: 'value' };
+            option.yAxis = { type: 'value', name: this.chartMetric === 'revenue' ? 'USD' : (this.chartMetric === 'subscribers' ? '人' : '次') };
 
-            option.series = (this.chartData.series || []).map(series => ({
+            option.series = visibleSeries.map(series => ({
                 name: series.name,
                 type: this.currentChartType,
+                connectNulls: false,
                 data: series.data
             }));
         }
@@ -1165,6 +1237,7 @@ class YouTubeDataApp {
     // 刷新数据
     async refreshData() {
         await this.loadInitialData();
+        await window.dataTableInstance?.loadTableData();
         this.showToast('数据已刷新', 'success');
     }
 
