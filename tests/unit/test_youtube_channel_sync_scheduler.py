@@ -191,6 +191,81 @@ class YouTubeChannelSyncScheduleTest(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(events, ["workflow_started", "sync_completed"])
 
+    def test_partial_sync_notification_keeps_failed_channel_details(self):
+        sync_result = {
+            "success": True,
+            "message": "并行同步完成，共处理 2 个频道，成功 1 个，失败 1 个。",
+            "data": {
+                "total_channels": 2,
+                "success_count": 1,
+                "failed_count": 1,
+                "results": [
+                    {
+                        "channel_id": 21,
+                        "channel_name": "Smartpet Video AI",
+                        "success": False,
+                        "message": "无法获取频道统计数据",
+                        "data": None,
+                    },
+                    {
+                        "channel_id": 1,
+                        "channel_name": "正常频道",
+                        "success": True,
+                        "message": "频道数据同步成功",
+                        "data": {"subscribers": 1},
+                    },
+                ],
+                "max_workers": 5,
+                "duration_seconds": 1.2,
+            },
+        }
+        notifications = []
+        fake_service = Mock()
+        fake_service.sync_all_channels_parallel.return_value = sync_result
+
+        with (
+            patch.object(
+                runner,
+                "load_schedule_config",
+                return_value={
+                    "enabled": True,
+                    "daily_at": "00:03",
+                    "timezone": "Asia/Shanghai",
+                    "notify_milestones": True,
+                    "use_parallel": True,
+                    "max_workers": 5,
+                    "active_only": True,
+                },
+            ),
+            patch.object(
+                runner,
+                "OptimizedChannelSyncService",
+                return_value=fake_service,
+            ),
+            patch.object(
+                runner,
+                "_enqueue_notification",
+                side_effect=lambda event_type, **kwargs: notifications.append(
+                    (event_type, kwargs)
+                ),
+            ),
+            patch.object(runner, "release_db_session_quietly"),
+        ):
+            runner._run_once(self.app, "test")
+
+        event_type, payload = notifications[-1]
+        self.assertEqual(event_type, "sync_failed")
+        self.assertEqual(
+            payload["summary"]["failures"],
+            [
+                {
+                    "channel_id": 21,
+                    "channel_name": "Smartpet Video AI",
+                    "message": "无法获取频道统计数据",
+                }
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

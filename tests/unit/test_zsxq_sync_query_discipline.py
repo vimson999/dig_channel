@@ -554,6 +554,86 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
             [str(Path("/tmp/clean/report.pdf").resolve())],
         )
 
+    def test_explicit_empty_publish_source_refs_skip_legacy_clean_task_payload_query(self):
+        db.session.add(PublicationTask(
+            id="clean-1",
+            status="completed",
+            feature="content_pdf_clean",
+            params={"content_pipeline": {"metadata": {"files": []}}},
+            result={"cleaned_files": []},
+        ))
+        db.session.commit()
+        db.session.remove()
+
+        service = ZsxqSyncService()
+        snapshot = SimpleNamespace(
+            id="publish-1",
+            status="completed",
+            feature="zsxq_clean_output_publish",
+            source_task_id="clean-1",
+            params={
+                "feature": "zsxq_clean_output_publish",
+                "zsxq_publish": {
+                    "source_task_id": "clean-1",
+                    "metadata": {"source_refs": []},
+                },
+            },
+            result={"status": "completed", "submitted_count": 1},
+            completed_at=None,
+            updated_at=None,
+        )
+
+        with patch.object(service, "_sync_tables_ready", return_value=True), \
+             patch.object(
+                 service,
+                 "_apply_publish_context_to_attachments",
+                 return_value={"updated": 0, "matched": 0},
+             ) as apply_context:
+            with self._capture_sql() as statements:
+                result = service.update_attachment_publish_status_from_publish_task(snapshot)
+
+        self.assertEqual(result, {"updated": 0, "matched": 0})
+        self.assertFalse(any(" from publication_tasks " in sql for sql in statements), statements)
+        self.assertEqual(apply_context.call_args.args[0]["source_refs"], [])
+
+    def test_recent_publish_context_treats_explicit_empty_source_refs_as_authoritative(self):
+        db.session.add_all([
+            PublicationTask(
+                id="clean-1",
+                status="completed",
+                feature="content_pdf_clean",
+                params={"content_pipeline": {"metadata": {"files": []}}},
+                result={"cleaned_files": []},
+            ),
+            PublicationTask(
+                id="publish-1",
+                status="completed",
+                feature="zsxq_clean_output_publish",
+                source_task_id="clean-1",
+                params={
+                    "feature": "zsxq_clean_output_publish",
+                    "zsxq_publish": {
+                        "source_task_id": "clean-1",
+                        "metadata": {"source_refs": []},
+                    },
+                },
+                result={"status": "completed", "submitted_count": 1},
+            ),
+        ])
+        db.session.commit()
+        db.session.remove()
+
+        service = ZsxqSyncService()
+        with self._capture_sql() as statements:
+            contexts = service._recent_publish_status_context()
+
+        publication_task_selects = [
+            sql for sql in statements if " from publication_tasks " in sql
+        ]
+        self.assertEqual(len(publication_task_selects), 1, statements)
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(contexts[0]["source_refs"], [])
+
     def test_publish_attachment_status_loads_all_source_refs_in_one_query(self):
         for index in range(9):
             attachment = self._add_downloaded_attachment(

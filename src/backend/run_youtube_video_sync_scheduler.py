@@ -164,6 +164,15 @@ def _run_once(app, trigger):
 
             data = result.get("data") or {}
             errors = int(data.get("errors") or 0)
+            failures = [
+                {
+                    "channel_id": item.get("channel_id"),
+                    "channel_name": item.get("channel_name"),
+                    "message": str(item.get("message") or "同步失败")[:300],
+                }
+                for item in (data.get("details") or [])
+                if item.get("status") == "error"
+            ][:10]
             succeeded = bool(result.get("success")) and errors == 0
             status = "completed" if succeeded else (
                 "partial" if result.get("success") else "failed"
@@ -174,6 +183,7 @@ def _run_once(app, trigger):
                 "new_videos": data.get("new_videos", 0),
                 "updated_videos": data.get("updated_videos", 0),
                 "errors": errors,
+                "failures": failures,
                 "requested_max_workers": config["max_workers"],
             }
             _enqueue_notification(
@@ -186,6 +196,8 @@ def _run_once(app, trigger):
                 enabled=notify,
             )
             LOGGER.info("YouTube video sync finished: %s", summary)
+            if failures:
+                LOGGER.warning("YouTube video sync failures: %s", failures)
             print(
                 json.dumps(
                     {"success": result.get("success"), "message": result.get("message"), **summary},

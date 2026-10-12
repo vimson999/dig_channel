@@ -34,13 +34,16 @@ LOCK_PATH = PROJECT_ROOT / "runtime" / "bilibili_intelligence_scheduler.lock"
 SCHEDULE_TAG = "bilibili-intelligence-sync"
 STOP_REQUESTED = False
 
-LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler(LOG_PATH), logging.StreamHandler()],
-)
 LOGGER = logging.getLogger("bilibili_intelligence_scheduler")
+
+
+def _configure_logging():
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[logging.FileHandler(LOG_PATH), logging.StreamHandler()],
+    )
 
 
 def _acquire_singleton_lock():
@@ -235,6 +238,7 @@ def _run_scheduler():
 
 
 def main():
+    _configure_logging()
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
     mode = str(sys.argv[1] if len(sys.argv) > 1 else "start").strip().lower()

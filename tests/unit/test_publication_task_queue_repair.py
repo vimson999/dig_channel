@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from flask import Flask
 from sqlalchemy import event
@@ -68,6 +68,38 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
             "closed": 0,
             "items": [],
         })
+
+    def test_queue_visibility_logs_depth_and_scan_truncation_when_message_is_missing(self):
+        client = MagicMock()
+        client.llen.side_effect = [3, 0, 0, 0, 0]
+        client.lrange.side_effect = [[b"other-message"], [], [], [], []]
+        client.hlen.return_value = 4
+        client.hscan_iter.return_value = iter([(b"delivery", b"other-unacked")])
+
+        with patch.object(
+            publisher_queue_repair.redis.Redis,
+            "from_url",
+            return_value=client,
+        ), patch.dict(
+            os.environ,
+            {"PUBLISHER_CHILD_ORPHAN_QUEUE_SCAN_LIMIT": "1"},
+        ), self.assertLogs(
+            publisher_queue_repair.logger,
+            level="INFO",
+        ) as captured:
+            visible, checked = publisher_queue_repair._message_visible_in_queue(
+                "missing-celery-id",
+                child_id="child-1",
+                queue="render",
+            )
+
+        self.assertFalse(visible)
+        self.assertTrue(checked)
+        log_text = "\n".join(captured.output)
+        self.assertIn("queue_depths=render:3", log_text)
+        self.assertIn("queue_scan_truncated=true", log_text)
+        self.assertIn("unacked_depth=4", log_text)
+        self.assertIn("unacked_scan_truncated=true", log_text)
 
     def _task(self, *, feature="content_audio_clean", step="init", minutes_old=10):
         now = datetime.utcnow()
@@ -1206,6 +1238,114 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         repair = updated.result["processing_orphan_repair"]
         self.assertEqual(repair["previous_celery_id"], "old-render-celery-id")
         self.assertEqual(repair["previous_step"], "v_synthesis")
+
+    def test_pending_repair_fails_closed_when_required_materials_are_unavailable(self):
+        _, child = self._parent_with_publisher_child(parent_status="processing")
+        child.params = {
+            "feature": "publisher",
+            "video": {
+                "enabled": True,
+                "media_type": "image",
+                "image_path": "/old-checkout/render/background.jpg",
+            },
+            "metadata": {
+                "audio": {"path": "/old-checkout/audio/source.mp3"},
+            },
+        }
+        child.updated_at = datetime.utcnow() - timedelta(minutes=20)
+        db.session.commit()
+        child_id = str(child.id)
+        dummy = DummyCeleryTask()
+        outcome = {}
+
+        with patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_workers",
+            return_value=(False, True),
+        ), patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_queue",
+            return_value=(False, True),
+        ), patch.object(
+            publisher_queue_repair,
+            "run_publication_pipeline",
+            dummy,
+        ):
+            updated, requeued = (
+                publisher_queue_repair.maybe_requeue_stale_publisher_child(
+                    child,
+                    repair_outcome=outcome,
+                )
+            )
+
+        self.assertFalse(requeued)
+        self.assertEqual(outcome["action"], "closed")
+        self.assertEqual(dummy.calls, [])
+        self.assertEqual(updated.status, "failed")
+        repair = updated.result["queue_repair"]
+        self.assertEqual(repair["reason"], "required_material_unavailable")
+        self.assertEqual(
+            repair["unavailable_materials"],
+            [
+                "/old-checkout/audio/source.mp3",
+                "/old-checkout/render/background.jpg",
+            ],
+        )
+        self.assertEqual(db.session.get(PublicationTask, child_id).status, "failed")
+
+    def test_processing_repair_fails_closed_when_required_materials_are_unavailable(self):
+        task = self._processing_publisher_task(step="v_synthesis")
+        task.params = {
+            "feature": "publisher",
+            "video": {
+                "enabled": True,
+                "media_type": "image",
+                "image_path": "/old-checkout/render/background.jpg",
+            },
+            "metadata": {
+                "audio": {"path": "/old-checkout/audio/source.mp3"},
+            },
+        }
+        task.updated_at = datetime.utcnow() - timedelta(minutes=20)
+        db.session.commit()
+        task_id = str(task.id)
+        dummy = DummyCeleryTask()
+
+        with patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_workers",
+            return_value=(False, True),
+        ), patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_queue",
+            return_value=(False, True),
+        ), patch.object(
+            publisher_queue_repair,
+            "run_publication_pipeline",
+            dummy,
+        ):
+            updated, repaired, action = (
+                publisher_queue_repair.maybe_repair_stale_publisher_processing_task(
+                    task
+                )
+            )
+
+        self.assertTrue(repaired, action)
+        self.assertEqual(action, "closed")
+        self.assertEqual(dummy.calls, [])
+        self.assertEqual(updated.status, "failed")
+        repair = updated.result["processing_orphan_repair"]
+        self.assertEqual(repair["reason"], "required_material_unavailable")
+        self.assertEqual(
+            repair["unavailable_materials"],
+            [
+                "/old-checkout/audio/source.mp3",
+                "/old-checkout/render/background.jpg",
+            ],
+        )
+        persisted = db.session.get(PublicationTask, task_id)
+        self.assertEqual(persisted.status, "failed")
+        self.assertIn("素材", persisted.error_message)
 
     def test_publisher_processing_repair_releases_db_before_visibility_checks(self):
         task = self._processing_publisher_task(step="v_synthesis")

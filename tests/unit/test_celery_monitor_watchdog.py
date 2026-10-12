@@ -20,6 +20,68 @@ from apis.v1 import celery_monitor  # noqa: E402
 
 
 class CeleryMonitorWatchdogTest(unittest.TestCase):
+    def test_foreign_checkout_worker_is_reported_as_runtime_topology_conflict(self):
+        service = {
+            "label": "MP3",
+            "queue": "mp3_video_workflow",
+            "hostname_prefix": "mp3_video_workflow@",
+            "description": "MP3 workflow",
+            "log_file": "celery/mp3_video_workflow.log",
+        }
+        current_root = str(celery_monitor.PROJECT_ROOT)
+        processes = [
+            {
+                "pid": 101,
+                "etime": "01:00",
+                "command": (
+                    f"{current_root}/venv/bin/celery -A celery_config.celery_app "
+                    "worker -Q mp3_video_workflow --hostname=mp3_video_workflow@%h"
+                ),
+            },
+            {
+                "pid": 202,
+                "etime": "02:00",
+                "command": (
+                    "/Users/v9/Documents/workspace/v9/code/dig_ytb_data_claude_v1/"
+                    "venv/bin/celery -A celery_config.celery_app worker "
+                    "-Q mp3_video_workflow --hostname=mp3_video_workflow@%h"
+                ),
+            },
+        ]
+
+        with patch.object(celery_monitor, "_load_paused_services", return_value={}), \
+                patch.object(celery_monitor, "_queue_length", return_value=(0, None)), \
+                patch.object(celery_monitor, "_read_pid_file", return_value=101), \
+                patch.object(celery_monitor, "_process_exists", return_value=True):
+            status = celery_monitor._service_status(
+                "mp3_video",
+                service,
+                all_processes=processes,
+                inspect_data={},
+                include_dashboard_stats=False,
+            )
+
+        self.assertTrue(status["runtime_topology_conflict"])
+        self.assertEqual([item["pid"] for item in status["foreign_processes"]], [202])
+        self.assertIn("另一个 checkout", status["consumer_warning"])
+
+    def test_watchdog_disables_business_repair_while_foreign_checkout_worker_exists(self):
+        foreign = [{"pid": 202, "project_root": "/foreign/project"}]
+
+        with patch.object(
+            celery_monitor,
+            "_foreign_runtime_processes",
+            return_value=foreign,
+        ):
+            result = celery_monitor._watchdog_repair_stale_business_tasks({
+                "enabled": True,
+                "requeue_stale_tasks": True,
+            })
+
+        self.assertFalse(result["enabled"])
+        self.assertEqual(result["skipped"], "foreign_runtime_topology")
+        self.assertEqual(result["foreign_processes"], foreign)
+
     def test_successful_watchdog_repair_releases_session_before_next_repair(self):
         events = []
 

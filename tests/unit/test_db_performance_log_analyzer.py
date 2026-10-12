@@ -216,6 +216,23 @@ class DbPerformanceLogAnalyzerTest(unittest.TestCase):
         self.assertIsNotNone(warning)
         self.assertEqual("401", warning.group("status"))
 
+    def test_parses_colored_console_request_start_and_end(self):
+        analyzer = load_analyzer()
+
+        start = analyzer.REQUEST_START.search(
+            "🟢 [2026-09-24 10:18:40] INFO     - middleware.request_logger - "
+            "🌐 [07585b10] GET /api/mp3-video-workflows/audio-assets - IP: 127.0.0.1"
+        )
+        end = analyzer.REQUEST_END.search(
+            "🟢 [2026-09-24 10:18:46] INFO     - middleware.request_logger - "
+            "✅ [07585b10] 200 - 5848.14ms"
+        )
+
+        self.assertIsNotNone(start)
+        self.assertIsNotNone(end)
+        self.assertEqual("/api/mp3-video-workflows/audio-assets", start.group("path"))
+        self.assertEqual("5848.14", end.group("duration"))
+
     def test_parses_celery_outcomes_and_runtime(self):
         analyzer = load_analyzer()
         success = analyzer.CELERY_SUCCESS.search(

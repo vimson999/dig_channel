@@ -4133,7 +4133,7 @@ class ZsxqSyncService:
         source_task_ids = [
             source_task_id
             for task in publish_tasks
-            if not self._publish_task_source_refs(task)
+            if not self._publish_task_has_source_refs_snapshot(task)
             for source_task_id in [self._publish_source_task_id(task)]
             if source_task_id
         ]
@@ -4157,7 +4157,7 @@ class ZsxqSyncService:
         for publish_task in publish_tasks:
             source_task_id = self._publish_source_task_id(publish_task)
             clean_task = clean_task_by_id.get(source_task_id)
-            if not clean_task and not self._publish_task_source_refs(publish_task):
+            if not clean_task and not self._publish_task_has_source_refs_snapshot(publish_task):
                 continue
             status = self._publish_task_status_snapshot(publish_task)
             if not status:
@@ -4201,7 +4201,7 @@ class ZsxqSyncService:
             return {"updated": 0, "matched": 0, "reason": "missing_source_task_id"}
 
         clean_task = None
-        if not self._publish_task_source_refs(publish_task):
+        if not self._publish_task_has_source_refs_snapshot(publish_task):
             clean_task = (
                 PublicationTask.query.options(load_only(*CLEAN_TASK_CONTEXT_COLUMNS))
                 .filter(PublicationTask.id == source_task_id)
@@ -4287,6 +4287,12 @@ class ZsxqSyncService:
                 ],
             })
         return refs
+
+    def _publish_task_has_source_refs_snapshot(self, publish_task):
+        params = publish_task.params if isinstance(getattr(publish_task, "params", None), dict) else {}
+        publish = params.get("zsxq_publish") if isinstance(params.get("zsxq_publish"), dict) else {}
+        metadata = publish.get("metadata") if isinstance(publish.get("metadata"), dict) else {}
+        return isinstance(metadata.get("source_refs"), list)
 
     def _apply_publish_context_to_attachments(self, context):
         status = context.get("status") or {}

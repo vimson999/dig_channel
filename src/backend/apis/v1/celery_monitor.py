@@ -574,6 +574,47 @@ def _service_processes(service):
     return [proc for proc in _list_processes() if _matches_service(proc, service)]
 
 
+def _process_belongs_to_current_project(proc):
+    command = str((proc or {}).get("command") or "")
+    if f"{PROJECT_ROOT}/" in command:
+        return True
+
+    # A short process title such as ``celery -A ... worker`` does not expose
+    # its checkout.  Treat that as unknown instead of accusing it of being a
+    # foreign runtime.  The conflict guard only fires when the command line
+    # contains an explicit absolute path from another checkout.
+    explicit_runtime_path = any(
+        token.startswith("/") and (
+            "/venv/bin/celery" in token
+            or "/celery_watchdog_loop.py" in token
+        )
+        for token in command.split()
+    )
+    if explicit_runtime_path:
+        return False
+    return None
+
+
+def _foreign_runtime_processes(processes=None):
+    """Return Celery/Watchdog processes launched from another checkout.
+
+    Multiple checkouts on one host can share the same broker, database, queue,
+    and Celery node name.  Celery inspect then collapses the duplicate node
+    names while the older code can still consume and mutate current tasks.
+    """
+    source = processes if processes is not None else _list_processes()
+    foreign = []
+    for proc in source:
+        command = str((proc or {}).get("command") or "")
+        managed_runtime = (
+            ("celery" in command and " worker" in command)
+            or "celery_watchdog_loop.py" in command
+        )
+        if managed_runtime and _process_belongs_to_current_project(proc) is False:
+            foreign.append(proc)
+    return foreign
+
+
 def _watchdog_processes():
     return [proc for proc in _list_processes() if "celery_watchdog_loop.py" in proc.get("command", "")]
 
@@ -1057,6 +1098,17 @@ def _watchdog_repair_stale_business_tasks(config):
         return {"enabled": False, "skipped": "auto_heal_disabled"}
     if not config.get("requeue_stale_tasks"):
         return {"enabled": False, "skipped": "requeue_disabled"}
+    foreign_processes = _foreign_runtime_processes()
+    if foreign_processes:
+        # Fail closed before any durable repair.  A foreign checkout may run
+        # older queue-repair semantics against the same rows and broker.  The
+        # service watchdog below will surface the topology conflict and can
+        # replace that worker only after the normal active-task safety gate.
+        return {
+            "enabled": False,
+            "skipped": "foreign_runtime_topology",
+            "foreign_processes": foreign_processes,
+        }
 
     try:
         from services.publisher_queue_repair import (
@@ -2163,6 +2215,10 @@ def _service_status(
 ):
     process_source = all_processes if all_processes is not None else _list_processes()
     processes = [proc for proc in process_source if _matches_service(proc, service)]
+    foreign_processes = [
+        proc for proc in processes
+        if _process_belongs_to_current_project(proc) is False
+    ]
     paused = _load_paused_services().get(service_id)
     if queue_lengths and service["queue"] in queue_lengths:
         queue_len, queue_error = queue_lengths[service["queue"]]
@@ -2178,7 +2234,13 @@ def _service_status(
     consumer_note = None
     inspect_blocked = bool(inspect_error and inspect_error != "skipped")
     business_recently_active = _business_tasks_recently_active(business_tasks)
-    if paused and not processes:
+    if foreign_processes:
+        foreign_pids = ", ".join(str(proc.get("pid")) for proc in foreign_processes)
+        consumer_warning = (
+            "检测到另一个 checkout 的同队列 Worker；共享 broker/DB 与重复 "
+            f"Celery nodename 会导致旧代码消费当前任务。foreign_pids={foreign_pids}"
+        )
+    elif paused and not processes:
         consumer_note = "服务已暂停；看门狗不会自动拉起该队列 worker。"
     elif paused and processes:
         consumer_note = "服务已暂停，但当前仍有 worker 进程在线。"
@@ -2215,6 +2277,8 @@ def _service_status(
         "queue": service["queue"],
         "description": service["description"],
         "running": bool(processes),
+        "runtime_topology_conflict": bool(foreign_processes),
+        "foreign_processes": foreign_processes,
         "paused": bool(paused),
         "pause": paused,
         "processes": processes,

@@ -41,7 +41,7 @@ EVENT_CATEGORIES = (
     "idle_in_transaction",
 )
 TIMESTAMP = re.compile(
-    r"^(?:[🔍✅⚠️❌🚨📝]+\s+|===== UI START )?\[?"
+    r"^(?:[🔍✅⚠️❌🚨📝🟢]+\s+|===== UI START )?\[?"
     r"(?P<value>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[,.]\d+)?)"
     r"(?=[]:\s]|$)"
 )
@@ -75,14 +75,18 @@ FIELD = re.compile(
     r"checkout_origin|sql_count|sql_total_ms|sql_max_ms|non_sql_hold_ms)="
     r"(?P<value>[^\s\]]+)"
 )
+REQUEST_TIMESTAMP_PREFIX = (
+    r"^(?:[🔍✅⚠️❌🚨📝🟢]+\s+)?\[?"
+    r"(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:[,.]\d+)?\]?"
+)
 REQUEST_START = re.compile(
-    r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[,.]\d+"
-    r".*?middleware\.request_logger.*?🌐 \[(?P<request_id>[0-9a-f]+)\] "
+    REQUEST_TIMESTAMP_PREFIX
+    + r".*?middleware\.request_logger.*?🌐 \[(?P<request_id>[0-9a-f]+)\] "
     r"(?P<method>[A-Z]+) (?P<path>\S+) - IP:"
 )
 REQUEST_END = re.compile(
-    r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[,.]\d+"
-    r".*?middleware\.request_logger.*?[✅⚠❌]\ufe0f? \[(?P<request_id>[0-9a-f]+)\] "
+    REQUEST_TIMESTAMP_PREFIX
+    + r".*?middleware\.request_logger.*?[✅⚠❌]\ufe0f? \[(?P<request_id>[0-9a-f]+)\] "
     r"(?P<status>\d{3}) - (?P<duration>\d+(?:\.\d+)?)ms"
 )
 CELERY_SUCCESS = re.compile(

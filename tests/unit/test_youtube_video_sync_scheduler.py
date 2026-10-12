@@ -190,6 +190,79 @@ class YouTubeVideoSyncScheduleTest(unittest.TestCase):
             max_workers=5,
         )
 
+    def test_partial_sync_notification_keeps_failed_channel_details(self):
+        result_payload = {
+            "success": True,
+            "message": "并行同步完成: 处理 1 个频道",
+            "data": {
+                "processed": 1,
+                "errors": 1,
+                "new_videos": 2,
+                "updated_videos": 3,
+                "details": [
+                    {
+                        "channel_id": 56,
+                        "channel_name": "数字指南针",
+                        "status": "error",
+                        "message": "未找到远端频道",
+                    },
+                    {
+                        "channel_id": 1,
+                        "channel_name": "正常频道",
+                        "status": "success",
+                        "new_videos": 2,
+                        "updated_videos": 3,
+                        "from_cache": False,
+                    },
+                ],
+            },
+        }
+        notifications = []
+        fake_service = Mock()
+        fake_service.sync_all_channels_videos_parallel.return_value = result_payload
+
+        with (
+            patch.object(
+                runner,
+                "load_schedule_config",
+                return_value={
+                    "enabled": True,
+                    "daily_at": "01:00",
+                    "timezone": "Asia/Shanghai",
+                    "days_back": 3,
+                    "notify_milestones": True,
+                    "max_workers": 5,
+                },
+            ),
+            patch.object(
+                runner,
+                "OptimizedVideoSyncService",
+                return_value=fake_service,
+            ),
+            patch.object(
+                runner,
+                "_enqueue_notification",
+                side_effect=lambda event_type, **kwargs: notifications.append(
+                    (event_type, kwargs)
+                ),
+            ),
+            patch.object(runner, "release_db_session_quietly"),
+        ):
+            runner._run_once(self.app, "test")
+
+        event_type, payload = notifications[-1]
+        self.assertEqual(event_type, "sync_failed")
+        self.assertEqual(
+            payload["summary"]["failures"],
+            [
+                {
+                    "channel_id": 56,
+                    "channel_name": "数字指南针",
+                    "message": "未找到远端频道",
+                }
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

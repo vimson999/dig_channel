@@ -149,8 +149,12 @@ class RankingPaginationTest(unittest.TestCase):
                 )
 
     def test_yearly_rankings_aggregate_the_requested_calendar_year(self):
-        revenue = self._get("/api/v1/rankings/yearly-revenue?year=2026&page=1&per_page=1")
-        subscribers = self._get("/api/v1/rankings/yearly-subscriber?year=2026&page=1&per_page=1")
+        # The current-year boundary is part of this contract; freeze it to
+        # the fixture date instead of depending on the day the suite runs.
+        with patch("services.ranking_service.date", wraps=date) as calendar_date:
+            calendar_date.today.return_value = date(2026, 9, 15)
+            revenue = self._get("/api/v1/rankings/yearly-revenue?year=2026&page=1&per_page=1")
+            subscribers = self._get("/api/v1/rankings/yearly-subscriber?year=2026&page=1&per_page=1")
 
         self.assertEqual(revenue.status_code, 200)
         self.assertEqual(subscribers.status_code, 200)

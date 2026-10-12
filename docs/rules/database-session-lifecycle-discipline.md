@@ -49,6 +49,9 @@
 - 由数据库持久化启停状态的 scheduler 在配置读取失败时必须停止注册或投递对应计划；不得把读库失败解释为
   配置缺失并启用 bootstrap 默认值。故障注入回归必须覆盖“数据库中已停用 → 读库失败 → 无计划/无投递 →
   恢复后仍停用”，且巡检要同时读取独立 scheduler 日志、PgBouncer 和失败 SQL 的连接持有事件。
+- 任何 scheduler 的可导入库、API 依赖与 runner，其生产文件 handler、PID/锁文件与目录创建只能在显式运行入口初始化；
+  测试或 Web API 仅导入调度库/runner 不得挂载全局 root logger 的生产文件。新解释器导入与显式启动两种行为都要有回归，巡检按进程和
+  业务键排除测试模拟事件，不得因日志文件名属于托管服务就把其中所有记录当作真实业务事故。
 - 数据库异常进入恢复分支后，任何查询、更新或提交之前必须先 `rollback/remove`；禁止在可能失效的 session 上二次查询，也禁止用 `finally: commit()` 收口这类分支。
 - 可重试数据库异常在 service 层不得提前写业务终态。由任务层先写 `retrying` 再安排 retry，只有重试耗尽才允许写 `failed`。
 - 任何成功终态写入都必须原子清除旧 `error_message`；watchdog、orphan cleanup、retry 与真实 worker 可能并发写入，
@@ -141,6 +144,9 @@ def release_db_session_quietly():
 - 巡检必须把三种口径分开：数据库异常事件、任务准入压力、runtime guard 的短暂 offender 观测。
   offender 至少汇总 episode、最大连接数、最大事务年龄与最大 idle 年龄；亚秒短事务不能冒充 60 秒事故，
   但也不能因没有 defer 或异常文本而报告“没有观测”。日志格式变化必须附生产样本回放合同。
+- HTTP/request 巡检解析器必须兼容生产实际的 plain 与 ANSI/emoji 控制台前缀、方括号时间戳和可选毫秒；
+  request start/end 必须以同一 request id 配对。解析请求数为 0、骤降或与 access/API 日志数量级不一致时，
+  必须报告 coverage anomaly 并阻止把该窗口当成可比基线；任何格式演进都要先加入真实生产样本回放。
 - 错误巡检必须按完整时间戳日志块读取 traceback，不能丢弃无时间戳续行；链式DBAPI/SQLAlchemy异常
   与跨日志副本按episode去重。结构化SQL logger、traceback和PgBouncer为不同证据流，未关联前不得
   相加或把任意单流的0解释为全库无错误。栈中的lifecycle文件名不能充当连接持有事件。
@@ -150,10 +156,33 @@ def release_db_session_quietly():
   快照合并 JSON，保留 broker 等待期间新增的审计信息。取消/终态/推进后的状态不得被旧快照覆盖。
 - pending/queued 消息修复必须同时核对 worker active/reserved/scheduled、普通 broker 队列与 Redis unacked。
   当前 Celery ID 在任一来源仍可见时只能等待原 delivery 或交给消费者健康检查，禁止发布新消息、替换
-  `celery_task_id` 或增加 repair count；只有所有检查均成功且全部不可见时，才能按 CAS 发布替代消息。
+  `celery_task_id` 或增加 repair count；只有所有检查均成功且全部不可见时，才能按 CAS 发布替代消息。每次
+  “全部不可见”判定必须记录三个 worker 状态的任务数、各 priority 队列深度与扫描数、扫描是否截断，以及
+  Redis unacked 深度与扫描数；没有该现场快照时不得把复发归因为 broker 丢消息。
+- durable repair、watchdog 或 scheduler 的运行拓扑唯一性不能只靠本机 `ps`、当前时刻的 Celery inspect、
+  checkout 路径或重复 nodename 检查证明；这些证据看不到已退出进程、其他主机和未接入 Celery 控制面的
+  API/调度入口。只要多个部署仍可能共享 PostgreSQL/Redis 写凭据，就必须保持 OPEN，并要求每次 durable
+  写入携带 deployment/host/PID/code identity，或通过停旧部署、轮换凭据与隔离 broker namespace 建立物理
+  写入围栏。运行验收至少包括隔离动作、自然业务和随后完整窗口；`foreign_runtime=0`、healthy/ready 和
+  单次成功任务均不得单独升级为 RUNTIME_ACCEPTED/CLOSED。
+- 分布式拓扑巡检必须把 `pg_stat_activity.client_addr/application_name/backend_start/state_change` 与私网设备
+  身份表对账，不能只看当前主机 PgBouncer 日志。出现非当前部署私网地址或空 `application_name` 的生产会话时，
+  必须列为待归因写入者；受管 backend/worker/scheduler 应携 deployment、host 与 process application identity。
+  只有远端主机停用或凭据/namespace 物理隔离后，该来源连接归零且自然任务不再携旧根，才能接受关闭。
+- durable 任务必须把创建者的 deployment root、host、PID 与 code identity 保留到任务审计载荷；消费者在把
+  `pending/queued` 任务重投到本部署前，必须先验证所有绝对素材路径可由当前 deployment 访问。来源 identity
+  不同或必需素材不可达时必须 fail closed、记录原任务与现场拓扑并升级为分布式隔离事故，禁止把旧任务换 ID
+  后交给当前 worker 继续渲染。父工作流成功不得掩盖任何 child delivery 的失败率和实际用户影响。
+- 每日 durable 快照必须对窗口内所有 `publication_tasks.feature` 分别统计 current-root、old-root 与
+  unclassified，不得只检查 Publisher 或当前活跃进程。任何 feature 出现 old-root 都必须列出 task id、时间、
+  状态和持续时间，并与本地 worker 日志对账；Publisher 为 0、远端当前离线或当前会话归零都不能覆盖窗口内
+  其他工作流的旧根写入，也不能单独作为物理隔离已完成的证据。
 - processing 的非幂等外部副作用任务同样必须核对 worker active/reserved/scheduled、目标 broker 队列与
   Redis unacked；任一来源可见时禁止撤销、降级或重投。orphan grace 不得短于执行器硬超时与结算余量，任务
   类型和目标队列必须来自结构化投影，禁止热扫描为判型回读 `params/result` 大 JSON。
+- 结构化工作流快照必须区分字段不存在、明确空集合和非空集合：明确空集合是权威业务结果，不能用真假值判断
+  把它降级为历史 schema 缺失。只有字段不存在的历史行才允许读取通用任务 `params/result` 做兼容回退；
+  present-empty 与 present-nonempty 都必须有 SQL 预算测试，原始 JSON 审计数据不得为规避查询而删除。
 
 任一重启或修复后，至少检查：
 
@@ -210,6 +239,19 @@ ORDER BY xact_start NULLS LAST;
 - 故障注入是否覆盖“service 抛出 -> retrying 落库 -> Celery retry -> 下一次 delivery 不被终态去重”完整链路？
 - 页面轮询接口是否避免返回大 JSON，并在查询后释放 session？
 - 是否有测试或现场 SQL 能证明没有 `idle in transaction`？
+
+## 跨部署 durable task 重投纪律
+
+- Tailscale IP 不是稳定 deployment identity；同一主机重新入网可能换 node/IP。复发追踪必须同时记录
+  hostname、node identity、checkout/deployment、DB `application_name` 与 broker nodename，禁止只用固定 IP 判绿。
+- Watchdog 对带本地绝对素材路径的 durable task 做孤儿重投前，必须先确认 active/reserved/scheduled、
+  Redis queue 与 unacked 都不含原消息，再释放 DB Session，然后校验当前节点所需 audio/image/video 文件。
+- 素材不可达必须 fail closed 并保留原 params/result、缺失路径、前一状态/step/celery id 和检查时间；禁止跨
+  deployment 盲目重投、伪造素材、删除原始审计 JSON，或用增加重试次数掩盖根因。
+- 扫描阶段仍须轻投影；仅对即将判定孤儿且确需合成的单条任务读取 params。upload-only 等不依赖本地合成素材
+  的路径不得被同一门禁误伤。
+- 代码运行替换只证明防线加载。只有自然任务证明旧根写入为 0、缺素材失败不复发，且旧部署已物理停机或
+  DB/Redis 凭据与 broker namespace 已隔离，才可关闭根因。
 
 ## 关联文档
 

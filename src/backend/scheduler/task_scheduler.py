@@ -12,34 +12,11 @@ from datetime import datetime, date, timedelta
 from typing import List, Dict, Any
 import logging
 from contextlib import contextmanager
-from logging.handlers import RotatingFileHandler
 
 from app import create_app
 from services import YouTubeSyncService, ChannelService
 from models import db, Channel, ChannelData
 from utils.youtube_api import YouTubeAPI, YouTubeAPIError
-
-# 配置日志
-import os
-logs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'logs')
-os.makedirs(logs_dir, exist_ok=True)
-scheduler_log_path = os.path.join(logs_dir, 'scheduler.log')
-scheduler_log_max_bytes = int(os.environ.get('SCHEDULER_LOG_MAX_MB', '50')) * 1024 * 1024
-scheduler_log_backup_count = int(os.environ.get('SCHEDULER_LOG_BACKUP_COUNT', '5'))
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        RotatingFileHandler(
-            scheduler_log_path,
-            maxBytes=scheduler_log_max_bytes,
-            backupCount=scheduler_log_backup_count,
-            encoding='utf-8',
-        ),
-        logging.StreamHandler()
-    ]
-)
 
 logger = logging.getLogger(__name__)
 

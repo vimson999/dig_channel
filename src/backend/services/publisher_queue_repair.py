@@ -3,6 +3,7 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
@@ -326,6 +327,10 @@ PUBLISHER_REPAIR_SCAN_COLUMNS = (
     PublicationTask.updated_at,
     PublicationTask.completed_at,
 )
+PUBLISHER_MATERIAL_REPAIR_SCAN_COLUMNS = (
+    *PUBLISHER_REPAIR_SCAN_COLUMNS,
+    PublicationTask.params,
+)
 PUBLISHER_REPAIR_CANDIDATE_COLUMNS = tuple(
     column
     for column in PUBLISHER_REPAIR_SCAN_COLUMNS
@@ -383,6 +388,32 @@ def _detached_repair_task_snapshot(task):
         created_at=task.created_at,
         updated_at=task.updated_at,
         completed_at=task.completed_at,
+    )
+
+
+def _publisher_required_material_paths(params: Dict[str, Any]) -> Tuple[str, ...]:
+    """Return local input files a publisher synthesis retry must be able to read."""
+    values = []
+    metadata = params.get("metadata") if isinstance(params, dict) else None
+    audio = metadata.get("audio") if isinstance(metadata, dict) else None
+    if isinstance(audio, dict) and audio.get("path"):
+        values.append(str(audio["path"]).strip())
+
+    video = params.get("video") if isinstance(params, dict) else None
+    if isinstance(video, dict) and video.get("enabled"):
+        media_type = str(video.get("media_type") or "").strip().lower()
+        path_key = "video_path" if media_type == "existing_video" else "image_path"
+        if video.get(path_key):
+            values.append(str(video[path_key]).strip())
+
+    return tuple(sorted({value for value in values if value}))
+
+
+def _unavailable_local_materials(paths: Iterable[str]) -> Tuple[str, ...]:
+    return tuple(
+        path
+        for path in paths
+        if Path(path).is_absolute() and not Path(path).is_file()
     )
 
 
@@ -491,6 +522,11 @@ def maybe_requeue_stale_publisher_child(
         default_queue=queue,
         upload_projection=upload_snapshot,
     )
+    required_materials = (
+        _publisher_required_material_paths(snapshot.params)
+        if upload_snapshot is None
+        else ()
+    )
     previous_celery_id = snapshot.celery_task_id
     _release_repair_db_session()
     if previous_celery_id:
@@ -517,6 +553,55 @@ def maybe_requeue_stale_publisher_child(
     else:
         worker_visible = False
         queue_visible = False
+
+    unavailable_materials = _unavailable_local_materials(required_materials)
+    if unavailable_materials:
+        current = _load_repair_task(snapshot.id, *PUBLISHER_REPAIR_SCAN_COLUMNS)
+        if (
+            not current
+            or current.status != "pending"
+            or current.celery_task_id != snapshot.celery_task_id
+            or current.current_step != snapshot.current_step
+        ):
+            _release_repair_db_session()
+            return snapshot, False
+        now_value = datetime.utcnow()
+        current_result = dict(current.result or {})
+        repair_state = dict(current_result.get(REPAIR_RESULT_KEY) or {})
+        repair_state.update({
+            "reason": "required_material_unavailable",
+            "previous_status": current.status,
+            "previous_step": current.current_step,
+            "previous_celery_id": current.celery_task_id,
+            "queue": target_queue,
+            "closed_at": now_value.isoformat() + "Z",
+            "unavailable_materials": list(unavailable_materials),
+        })
+        message = (
+            "publisher 任务所需素材在当前运行节点不可用，已拒绝跨部署重投；"
+            "请先恢复素材或在原部署完成任务。"
+        )
+        current.result = {
+            **current_result,
+            REPAIR_RESULT_KEY: repair_state,
+            "error": message,
+        }
+        current.status = "failed"
+        current.current_step = "queue_repair_blocked"
+        current.error_message = message
+        current.completed_at = now_value
+        flag_modified(current, "result")
+        db.session.commit()
+        updated_snapshot = _detached_repair_task_snapshot(current)
+        db.session.remove()
+        if repair_outcome is not None:
+            repair_outcome["action"] = "closed"
+        active_logger.error(
+            "Closed pending publisher task because required materials are unavailable: child=%s paths=%s",
+            snapshot.id,
+            list(unavailable_materials),
+        )
+        return updated_snapshot, False
 
     if requeue_count >= requeue_limit:
         # A missing Celery message at the repair limit is a terminal recovery
@@ -734,7 +819,7 @@ def repair_stale_publisher_pending_tasks_once(
         repair_columns = (
             PUBLISHER_REPAIR_CANDIDATE_COLUMNS
             if upload_projection is not None
-            else PUBLISHER_REPAIR_SCAN_COLUMNS
+            else PUBLISHER_MATERIAL_REPAIR_SCAN_COLUMNS
         )
         task = _load_repair_task(row.id, *repair_columns)
         if not task:
@@ -943,6 +1028,11 @@ def maybe_repair_stale_publisher_processing_task(
         default_queue=queue,
         upload_projection=upload_projection,
     )
+    required_materials = (
+        _publisher_required_material_paths(snapshot.params)
+        if step in PUBLISHER_PROCESSING_REQUEUEABLE_STEPS
+        else ()
+    )
     _release_repair_db_session()
     worker_visible, worker_checked = _message_visible_in_workers(
         snapshot.celery_task_id,
@@ -993,9 +1083,27 @@ def maybe_repair_stale_publisher_processing_task(
     if not queue_checked:
         return snapshot, False, "visibility_unknown"
 
+    unavailable_materials = _unavailable_local_materials(required_materials)
     current = _load_matching_processing_publisher_task(snapshot)
     if current is None:
         return snapshot, False, "state_changed"
+
+    if unavailable_materials:
+        _mark_processing_publisher_orphan_failed(
+            current,
+            queue=target_queue,
+            reason="required_material_unavailable",
+            revoke=False,
+            unavailable_materials=unavailable_materials,
+        )
+        updated_snapshot = _detached_repair_task_snapshot(current)
+        db.session.remove()
+        active_logger.error(
+            "Closed orphan publisher task because required materials are unavailable: task=%s paths=%s",
+            snapshot.id,
+            list(unavailable_materials),
+        )
+        return updated_snapshot, True, "closed"
 
     if step not in PUBLISHER_PROCESSING_REQUEUEABLE_STEPS:
         _release_repair_db_session()
@@ -1194,7 +1302,12 @@ def repair_stale_publisher_processing_tasks_once(
             if str(row.id) in bilibili_upload_task_ids
             else None
         )
-        task = _load_repair_task(row.id, *PUBLISHER_REPAIR_SCAN_COLUMNS)
+        repair_columns = (
+            PUBLISHER_REPAIR_CANDIDATE_COLUMNS
+            if upload_projection is not None
+            else PUBLISHER_MATERIAL_REPAIR_SCAN_COLUMNS
+        )
+        task = _load_repair_task(row.id, *repair_columns)
         if not task:
             continue
         try:
@@ -2158,6 +2271,7 @@ def _mark_processing_publisher_orphan_failed(
     queue: str,
     reason: str,
     revoke: bool = True,
+    unavailable_materials: Iterable[str] = (),
 ) -> None:
     revoke_snapshot = SimpleNamespace(
         id=str(task.id),
@@ -2173,10 +2287,18 @@ def _mark_processing_publisher_orphan_failed(
         "queue": queue,
         "closed_at": now.isoformat() + "Z",
     }
-    message = (
-        "publisher 任务在 processing 状态下已不在 Celery worker/队列中，"
-        "系统已自动收口以释放并发槽位；如需继续请手动重试。"
-    )
+    unavailable_materials = tuple(unavailable_materials)
+    if unavailable_materials:
+        repair_state["unavailable_materials"] = list(unavailable_materials)
+        message = (
+            "publisher 任务所需素材在当前运行节点不可用，已拒绝跨部署重投；"
+            "请先恢复素材或在原部署完成任务。"
+        )
+    else:
+        message = (
+            "publisher 任务在 processing 状态下已不在 Celery worker/队列中，"
+            "系统已自动收口以释放并发槽位；如需继续请手动重试。"
+        )
     task.result = {
         **previous_result,
         PROCESSING_REPAIR_RESULT_KEY: repair_state,
@@ -2209,22 +2331,56 @@ def _message_visible_in_workers(celery_id: str, *, child_id: str) -> Tuple[bool,
     timeout = float(os.environ.get("PUBLISHER_CHILD_ORPHAN_INSPECT_TIMEOUT", DEFAULT_INSPECT_TIMEOUT_SECONDS))
     try:
         inspector = celery_app.control.inspect(timeout=timeout)
-        snapshots = [
-            inspector.active(),
-            inspector.reserved(),
-            inspector.scheduled(),
+        snapshot_items = [
+            ("active", inspector.active()),
+            ("reserved", inspector.reserved()),
+            ("scheduled", inspector.scheduled()),
         ]
     except Exception as exc:
         logger.warning("Publisher child queue repair inspect failed: child=%s error=%s", child_id, exc)
         return False, False
 
-    if any(snapshot is None for snapshot in snapshots):
+    if any(snapshot is None for _name, snapshot in snapshot_items):
+        logger.info(
+            "Publisher child worker visibility snapshot: child=%s celery=%s checked=false "
+            "active=%s reserved=%s scheduled=%s visible_source=unknown",
+            child_id,
+            celery_id,
+            _worker_snapshot_task_count(snapshot_items[0][1]),
+            _worker_snapshot_task_count(snapshot_items[1][1]),
+            _worker_snapshot_task_count(snapshot_items[2][1]),
+        )
         return False, False
 
-    for snapshot in snapshots:
+    for name, snapshot in snapshot_items:
         if _task_id_in_worker_snapshot(snapshot or {}, celery_id):
+            logger.info(
+                "Publisher child worker visibility snapshot: child=%s celery=%s checked=true "
+                "active=%s reserved=%s scheduled=%s visible_source=%s",
+                child_id,
+                celery_id,
+                _worker_snapshot_task_count(snapshot_items[0][1]),
+                _worker_snapshot_task_count(snapshot_items[1][1]),
+                _worker_snapshot_task_count(snapshot_items[2][1]),
+                name,
+            )
             return True, True
+    logger.info(
+        "Publisher child worker visibility snapshot: child=%s celery=%s checked=true "
+        "active=%s reserved=%s scheduled=%s visible_source=none",
+        child_id,
+        celery_id,
+        _worker_snapshot_task_count(snapshot_items[0][1]),
+        _worker_snapshot_task_count(snapshot_items[1][1]),
+        _worker_snapshot_task_count(snapshot_items[2][1]),
+    )
     return False, True
+
+
+def _worker_snapshot_task_count(snapshot: Optional[Dict[str, Any]]) -> int:
+    if not isinstance(snapshot, dict):
+        return -1
+    return sum(len(tasks) for tasks in snapshot.values() if isinstance(tasks, list))
 
 
 def _message_visible_in_queue(celery_id: str, *, child_id: str, queue: str) -> Tuple[bool, bool]:
@@ -2236,17 +2392,95 @@ def _message_visible_in_queue(celery_id: str, *, child_id: str, queue: str) -> T
             retry_on_timeout=False,
         )
         limit = _int_env("PUBLISHER_CHILD_ORPHAN_QUEUE_SCAN_LIMIT", DEFAULT_QUEUE_SCAN_LIMIT, 20)
+        queue_depths = []
+        queue_scanned = 0
+        queue_scan_truncated = False
         for key in _redis_queue_keys(queue):
-            for raw in client.lrange(key, 0, limit - 1):
+            try:
+                depth = int(client.llen(key) or 0)
+            except Exception:
+                depth = -1
+            key_label = key.decode("utf-8", errors="replace") if isinstance(key, bytes) else str(key)
+            queue_depths.append(f"{key_label}:{depth}")
+            messages = client.lrange(key, 0, limit - 1)
+            queue_scanned += len(messages)
+            if depth > len(messages):
+                queue_scan_truncated = True
+            for raw in messages:
                 if _raw_message_matches(raw, celery_id=celery_id, child_id=child_id):
+                    _log_queue_visibility_snapshot(
+                        child_id=child_id,
+                        celery_id=celery_id,
+                        visible_source="queue",
+                        queue_depths=queue_depths,
+                        queue_scanned=queue_scanned,
+                        queue_scan_truncated=queue_scan_truncated,
+                    )
                     return True, True
+        try:
+            unacked_depth = int(client.hlen("unacked") or 0)
+        except Exception:
+            unacked_depth = -1
+        unacked_scanned = 0
         for raw in _iter_unacked_messages(client, limit):
+            unacked_scanned += 1
             if _raw_message_matches(raw, celery_id=celery_id, child_id=child_id) or _raw_contains(raw, celery_id, child_id):
+                _log_queue_visibility_snapshot(
+                    child_id=child_id,
+                    celery_id=celery_id,
+                    visible_source="unacked",
+                    queue_depths=queue_depths,
+                    queue_scanned=queue_scanned,
+                    queue_scan_truncated=queue_scan_truncated,
+                    unacked_depth=unacked_depth,
+                    unacked_scanned=unacked_scanned,
+                    unacked_scan_truncated=unacked_depth > unacked_scanned,
+                )
                 return True, True
+        _log_queue_visibility_snapshot(
+            child_id=child_id,
+            celery_id=celery_id,
+            visible_source="none",
+            queue_depths=queue_depths,
+            queue_scanned=queue_scanned,
+            queue_scan_truncated=queue_scan_truncated,
+            unacked_depth=unacked_depth,
+            unacked_scanned=unacked_scanned,
+            unacked_scan_truncated=unacked_depth > unacked_scanned,
+        )
     except Exception as exc:
         logger.warning("Publisher child queue repair queue scan failed: child=%s error=%s", child_id, exc)
         return False, False
     return False, True
+
+
+def _log_queue_visibility_snapshot(
+    *,
+    child_id: str,
+    celery_id: str,
+    visible_source: str,
+    queue_depths: Iterable[str],
+    queue_scanned: int,
+    queue_scan_truncated: bool,
+    unacked_depth: int = -1,
+    unacked_scanned: int = 0,
+    unacked_scan_truncated: bool = False,
+) -> None:
+    """Record enough broker evidence to diagnose a future false orphan decision."""
+    logger.info(
+        "Publisher child queue visibility snapshot: child=%s celery=%s visible_source=%s "
+        "queue_depths=%s queue_scanned=%s queue_scan_truncated=%s "
+        "unacked_depth=%s unacked_scanned=%s unacked_scan_truncated=%s",
+        child_id,
+        celery_id,
+        visible_source,
+        ",".join(queue_depths) or "-",
+        queue_scanned,
+        str(bool(queue_scan_truncated)).lower(),
+        unacked_depth,
+        unacked_scanned,
+        str(bool(unacked_scan_truncated)).lower(),
+    )
 
 
 def _task_id_in_worker_snapshot(snapshot: Dict[str, Any], celery_id: str) -> bool:

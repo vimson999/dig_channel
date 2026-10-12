@@ -20,27 +20,25 @@ from scheduler import DataCrawlerScheduler, manual_crawl
 import logging
 from logging.handlers import RotatingFileHandler
 
-# 配置日志
-import os
-logs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'logs')
-os.makedirs(logs_dir, exist_ok=True)
-scheduler_log_path = os.path.join(logs_dir, 'scheduler.log')
-scheduler_log_max_bytes = int(os.environ.get('SCHEDULER_LOG_MAX_MB', '50')) * 1024 * 1024
-scheduler_log_backup_count = int(os.environ.get('SCHEDULER_LOG_BACKUP_COUNT', '5'))
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        RotatingFileHandler(
-            scheduler_log_path,
-            maxBytes=scheduler_log_max_bytes,
-            backupCount=scheduler_log_backup_count,
-            encoding='utf-8',
-        ),
-        logging.StreamHandler()
-    ]
-)
+def _configure_logging():
+    logs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'logs')
+    os.makedirs(logs_dir, exist_ok=True)
+    scheduler_log_path = os.path.join(logs_dir, 'scheduler.log')
+    scheduler_log_max_bytes = int(os.environ.get('SCHEDULER_LOG_MAX_MB', '50')) * 1024 * 1024
+    scheduler_log_backup_count = int(os.environ.get('SCHEDULER_LOG_BACKUP_COUNT', '5'))
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            RotatingFileHandler(
+                scheduler_log_path,
+                maxBytes=scheduler_log_max_bytes,
+                backupCount=scheduler_log_backup_count,
+                encoding='utf-8',
+            ),
+            logging.StreamHandler()
+        ]
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +131,7 @@ class SchedulerService:
             logger.error(f"手动抓取失败: {result['message']}")
 
 def main():
+    _configure_logging()
     parser = argparse.ArgumentParser(description='YouTube数据抓取调度器')
     parser.add_argument('command', choices=['start', 'stop', 'status', 'manual', 'test'],
                        help='命令: start(启动), stop(停止), status(状态), manual(手动运行), test(测试)')

@@ -174,6 +174,15 @@ def _run_once(app, trigger):
 
             data = result.get("data") or {}
             failed_count = int(data.get("failed_count") or 0)
+            failures = [
+                {
+                    "channel_id": item.get("channel_id"),
+                    "channel_name": item.get("channel_name"),
+                    "message": str(item.get("message") or "同步失败")[:300],
+                }
+                for item in (data.get("results") or [])
+                if not item.get("success")
+            ][:10]
             succeeded = bool(result.get("success")) and failed_count == 0
             status = "completed" if succeeded else (
                 "partial" if result.get("success") else "failed"
@@ -188,6 +197,7 @@ def _run_once(app, trigger):
                     "total_channels": data.get("total_channels", 0),
                     "success_count": data.get("success_count", 0),
                     "failed_count": failed_count,
+                    "failures": failures,
                     "max_workers": data.get("max_workers", config["max_workers"]),
                     "duration_seconds": data.get("duration_seconds"),
                 },
@@ -201,6 +211,8 @@ def _run_once(app, trigger):
                 failed_count,
                 data.get("duration_seconds"),
             )
+            if failures:
+                LOGGER.warning("YouTube channel sync failures: %s", failures)
             print(json.dumps(result, ensure_ascii=False), flush=True)
             return result
         finally:

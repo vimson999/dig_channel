@@ -2,7 +2,7 @@
 
 ## 基本信息
 
-- 状态：RUNTIME_REPLACED / OBSERVING；新 backend 与真实页面已验收，待完整 24 小时窗口确认旧 SQL 指纹、长 Session 和请求重叠不复发
+- 状态：RUNTIME_REPLACED / OPEN / REPEATED / OBSERVING；查询预算已运行替换，但远端 driver/fetch/网络尾延迟在 2026-09-25 后窗再次出现
 - 严重级别：P0
 - 影响模块：MP3 视频编排音频素材目录 / `content_pipeline_assets` / `zsxq_attachments` / `zsxq_topics` / PgBouncer
 - 首次发现：2026-08-29 方案 1 运行态追根
@@ -138,3 +138,37 @@ N+1 或文件 I/O 跨事务证据。长尾在 executor 外，缺 request 级 poo
 旧逐项附件 N+1 没有进入慢 SQL 样本，但并不排除低于阈值的查询；代表数据库 executor
 仍为毫秒级，底层连接与驱动尾延迟继续 OPEN/REPEATED/OBSERVING。
 下一自然冷/暖搜索必须补齐 request 级 pool wait、fetch bytes 和 SQL 数。
+
+## 2026-09-25 冷目录远端尾延迟再次复发
+
+固定窗仅一个真实冷目录请求 `07585b10`，API 6.040 秒，其中 canonical 单次有界查询
+`be891b5c1af362da` 5.692 秒、影响 989 行；连接持有 5.757 秒，其中 SQL 5.692 秒、非 SQL 仅 65ms。
+客户端 telemetry 为 `client_trigger=initial`、`client_inflight=1`、`cache_hit=False`，未见并发叠加；
+本窗只有这一条 catalog SQL，旧附件 chunk、逐项 canonical N+1 和文件 I/O 跨事务没有复发。
+
+同形只读 `EXPLAIN (ANALYZE, BUFFERS)` 对 2,771 行顺扫、返回约 1,002 行，shared hit 292、
+quicksort 904kB，executor 2.176ms；应用耗时约为 executor 的 2,615 倍。当前 `content_pipeline_assets`
+约 3.2MB，canonical/status/created 等既有索引均在；增加索引无法解释该差距，也没有 DDL 证据。
+状态保持 **RUNTIME_REPLACED / OPEN / REPEATED / OBSERVING**：查询预算修复仍有效，但远端 driver/fetch/
+PgBouncer/网络尾延迟及“读取近千行最终返回 0 项”的目录可用性投影缺口未闭环。下一轮需记录 response bytes、
+fetch/pool 分段和实际文件命中数；不能用截断历史、删除审计行或盲目索引规避。
+
+## 2026-09-26 固定窗复核
+
+本窗 canonical 旧慢指纹为 0，应用慢 SQL 从 11 条降至 6 条；但固定窗自然 HTTP 请求为 0，因而没有
+audio-assets 冷/暖请求可以验证查询预算、文件命中或用户时延。后窗请求解析器能正常识别 `/health` 与四个
+ZSXQ 只读 API，说明这里是流量覆盖空窗而不是解析器再次失效。状态继续
+**RUNTIME_REPLACED / OPEN / REPEATED / OBSERVING**；“未捕获”不能升级为未复发或 CLOSED，下一次自然
+audio-assets 仍须补齐候选/存在/返回行数、response bytes、pool/fetch/deserialize 分段。
+
+## 2026-09-29 冷目录长尾再次复发
+
+固定窗 request `0817e459` 的 audio-assets 为 200/7.524 秒；canonical 指纹
+`be891b5c1af362da` 单次 6.851 秒、返回 1,047 行。对应连接持有 6.897 秒，SQL 占 6.851 秒、
+非 SQL 仅 46ms，因此本次没有 Session 跨文件或外部 I/O 的证据。生产只读 EXPLAIN 顺扫 2,985 行、
+返回 1,047 行、326 shared read、sort 974kB、无 temp，executor 3.656ms；应用耗时约为其 1,874 倍。
+
+旧逐附件 N+1 与逐项 canonical 未进入慢样本，一次有界投影仍有效；但远端 driver/fetch/PgBouncer/网络
+尾延迟明确复发。表规模与选择性不支持为该 3MB 级、返回约三分之一行的查询新增索引。本项继续
+**RUNTIME_REPLACED / OPEN / REPEATED / OBSERVING**；下一自然冷/暖请求必须补 pool acquire、fetch、
+serialize、response bytes 与文件命中计数，暖请求目录 SQL 仍应为 0。

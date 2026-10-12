@@ -6,6 +6,67 @@
 
 复发根因登记表：[`recurrence-registry.json`](recurrence-registry.json)。正式回顾归档在 [`reviews/`](reviews/)。
 
+2026-09-29 每日复核：[数据库性能巡检](reviews/2026-09-29-db-performance-audit.md)。
+应用慢 SQL 恶化到 47 条/68.197 秒、P95/max 2.531/6.851 秒，但代表 executor 仅 0.024–3.656ms，
+仍无 DDL 依据。Tailscale 证实同一旧 MacBook Pro 重入网换 IP；本窗 27/39 durable task 为 old-root，
+旧根 Publisher 17 条中 5 条失败。已为 pending/processing repair 增加 Session 外素材可达性 fail-closed，
+1722 项全量通过并最终标准重启到 backend PID 71629；代码 RUNTIME_REPLACED，但物理旧栈尚未隔离且缺自然后窗，
+保持 OPEN/REPEATED/OBSERVING。YouTube id 21/56 第十窗复发；无索引 DDL。
+
+2026-09-28 每日复核：[数据库性能巡检](reviews/2026-09-28-db-performance-audit.md)。
+应用慢 SQL 回落到 6 条/8.261 秒，notification 与 topics/local 同形 executor 仅 0.034–0.257ms，继续排除
+缺索引；但 2 个 PDF 清洗和 2 个 ZSXQ 发布仍 4/4 携 old checkout。远端 MacBook Pro 当前离线且连接归零，
+只是正向观察，固定窗仍已复发，保持 OPEN/HOST_OFFLINE_OBSERVED/WAITING_FULL_WINDOW。日快照已 TDD 扩展为
+所有 feature 的 root 归属门禁；YouTube id 21/56 第九窗复发，无 DDL。
+
+2026-09-27 每日复核：[数据库性能巡检](reviews/2026-09-27-db-performance-audit.md)。
+应用慢 SQL 恶化到 11 条/13.393 秒，P95/max 2.305 秒，但 Insights 代表 executor 仅 34.990ms，仍无
+DDL 依据。首次把 old-root actor 定位到仍在线的 MacBook Pro：6 个生产库会话，且本窗 10/10 PDF
+清洗/ZSXQ 发布任务携旧 checkout；保持 OPEN/ROOT_HOST_LOCATED，等待人工停旧栈或凭据/namespace 隔离。
+YouTube id 21/56 第八窗复发；天然业务 HTTP 仍为 0，按未捕获报告。
+
+2026-09-26 每日复核：[数据库性能巡检](reviews/2026-09-26-db-performance-audit.md)。
+应用慢 SQL 降至 6 条/8.242 秒，六个 executor 仅 0.013–0.162ms，无 DDL 依据；但 Publisher 恶化为
+19/19 old-root、7/19 失败，当前 Watchdog 重投旧根不可达素材的调用链已闭环，继续
+OPEN/WAITING_DISTRIBUTED_ISOLATION。YouTube id 21/56 第七窗复发；固定窗 HTTP 0 请求按未捕获报告。
+
+2026-09-25 每日复核：[数据库性能巡检](reviews/2026-09-25-db-performance-audit.md)。
+应用慢 SQL 升至 11 条/17.970 秒，MP3 冷目录 5.692 秒而 executor 仅 2.176ms，远端尾延迟复发、无 DDL 依据；
+修复了[巡检器漏计彩色请求日志](2026-09-25-db-audit-colored-request-log-omission.md)，真实回放恢复 305 请求/88 端点。
+Publisher 仍有 7/16 old-root 写入，YouTube id 21/56 第六窗复发，均保持 OPEN。
+
+2026-09-24 每日复核：[数据库性能巡检](reviews/2026-09-24-db-performance-audit.md)。
+应用慢 SQL 降至 2 条/2.245 秒，executor 仅 0.048–0.117ms 且无锁、长事务或 PgBouncer 错误；
+但 26 条 Publisher 全部携旧 checkout 路径，5 条写旧 reason 并换 ID 8 次，3 条因旧产物不可达失败。
+分布式旧 actor 保持 OPEN/REPEATED；scheduler import-time 日志污染已安全运行替换，待完整后窗；无 DDL。
+
+2026-09-23 每日复核：[数据库性能巡检](reviews/2026-09-23-db-performance-audit.md)。
+应用慢 SQL 降至 8 条/10.887 秒，代表 executor 0.078–0.210ms 且无锁、长事务或 PgBouncer 故障；
+但 12 条 Publisher 中 4 条再次写入旧 reason、累计换 ID 7 次，证实本机路径门禁假绿。
+问题保持 OPEN/REPEATED，等待跨主机停旧栈或凭据/namespace 隔离；无索引 DDL。
+
+2026-09-22 每日复核：[数据库性能巡检](reviews/2026-09-22-db-performance-audit.md)。
+慢 SQL 9 条/13.349 秒，较前窗数量下降 57.1%、累计下降 56.0%；定位 Publisher P0 为旧 checkout
+Celery/Watchdog 与当前项目共享 broker/DB/重复 nodename，已增加跨 checkout 冲突与 repair fail-closed 门禁并
+运行替换，仍待自然任务和完整后窗。ZSXQ present-empty 与调度器测试日志污染达到 CLOSED/RUNTIME_ACCEPTED；
+YouTube id 21/56 继续自然复发，人工脚本尚未执行。
+
+2026-09-21 每日复核：[数据库性能巡检](reviews/2026-09-21-db-performance-audit.md)。
+应用慢 SQL 21 条/30.339 秒，PgBouncer 六类故障与锁/长事务均为 0；新增修复
+[ZSXQ 发布把明确空来源映射误作历史缺字段](2026-09-21-zsxq-explicit-empty-source-refs-legacy-fallback.md)，
+代码与查询预算已验证，待安全运行替换及自然任务。Publisher 旧可见消息换 ID 语义又留审计，继续
+OPEN/REPEATED；YouTube 两个失效源继续自然复发，人工脚本尚未执行。
+
+2026-09-20 每日复核：[数据库性能巡检](reviews/2026-09-20-db-performance-audit.md)。
+慢 SQL 14 条/17.058 秒，executor 代表值 0.025–35.202ms 且 PgBouncer 六类故障为 0，无索引 DDL 依据。
+新增定位[两个不可用 YouTube 频道持续制造每日同步失败](2026-09-20-youtube-sync-unavailable-channels-repeat-failure.md)：
+失败身份观测已 TDD 修复并安全重启，生产配置脚本待人工复核执行，根因仍 OPEN/REPEATED。
+
+2026-09-19 每日复核：[数据库性能巡检](reviews/2026-09-19-db-performance-audit.md)。
+完成慢 SQL 降至 11 条/15.149 秒，但五条 Publisher 任务反复替换投递 ID 后达到修复上限而失败，
+保持 OPEN/REPEATED。独立 B站调度器 23 个真实整点恢复 6/6，外部连接断点仍 OPEN；
+修复了[单测日志污染生产调度器日志](2026-09-19-scheduler-test-logs-contaminated-production.md)，待正常启动及后窗验收。
+
 2026-09-18 每日复核：[数据库性能巡检](reviews/2026-09-18-db-performance-audit.md)。
 私网路由保持正确但 01:36 再发 PgBouncer query-wait/TLS 断连；巡检补读独立调度器日志，
 并修正数据库失败时错误启用已停用的 ZSXQ 全部 Tab 计划。网络根因仍 OPEN。
@@ -31,6 +92,23 @@ executor、锁和 Session 证据继续排除缺索引，既有网络簇保持 OP
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-09-29 | [每日数据库性能与错误巡检](reviews/2026-09-29-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 分布式运行拓扑 | 慢 SQL 47 条/68.197 秒；old-root 27/39，素材门禁已运行替换，根因仍 OPEN；无 DDL |
+| 2026-09-28 | [每日数据库性能与错误巡检](reviews/2026-09-28-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 分布式运行拓扑 | 慢 SQL 6 条/8.261 秒；old-root 4/4 复发，远端当前离线待完整窗；无 DDL |
+| 2026-09-27 | [每日数据库性能与错误巡检](reviews/2026-09-27-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 分布式运行拓扑 | 慢 SQL 11 条/13.393 秒；old-root 远端主机已定位，OPEN；无 DDL |
+| 2026-09-27 | [远端旧运行时仍持生产数据库会话并创建 old-root 内容任务](2026-09-27-remote-old-runtime-production-db-sessions.md) | 内容清洗 / ZSXQ 发布 / PostgreSQL / Redis-Celery | P0 OPEN/REPEATED；同一主机换 IP，代码门禁已运行替换，待物理隔离与自然后窗 |
+| 2026-09-26 | [每日数据库性能与错误巡检](reviews/2026-09-26-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 分布式运行拓扑 | 慢 SQL 6 条/8.242 秒；Publisher 19/19 old-root、7 failed，OPEN/REPEATED；无 DDL |
+| 2026-09-25 | [每日数据库性能与错误巡检](reviews/2026-09-25-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 分布式运行拓扑 | 慢 SQL 11 条/17.970 秒；Publisher/YouTube 仍 OPEN；无 DDL |
+| 2026-09-25 | [DB 巡检漏计彩色控制台请求日志](2026-09-25-db-audit-colored-request-log-omission.md) | 巡检器 / HTTP 基线 / request→SQL 关联 | PRODUCTION_REPLAY_ACCEPTED/OBSERVING；固定窗恢复 305 请求 |
+| 2026-09-24 | [每日数据库性能与错误巡检](reviews/2026-09-24-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 分布式运行拓扑 | 慢 SQL 2 条/2.245 秒；Publisher 旧运行时导致 3 条资产不可达失败，OPEN/REPEATED；无 DDL |
+| 2026-09-24 | [Scheduler API 导入污染生产日志](2026-09-24-scheduler-api-import-production-log-contamination.md) | scheduler/API/runner / 日志归因 / DB 巡检 | RUNTIME_REPLACED(API)/OBSERVING；backend 无 scheduler.log handler，待完整后窗 |
+| 2026-09-23 | [每日数据库性能与错误巡检](reviews/2026-09-23-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 分布式运行拓扑 | 应用慢 SQL 8 条/10.887 秒；Publisher 旧 actor 再现，WAITING_DISTRIBUTED_ISOLATION；无 DDL |
+| 2026-09-22 | [每日数据库性能与错误巡检](reviews/2026-09-22-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 运行拓扑 | 慢 SQL 9 条/13.349 秒；Publisher 跨 checkout 根因已修待自然后窗；ZSXQ 关闭；无 DDL |
+| 2026-09-21 | [每日数据库性能与错误巡检](reviews/2026-09-21-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 独立调度器 | 慢 SQL 21 条/30.339 秒；ZSXQ present-empty 回退已修待运行；Publisher/YouTube 仍 OPEN；无 DDL |
+| 2026-09-21 | [ZSXQ 发布把明确为空的来源映射误作历史缺字段](2026-09-21-zsxq-explicit-empty-source-refs-legacy-fallback.md) | ZSXQ publish / 附件状态 / publication_tasks JSON | CLOSED/RUNTIME_ACCEPTED；3 个自然任务与后续完整窗口无旧回退指纹 |
+| 2026-09-20 | [每日数据库性能与错误巡检](reviews/2026-09-20-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 独立调度器 | 慢 SQL 14 条/17.058 秒；YouTube 双任务固定失败已定位，人工配置待执行；无 DDL |
+| 2026-09-20 | [两个不可用 YouTube 频道持续制造每日同步失败](2026-09-20-youtube-sync-unavailable-channels-repeat-failure.md) | YouTube channel/video sync / 来源生命周期 / 通知 | OPEN/REPEATED；观测修复已运行替换，停用脚本待人工复核与自然周期 |
+| 2026-09-19 | [每日数据库性能与错误巡检](reviews/2026-09-19-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 独立调度器 | 慢 SQL 11 条；Publisher 五条 queue-repair 终态失败 OPEN/REPEATED；无 DDL 证据 |
+| 2026-09-19 | [单测日志污染生产 B站调度器日志](2026-09-19-scheduler-test-logs-contaminated-production.md) | B站情报 runner / 日志归因 / 巡检 | CLOSED/RUNTIME_ACCEPTED；22 个自然周期正常且无新测试 marker |
 | 2026-09-18 | [每日数据库性能与错误巡检](reviews/2026-09-18-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 调度器 | 私网连接瞬断复发；配置回退修复待运行验收，网络 OPEN |
 | 2026-09-18 | [数据库瞬断把已停用的 ZSXQ 全部 Tab 计划临时启用](2026-09-18-zsxq-schedule-db-error-enabled-disabled-targets.md) | ZSXQ all-tabs / scheduler / PostgreSQL | P0 CODE_VERIFIED / WAITING_RUNTIME_REPLACEMENT / OBSERVING |
 | 2026-09-16 | [每日数据库性能与错误巡检](reviews/2026-09-16-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 运行拓扑 | 主机重启后 Tailscale 注销；应用停机 12:20:56，OPEN/BLOCKED_USER_AUTH |
@@ -42,7 +120,7 @@ executor、锁和 Session 证据继续排除缺索引，既有网络簇保持 OP
 | 2026-09-13 | [Publisher 上传成功后保留孤儿清理错误](2026-09-13-publisher-success-preserved-orphan-error.md) | Publisher upload-only / Watchdog / 终态一致性 | RUNTIME_REPLACED/OBSERVING；1674 项全量通过，待自然 upload-only 成功 |
 | 2026-09-12 | [每日数据库性能与错误巡检](reviews/2026-09-12-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | 错误与 timeout 为 0；慢 SQL 27 条/70.433 秒；无 DDL 证据；Publisher 修复已运行替换 |
 | 2026-09-11 | [每日数据库性能与错误巡检](reviews/2026-09-11-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | DB 错误为 0；慢 SQL 13 条/25.971 秒；无 DDL 证据；Publisher repair P0 已改码 |
-| 2026-09-11 | [Publisher 队列修复替换仍可见消息导致任务自我饿死](2026-09-11-publisher-queue-repair-visible-message-starvation.md) | Publisher pending repair / render queue / Redis unacked | CODE_VERIFIED/AWAITING_RUNTIME_REPLACEMENT；TDD 与 queue-repair 51/51 通过 |
+| 2026-09-11 | [Publisher 队列修复替换仍可见消息导致任务自我饿死](2026-09-11-publisher-queue-repair-visible-message-starvation.md) | Publisher pending repair / render queue / Redis unacked | 09-27 远端 old-root 主机已定位；OPEN/REPEATED，等待人工停旧栈或凭据隔离 |
 | 2026-09-10 | [每日数据库性能与错误巡检](reviews/2026-09-10-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | 错误为 0；慢 SQL 较基线下降、较桥接窗回升；无 DDL 证据，网络继续 OPEN |
 | 2026-09-10 | [DB 巡检漏报任务门禁的短暂 idle-in-transaction 观测](2026-09-10-db-audit-missed-task-guard-idle-observations.md) | DB 巡检 / runtime guard / Session | CODE_CHANGED/REPLAY_ACCEPTED；31 个短暂观测已正确汇总，待下一完整窗 |
 | 2026-09-05 | [每日数据库性能与错误巡检](reviews/2026-09-05-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 索引与膨胀 | 错误为 0，但慢 SQL 总耗时升至 181.964 秒；最终代码待运行时替换，网络簇 OPEN/REPEATED/OBSERVING |

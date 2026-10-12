@@ -43,3 +43,21 @@
 - 06:17 安全门确认无不可中断任务后标准重启；06:18 后端引导报告 17/17 worker、6/6 scheduler、errors=[]，新调度器从 DB 读到两条停用配置，`startup_trigger queued=False targets=[]`，后端 `/health` 为 200。
 - 完整测试及其独立失败见 `reviews/2026-09-18-db-performance-audit.md`；尚未在新进程上发生可观察的真实数据库故障，后续完整 24 小时窗口前保持 OBSERVING。
 - 下一次故障必须证明 `DB schedule config unavailable` 时 all-tabs job 数为 0，恢复后按数据库 `status` 重建且没有意外投递；同时核对 PgBouncer、任务表与调度日志。
+
+## 2026-09-19 后窗复核
+
+新 PID 72404 在 09-18 06:18 启动，读取两条 `status=0` 配置，保持
+`targets=[] queued=False`；本次固定窗（09-18 06:00–09-19 06:00）未见生产配置读取故障，
+仅新进程后窗不足完整 24 小时。窗后 `/api/v1/zsxq/system-sync-scheduler/status` 返回
+200/0.471 秒。06:07/06:15 的故障注入与恢复文本是测试污染，不得作为生产故障验收。
+仍为 RUNTIME_REPLACED/OBSERVING；待真实或受控故障中证明 0 job、0 投递与恢复后仍停用。
+
+## 2026-09-20 完整后窗复核
+
+固定窗内没有生产 `DB schedule config unavailable`、意外 all-tabs 投递或 ZSXQ sync run；
+两条停用配置继续保持 `status=0`。四个重点 API 的主动验收均为 200：overview 281.61ms、
+topics/local 390.60ms、topics/local/tabs 213.16ms、sync/status 441.20ms。overview 返回陈旧缓存后
+在同一 Web 进程异步刷新 3.636 秒，未把刷新 Session 跨到前台请求。
+
+本窗仍没有真实数据库故障样本，0 投递只能证明正常路径尊重停用配置，不能证明故障注入路径
+已在运行态触发；保持 RUNTIME_REPLACED/OBSERVING。下一次数据库异常仍须验证 0 job、0 投递和恢复语义。

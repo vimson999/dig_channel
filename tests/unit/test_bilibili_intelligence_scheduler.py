@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -22,6 +24,48 @@ from services.workflow_notification_service import workflow_notification_service
 
 
 class BilibiliIntelligenceSchedulerTest(unittest.TestCase):
+    def test_import_does_not_attach_production_log_handler(self):
+        # Importing the runner for tests must not redirect every test logger
+        # into the independently managed scheduler's production log.
+        environment = dict(os.environ, PYTHONPATH=str(BACKEND_DIR))
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import logging, run_bilibili_intelligence_scheduler; "
+                "print([getattr(h, 'baseFilename', '') "
+                "for h in logging.getLogger().handlers])",
+            ],
+            cwd=BACKEND_DIR,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertNotIn("bilibili_intelligence_scheduler.log", result.stdout)
+
+    def test_explicit_scheduler_logging_writes_to_its_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "scheduler.log"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import logging, sys; from pathlib import Path; "
+                    "import run_bilibili_intelligence_scheduler as runner; "
+                    "runner.LOG_PATH = Path(sys.argv[1]); "
+                    "runner._configure_logging(); "
+                    "logging.getLogger('bilibili_intelligence_scheduler').error('scheduler startup marker')",
+                    str(log_path),
+                ],
+                cwd=BACKEND_DIR,
+                env=dict(os.environ, PYTHONPATH=str(BACKEND_DIR)),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("scheduler startup marker", log_path.read_text())
+
     def setUp(self):
         self.app = Flask(__name__)
         self.app.config.update(
