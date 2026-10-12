@@ -16,7 +16,7 @@ class DataTable {
         this.tableData = null;
         this.selectedChannelIds = []; // 已选择的频道ID列表
         this.allChannels = []; // 所有可用频道
-        this.viewMode = document.getElementById('home-table-view') ? 'summary' : 'detail';
+        this.viewMode = document.getElementById('home-table-view')?.value || 'detail';
         this.summarySearch = '';
         this.summarySort = 'estimated_revenue';
         this.explicitSelection = false;
@@ -34,11 +34,17 @@ class DataTable {
 
     // 绑定事件
     bindEvents() {
+        const syncSummaryControls = () => {
+            for (const id of ['home-table-search', 'home-table-sort']) {
+                const control = document.getElementById(id);
+                if (control) control.disabled = this.viewMode !== 'summary';
+            }
+        };
+        syncSummaryControls();
+
         document.getElementById('home-table-view')?.addEventListener('change', event => {
             this.viewMode = event.target.value;
-            for (const id of ['home-table-search', 'home-table-sort']) {
-                document.getElementById(id).disabled = this.viewMode !== 'summary';
-            }
+            syncSummaryControls();
             if (this.viewMode === 'summary' && this.currentPage !== 1) {
                 this.currentPage = 1;
                 this.loadTableData();

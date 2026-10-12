@@ -1257,6 +1257,111 @@ class YouTubeDataApp {
         }
     }
 
+    // 手动依次执行首页的三项数据采集任务，不改变后台计划任务。
+    async runHomepageSync() {
+        if (this.homepageSyncRunning) return;
+
+        this.homepageSyncRunning = true;
+        const button = document.getElementById('home-run-sync-btn');
+        const label = document.getElementById('home-run-sync-label');
+        const status = document.getElementById('home-run-sync-status');
+        const originalLabel = label?.textContent || '执行三项同步';
+        const summaries = [];
+        let hasIssues = false;
+
+        if (button) {
+            button.disabled = true;
+            button.setAttribute('aria-busy', 'true');
+            button.classList.add('opacity-60', 'cursor-not-allowed');
+        }
+
+        const updateStatus = (text, state = 'running') => {
+            if (!status) return;
+            status.hidden = false;
+            status.textContent = text;
+            status.dataset.state = state;
+        };
+
+        const tasks = [
+            {
+                name: 'B站充电人数采集',
+                run: () => api.post('/bilibili-intelligence/charging-dashboard/sync', {}),
+                summarize: data => {
+                    const synced = Number(data.synced) || 0;
+                    const failed = Number(data.failed) || 0;
+                    return {
+                        text: `B站充电人数采集：${synced} 个成功${failed ? `，${failed} 个失败` : ''}`,
+                        hasIssues: failed > 0,
+                    };
+                },
+            },
+            {
+                name: 'YouTube 频道数据同步',
+                run: () => api.syncAllChannels({ use_parallel: true, max_workers: 5, active_only: true }),
+                summarize: data => {
+                    const succeeded = Number(data.success_count) || 0;
+                    const failed = Number(data.failed_count) || 0;
+                    return {
+                        text: `YouTube 频道数据同步：${succeeded} 个成功${failed ? `，${failed} 个失败` : ''}`,
+                        hasIssues: failed > 0,
+                    };
+                },
+            },
+            {
+                name: 'YouTube 视频同步',
+                run: () => api.syncVideos({ days_back: 10, use_optimization: true, max_workers: 5 }),
+                summarize: data => {
+                    const processed = Number(data.processed) || 0;
+                    const added = Number(data.new_videos) || 0;
+                    const updated = Number(data.updated_videos) || 0;
+                    const errors = Number(data.errors) || 0;
+                    return {
+                        text: `YouTube 视频同步：处理 ${processed} 个频道，新增 ${added} 个，更新 ${updated} 个${errors ? `，${errors} 个错误` : ''}`,
+                        hasIssues: errors > 0,
+                    };
+                },
+            },
+        ];
+
+        try {
+            for (const [index, task] of tasks.entries()) {
+                const progress = `${index + 1}/3`;
+                if (label) label.textContent = `${progress} ${task.name}…`;
+                updateStatus(`正在执行 ${progress}：${task.name}…`);
+
+                try {
+                    const response = await task.run();
+                    if (!response?.success) {
+                        throw new Error(response?.message || '接口返回失败');
+                    }
+                    const result = task.summarize(response.data || {});
+                    summaries.push(result.text);
+                    hasIssues ||= result.hasIssues;
+                } catch (error) {
+                    hasIssues = true;
+                    summaries.push(`${task.name}：失败（${error.message || '未知错误'}）`);
+                }
+            }
+
+            const refreshers = [
+                () => this.loadInitialData(),
+                () => window.dataTableInstance?.loadTableData(),
+                () => window.bilibiliChargingDashboard?.load(),
+            ];
+            await Promise.allSettled(refreshers.map(refresh => Promise.resolve().then(refresh)));
+
+            updateStatus(`${hasIssues ? '执行完成（部分失败）' : '执行完成'}\n${summaries.join('\n')}`, hasIssues ? 'warning' : 'success');
+        } finally {
+            this.homepageSyncRunning = false;
+            if (button) {
+                button.disabled = false;
+                button.removeAttribute('aria-busy');
+                button.classList.remove('opacity-60', 'cursor-not-allowed');
+            }
+            if (label) label.textContent = originalLabel;
+        }
+    }
+
     // 同步所有频道数据
     async syncAllChannels() {
         this.openSyncOptionsModal();

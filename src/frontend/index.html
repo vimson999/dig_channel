@@ -482,17 +482,17 @@ margin: 0;
 
 <div class="bg-white rounded-xl shadow-medium border border-gray-100 overflow-hidden">
 <div class="p-6 border-b border-gray-100 bg-gradient-to-r from-gray-50 to-white">
-<div class="flex items-center justify-between">
+<div class="flex flex-wrap items-center justify-between gap-4">
 <div class="flex items-center gap-3">
 <div class="w-8 h-8 bg-gradient-to-br from-emerald-400 to-emerald-600 rounded-lg flex items-center justify-center">
 <i class="fas fa-table text-white text-sm"></i>
 </div>
 <div>
 <h3 class="text-lg font-bold text-gray-800">频道快照</h3>
-<p class="text-sm text-gray-500">一行一个频道，快速对比最新快照</p>
+<p class="text-sm text-gray-500">一行一个日期，横向对比各频道的每日快照与增量</p>
 </div>
 </div>
-<div class="flex items-center gap-2">
+<div class="flex flex-wrap items-center justify-end gap-2">
 <button onclick="openChannelFilterModal()" class="flex items-center gap-2 bg-gradient-to-r from-purple-500 to-purple-600 text-white px-4 py-2 rounded-button font-medium shadow-lg hover:from-purple-600 hover:to-purple-700 hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200" title="筛选频道">
 <i class="fas fa-filter text-sm"></i>
 筛选频道
@@ -504,6 +504,9 @@ margin: 0;
 <button onclick="refreshData()" class="px-4 py-2 text-gray-600 hover:text-primary-600 hover:bg-primary-50 rounded-button transition-all duration-200 border border-gray-200 hover:border-primary-200" title="刷新数据">
 <i class="fas fa-sync-alt mr-2"></i>刷新
 </button>
+<button id="home-run-sync-btn" type="button" onclick="app.runHomepageSync()" class="flex items-center gap-2 px-4 py-2 text-emerald-700 hover:text-emerald-800 hover:bg-emerald-50 rounded-button transition-all duration-200 border border-emerald-200 hover:border-emerald-300" title="依次执行 B 站充电人数采集、YouTube 频道数据同步和视频同步">
+<i class="fas fa-play-circle text-sm"></i><span id="home-run-sync-label">执行三项同步</span>
+</button>
 <button id="sync-all-btn" onclick="syncAllChannels()" class="px-4 py-2 text-info hover:text-blue-700 hover:bg-blue-50 rounded-button transition-all duration-200 border border-blue-200 hover:border-blue-300" title="同步频道数据">
 <i class="fas fa-cloud-download-alt mr-2"></i>同步
 </button>
@@ -511,6 +514,7 @@ margin: 0;
 <i class="fas fa-download mr-2"></i>导出
 </button>
 </div>
+<p id="home-run-sync-status" role="status" aria-live="polite" class="basis-full min-h-5 whitespace-pre-line text-sm text-slate-600" hidden></p>
 </div>
 
 </div>
@@ -520,7 +524,7 @@ margin: 0;
         <option value="estimated_revenue">估算收入 ↓</option><option value="subscribers">订阅人数 ↓</option><option value="subscriber_change">新增订阅 ↓</option><option value="name">频道名称</option>
     </select>
     <select id="home-table-view" aria-label="快照视图" class="px-3 py-2 border border-gray-300 rounded-button text-sm">
-        <option value="summary">最新日期摘要</option><option value="detail">完整明细（按日期）</option>
+        <option value="detail" selected>按日期明细</option><option value="summary">最新日期摘要</option>
     </select>
     <p id="home-table-status" class="w-full text-xs text-slate-500" role="status"></p>
 </div>
@@ -1157,7 +1161,7 @@ window.DEFER_DATA_TABLE_INIT = true;
 <script src="js/home-channel-dialog.js?v=20261003-1"></script>
 <script src="js/data-table.js?v=20261003-1"></script>
 <script src="js/bilibili-charging-dashboard.js?v=20261003-1"></script>
-<script src="js/new-main.js?v=20261003-2"></script>
+<script src="js/new-main.js?v=20261012-home-sync-1"></script>
 <script src="js/channel-management.js?v=20250110-003"></script>
 <script src="js/shared-navigation.js?v=20261004-navigation-2"></script>
 </body>

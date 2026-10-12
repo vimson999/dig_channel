@@ -8,7 +8,14 @@ function harness() {
     const elements = {};
     const context = vm.createContext({
         console, Intl, Date, URLSearchParams, setTimeout, clearTimeout,
-        document: { addEventListener() {}, getElementById: id => elements[id] || null, querySelector: () => null, querySelectorAll: () => [] },
+        document: {
+            addEventListener() {},
+            getElementById: id => elements[id] || null,
+            querySelector: selector => selector === '#data-table tbody'
+                ? elements['data-table']?.querySelector('tbody') || null
+                : null,
+            querySelectorAll: () => [],
+        },
         window: { addEventListener() {} },
         Utils: { formatCurrency: v => `$${Number(v)}`, formatNumber: v => String(v),
             formatChange: v => String(v), formatDate: v => String(v) },
@@ -89,6 +96,61 @@ test('summary table shows one row per channel and distinguishes absent snapshots
     table.renderTable();
     assert.equal((tbody.innerHTML.match(/<tr[ >]/g) || []).length, 1);
     assert.doesNotMatch(tbody.innerHTML, />Zero</);
+});
+
+test('homepage defaults to a date-per-row channel matrix', async () => {
+    const homeHtml = fs.readFileSync(path.join(__dirname, '../../src/frontend/index.html'), 'utf8');
+    const viewSelect = homeHtml.match(/<select id="home-table-view"[^>]*>([\s\S]*?)<\/select>/)?.[1];
+    assert.ok(viewSelect, 'homepage should expose the snapshot view selector');
+    const options = Array.from(viewSelect.matchAll(/<option value="([^"]+)"([^>]*)>/g));
+    const selectedOption = options.find(([, , attributes]) => /\bselected\b/.test(attributes)) || options[0];
+    assert.equal(selectedOption?.[1], 'detail', 'the date detail view should be the homepage default');
+
+    const { context, elements } = harness();
+    const thead = { innerHTML: '' };
+    const tbody = { innerHTML: '' };
+    const search = { disabled: false, addEventListener() {} };
+    const sort = { disabled: false, addEventListener() {} };
+    elements['home-table-view'] = { value: selectedOption[1], addEventListener() {} };
+    elements['home-table-search'] = search;
+    elements['home-table-sort'] = sort;
+    elements['home-table-status'] = { textContent: '' };
+    elements['home-detail-pagination'] = { innerHTML: '', hidden: false };
+    elements['data-table'] = { querySelector: name => name === 'thead' ? thead : tbody };
+    context.api = {
+        getTableData: async () => ({
+            success: true,
+            data: {
+                channels: [
+                    { channel_id: 1, channel_name: 'Alpha', cpm: 9 },
+                    { channel_id: 2, channel_name: 'Beta', cpm: 6 },
+                ],
+                rows: [
+                    { date: '2026-10-12', channels_data: [
+                        { has_data: true, subscribers: 10, total_views: 100, video_count: 2, subscriber_change: 1, view_change: 5, video_change: 0, estimated_revenue: 2 },
+                        { has_data: true, subscribers: 20, total_views: 200, video_count: 3, subscriber_change: 2, view_change: 6, video_change: 1, estimated_revenue: 3 },
+                    ] },
+                    { date: '2026-10-11', channels_data: [
+                        { has_data: true, subscribers: 9, total_views: 95, video_count: 2, subscriber_change: 0, view_change: 4, video_change: 0, estimated_revenue: 1 },
+                        { has_data: true, subscribers: 18, total_views: 194, video_count: 2, subscriber_change: 1, view_change: 3, video_change: 0, estimated_revenue: 2 },
+                    ] },
+                ],
+                pagination: { page: 1, pages: 1, has_next: false, has_prev: false },
+            },
+        }),
+    };
+
+    const table = new context.DataTable();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    assert.equal(table.viewMode, 'detail');
+    assert.match(thead.innerHTML, /rowspan="2"[^>]*>\s*日期/);
+    assert.match(thead.innerHTML, /colspan="7"[^>]*>\s*Alpha/);
+    assert.equal((tbody.innerHTML.match(/<tr>/g) || []).length, 2);
+    assert.match(tbody.innerHTML, /2026-10-12/);
+    assert.match(tbody.innerHTML, /2026-10-11/);
+    assert.equal(search.disabled, true);
+    assert.equal(sort.disabled, true);
 });
 
 test('opening table filter after chart filter restores table actions and leaves chart selection alone', async () => {
