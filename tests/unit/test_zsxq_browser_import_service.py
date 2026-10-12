@@ -1063,6 +1063,102 @@ class ZsxqBrowserImportPersistenceTest(unittest.TestCase):
         self.assertEqual(history["summary"]["records_seen"], 3)
         self.assertEqual(history["summary"]["unique_downloads"], 3)
 
+    def test_recent_mp3_history_reports_latest_video_workflow_submission(self):
+        tempdir, _downloads, service = self._service_and_downloads()
+        self.addCleanup(tempdir.cleanup)
+
+        clean_tasks = [
+            PublicationTask(params={}, feature="content_audio_clean")
+            for _ in range(2)
+        ]
+        db.session.add_all(clean_tasks)
+        db.session.flush()
+        submitted_asset = ContentPipelineAsset(
+            id="11111111-1111-4111-8111-111111111111",
+            media_type="audio",
+            content_sha256="a" * 64,
+            canonical_task_id=clean_tasks[0].id,
+            source_path="/submissions/submitted.mp3",
+            filename="已投递.mp3",
+            source_mode="browser_sidebar",
+            status="cleaned",
+            created_at=datetime(2026, 8, 25, 9, 0, 0),
+        )
+        untouched_asset = ContentPipelineAsset(
+            id="22222222-2222-4222-8222-222222222222",
+            media_type="audio",
+            content_sha256="b" * 64,
+            canonical_task_id=clean_tasks[1].id,
+            source_path="/submissions/untouched.mp3",
+            filename="未投递.mp3",
+            source_mode="browser_sidebar",
+            status="cleaned",
+            created_at=datetime(2026, 8, 25, 10, 0, 0),
+        )
+        db.session.add_all([submitted_asset, untouched_asset])
+        db.session.add_all(
+            [
+                PublicationTask(
+                    id="33333333-3333-4333-8333-333333333333",
+                    params={
+                        "feature": "mp3_video_workflow",
+                        "source_feature": "content_pipeline_asset",
+                        "source_task_id": submitted_asset.id,
+                    },
+                    feature="mp3_video_workflow",
+                    source_task_id=submitted_asset.id,
+                    status="failed",
+                    current_step="visuals_failed",
+                    created_at=datetime(2026, 8, 25, 11, 0, 0),
+                ),
+                PublicationTask(
+                    id="44444444-4444-4444-8444-444444444444",
+                    params={
+                        "feature": "mp3_video_workflow",
+                        "source_feature": "content_pipeline_asset",
+                        "source_task_id": submitted_asset.id,
+                    },
+                    feature="mp3_video_workflow",
+                    source_task_id=submitted_asset.id,
+                    status="processing",
+                    current_step="landscape_video_waiting",
+                    created_at=datetime(2026, 8, 25, 12, 0, 0),
+                ),
+            ]
+        )
+        db.session.commit()
+
+        history = service.recent_download_history(
+            "mp3",
+            days=3,
+            now=datetime.fromisoformat("2026-08-25T20:00:00+08:00"),
+            require_submission_receipt=True,
+        )
+
+        files = {item["filename"]: item for item in history["files"]}
+        self.assertEqual(
+            files["已投递.mp3"]["mp3_video_workflow"],
+            {
+                "submitted": True,
+                "job_id": "44444444-4444-4444-8444-444444444444",
+                "status": "processing",
+                "step": "landscape_video_waiting",
+                "submitted_at": "2026-08-25T12:00:00",
+                "completed": False,
+            },
+        )
+        self.assertEqual(
+            files["未投递.mp3"]["mp3_video_workflow"],
+            {
+                "submitted": False,
+                "job_id": None,
+                "status": None,
+                "step": None,
+                "submitted_at": None,
+                "completed": False,
+            },
+        )
+
     def test_invalid_inline_manifest_does_not_reserve_run_id_or_persist_manifest(self):
         tempdir, downloads, service = self._service_and_downloads()
         self.addCleanup(tempdir.cleanup)
