@@ -3,7 +3,7 @@
 ## 基本信息
 
 - 日期：2026-09-27
-- 状态：OPEN / REPEATED / ROOT_HOST_LOCATED / HOST_OFFLINE_OBSERVED / WAITING_FULL_WINDOW
+- 状态：OPEN / REPEATED / ROOT_HOST_LOCATED / REMOTE_SESSIONS_ZERO_OBSERVED / WAITING_DISTRIBUTED_ISOLATION
 - 严重级别：P0
 - 影响模块：内容清洗、ZSXQ 发布、Publisher、PostgreSQL、Redis/Celery 分布式运行拓扑
 - 根因分类：旧部署与当前部署共享生产数据库及 broker 凭据，且任务缺少不可伪造的 deployment identity
@@ -99,3 +99,104 @@ MacBook Pro 当前 `Online=false`，最后在线时间为 `2026-09-27 22:20:00 +
 `publication_tasks.feature` 的 old/current/unclassified root 汇总和旧根逐行证据；生产只读回放正确列出
 4 条旧根任务。根因状态继续 OPEN/REPEATED，进入 HOST_OFFLINE_OBSERVED/WAITING_FULL_WINDOW；下一轮必须
 确认整窗远端连接为 0，并取得自然 PDF、ZSXQ 与 MP3→Publisher 仅由当前 root 执行的证据。
+
+## 2026-10-13 固定窗复核：旧运行时全面复发且远端主机当前在线
+
+窗口内 25 条 Publisher 全部为 old-root，其中 9 条失败，失败率 36.0%，累计失败壁钟 2,623.303 秒、
+P95 428.028 秒、最大 465.194 秒。失败拆分为：3 条 `required_material_unavailable` 被现有 fail-closed
+门禁正确阻断、3 条发布时间非法、2 条 B站账号未登录、1 条缺少已生成视频。另有 4/4 MP3 workflow、
+2/2 audio clean 和 2/9 ZSXQ publish 为 old-root；仅 PDF clean 因路径字段未分类，不能据此判为 current-root。
+这不是偶发旧行回放，而是固定窗内持续由旧部署创建和执行的真实任务。
+
+当前 `pg_stat_activity` 仍看到 `100.117.177.98` 的 6 个空 `application_name` idle 会话；Tailscale 将该地址
+映射到在线的“v9的MacBook Pro”。当前 Mac mini `100.96.3.12` 另有 5 个会话。旧主机从此前地址再次换 IP，
+进一步证明固定 IP 不是 deployment identity。当前本地代码能够阻止一部分跨根重投扩大，但不能阻止远端旧代码
+继续写 DB、投 broker 或使用过期平台凭据。
+
+状态升级为 **OPEN / REPEATED / WAITING_DISTRIBUTED_ISOLATION**。必须人工在该 MacBook Pro 停止全部旧
+backend/Celery/Watchdog/scheduler/手工脚本，或轮换 PostgreSQL/Redis 凭据并隔离 broker namespace；随后要求
+远端会话归零、old-root 自然任务为 0、三类当前根自然任务成功且 Publisher 失败指纹不复发，连续完整 24 小时
+后才可推进关闭。
+
+## 2026-10-14 固定窗复核：old-root 与远端会话归零，但未达到关闭窗口
+
+固定窗五类 durable task 未发现 old-root：audio clean 3/3 current、MP3 4/4 current、Publisher 17/17
+current；PDF clean 5 条和 ZSXQ publish 5/8 因缺路径证据仍为 unclassified，不能把未分类冒充 current-root。
+Publisher 16 completed/1 failed，唯一失败为当前根找不到已生成视频文件，不是旧根素材路径或旧平台凭据。
+
+当前 `pg_stat_activity` 只见本机 PgBouncer source `100.96.3.12` 与本机 gunicorn 会话，上一窗
+`100.117.177.98` 的 6 个空 application_name 会话已归零。该结果相较 10-13 明显改善，但 backend 日志只覆盖
+约 20 小时 34 分，且没有证据证明旧主机进程已卸载、生产凭据已轮换或 broker namespace 已隔离。
+
+状态由 REMOTE_HOST_ONLINE 降为 **REMOTE_SESSIONS_ZERO_OBSERVED**，整体仍是
+**OPEN / REPEATED / OBSERVING / WAITING_DISTRIBUTED_ISOLATION**。下一轮必须覆盖完整 24 小时、远端会话和
+old-root 继续为 0，并取得 PDF、ZSXQ、MP3→Publisher 三类当前根自然成功；物理隔离未完成前不得 CLOSED。
+
+## 2026-10-15 固定窗复核：同一旧主机会话与 old-root 自然任务再次复发
+
+上一窗的远端会话归零没有延续。当前 `pg_stat_activity` 再次看到 `100.117.177.98` 的 6 个空
+`application_name` 会话，backend start 每约 2 分钟出现一批，均为 idle/ClientRead 或 `DISCARD ALL`；Tailscale
+将该地址稳定映射到在线的“v9的MacBook Pro”。这说明旧连接池仍在运行，直接终止连接只会重连。
+
+固定窗 2/2 `audio_transcription` durable task 都携旧 checkout，壁钟 277.283/915.122 秒；当前所有本地日志均
+找不到两个 task id，进一步证明执行器在本日志集合之外。本窗 PDF、MP3、Publisher、ZSXQ 任务虽均为 current，
+也不能抵消 audio transcription 的自然复发。
+
+状态回升为 **OPEN / REPEATED / WAITING_DISTRIBUTED_ISOLATION**。责任动作仍是人工在旧 MacBook Pro 停止
+backend/Celery/Watchdog/scheduler/手工脚本；不能证明全停时轮换 PostgreSQL/Redis 凭据并隔离 broker namespace。
+验收要求完整 24 小时远端会话=0、所有 feature old-root=0，并有当前根自然任务成功；未完成物理隔离前不得关闭。
+
+## 2026-10-16 固定窗复核：完整窗 old-root 为 0，但物理隔离仍未证明
+
+本窗 audio clean 2/2、PDF clean 8/8、MP3 workflow 4/4、Publisher 17/17、ZSXQ publish 10/10 均归类为
+current-root，old-root 与 unclassified 均为 0；当前 `pg_stat_activity` 也只看到本机 PgBouncer source
+`100.96.3.12` 和 localhost gunicorn，不再看到 `100.117.177.98`。这是相较上一窗 2/2 audio transcription
+old-root 与 6 个远端会话的明确改善。
+
+但尚无旧 Mac 全部服务已停、凭据轮换或 broker namespace 隔离的物理证据，一个完整绿窗也不能撤销此前
+反复重连事实。状态保持 **OPEN / REPEATED / OBSERVING / WAITING_DISTRIBUTED_ISOLATION**。下一轮继续要求
+全 feature old-root=0、远端会话=0、自然任务仅由当前根完成；物理写入围栏未完成前不得关闭。
+
+## 2026-10-17 固定窗复核：old-root 为 0，但日志外 actor 假关闭当前根任务
+
+纠正巡检快照时区后，本窗 audio/PDF/MP3/Publisher/ZSXQ 共 39 条 durable task 全为 current-root，当前
+`pg_stat_activity` 也未看到旧主机。然而 Publisher 19 条中 3 条被写成
+`queue_repair_blocked/required_material_unavailable`，失败率 15.8%，影响 2/4 MP3 父任务。三条关闭所列的
+四个当前根 image/audio 文件实际都存在，mtime 均早于关闭时间；本地日志能看到消息仍在队列及 worker 接收终态，
+却没有当前代码写入该关闭原因的日志。
+
+这证明共享 DB/Redis 的日志外 actor 在不同文件系统视角执行了素材门禁：`old-root=0` 和当前远端 DB 会话=0
+仍可能假绿。状态保持 **OPEN / REPEATED / WAITING_DISTRIBUTED_ISOLATION**。责任动作不变：人工停旧 Mac 的
+backend/Celery/Watchdog/scheduler/脚本；无法证明全停时轮换 PostgreSQL/Redis 凭据并隔离 broker namespace。
+下一轮必须为每次终态写入记录 deployment/host/PID/code identity，并要求完整窗假关闭=0、自然 Publisher 成功。
+
+## 2026-10-18 固定窗复核：29/29 old-root，shared broker 再次自然复发
+
+固定窗 29 条目标 durable task 全部携 `dig_ytb_data_claude_v1` 旧 checkout：audio clean 1/1、PDF clean
+4/4、MP3 workflow 3/3、Publisher 16/16、ZSXQ publish 5/5。Publisher 12 completed/4 failed，失败率
+25%，失败壁钟累计 897.952 秒；四条均为 `queue_repair_blocked/required_material_unavailable`。当前
+content worker 还消费过一条旧根 PDF task 并因本机无该路径返回 False，进一步证明共享 DB/Redis/Celery
+namespace 会把文件本地性任务送到不兼容部署。
+
+Tailscale 显示旧 MacBook Pro 在这些任务运行时段仍在线，22:25 后才离线；当前 Mac mini 的进程快照只含当前
+checkout，因此“当前旧机离线/当前本机无旧进程”不能抵消固定窗复发。已为 Publisher pending/processing 的
+素材不可达终态持久化 deployment root、hostname、PID、code identity，并在日志写同一 actor；TDD 定向、
+54 项相关测试与 1,737 项完整 unit 通过。双重安全门后标准重启到 backend PID 14483，17/17 worker、
+Watchdog、6/6 scheduler 均 ok、`errors=[]`，重点只读 API 全部 200。
+
+状态保持 **OPEN / REPEATED / RUNTIME_REPLACED / OBSERVING / WAITING_DISTRIBUTED_ISOLATION**。新审计只解决
+下次归因，不会隔离旧 actor；必须人工停旧 Mac 全栈，或轮换 PostgreSQL/Redis 凭据并隔离 broker namespace。
+下一轮要求完整 24 小时所有 feature old-root=0、任何终态 writer 可归因、自然当前根任务成功且假关闭=0。
+
+## 2026-10-19 固定窗复核：Web 提交再次由旧 Mac 全链执行
+
+固定窗新增 1 个 `content_pdf_clean` 和 1 个 `zsxq_clean_output_publish`，2/2 均为 completed，但
+`web_submission_root`、clean output 与 publish source/output 全部指向 `dig_ytb_data_claude_v1` 旧 checkout；
+PDF 清洗 36/36、发布 36/36，累计壁钟 1,818.552 秒。当前节点 content/publish worker 日志在任务期间没有更新，
+只由当前 notification worker 消费了共享 outbox，证明上传入口、清洗与发布执行器均在日志外旧部署。
+
+旧 MacBook Pro 在任务完成后仍在线，当前离线只是一张快照，未证明服务卸载、凭据轮换或 broker namespace
+隔离。上轮新增的 Publisher 终态 actor 审计本窗没有 Publisher 自然样本，不能验收。状态保持
+**OPEN / REPEATED / WAITING_DISTRIBUTED_ISOLATION**；责任动作仍是人工停旧 Mac 全栈，无法证明全停时轮换
+PostgreSQL/Redis 凭据并隔离 Celery namespace。下一轮要求完整 24 小时所有 feature old-root=0、远端 actor=0、
+当前根 PDF→ZSXQ 与 MP3→Publisher 自然成功，且终态 writer 可归因。

@@ -1,0 +1,7 @@
+/* Rebuild from the repository root with Tailwind CSS 3.4.17:
+ * npx --yes tailwindcss@3.4.17 -i scripts/dev/content-pipeline-submit.tailwind.css --content src/frontend/content-pipeline-submit.html,src/frontend/js/content-pipeline-submit.js -o src/frontend/css/content-pipeline-submit.css --minify
+ * Include the JavaScript source so upload/history state classes are preserved.
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;

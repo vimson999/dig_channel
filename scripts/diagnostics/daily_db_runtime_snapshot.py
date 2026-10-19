@@ -6,14 +6,23 @@ from __future__ import annotations
 import argparse
 import os
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def utc_naive_database_boundary(value, *, timezone_name="Asia/Shanghai"):
+    """Convert a local audit boundary to the UTC-naive timestamps stored by models."""
+    parsed = datetime.fromisoformat(str(value))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo(timezone_name))
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _percentile(values, quantile):
@@ -90,14 +99,29 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--since", required=True)
     parser.add_argument("--until", required=True)
+    parser.add_argument(
+        "--timezone",
+        default=os.environ.get("DAILY_DB_AUDIT_TIMEZONE", "Asia/Shanghai"),
+        help="Timezone for naive --since/--until values (default: Asia/Shanghai)",
+    )
     args = parser.parse_args()
     params = {
-        "since": datetime.fromisoformat(args.since),
-        "until": datetime.fromisoformat(args.until),
+        "since": utc_naive_database_boundary(
+            args.since,
+            timezone_name=args.timezone,
+        ),
+        "until": utc_naive_database_boundary(
+            args.until,
+            timezone_name=args.timezone,
+        ),
         "old_root": "%dig_ytb_data_claude_v1%",
         "current_root": f"%{ROOT}%",
         "empty": "",
     }
+    print(
+        "database_window_utc="
+        f"{params['since'].isoformat(sep=' ')}..{params['until'].isoformat(sep=' ')}"
+    )
 
     load_dotenv(ROOT / ".env")
     engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)

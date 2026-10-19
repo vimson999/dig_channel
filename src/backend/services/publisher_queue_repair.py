@@ -1,7 +1,9 @@
 import base64
+import hashlib
 import json
 import logging
 import os
+import socket
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +28,8 @@ from tasks.publisher import PLATFORM_UPLOAD_QUEUE, run_publication_pipeline
 
 
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_MODULE_CODE_IDENTITY = "sha256:" + hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
 
 DEFAULT_ORPHAN_GRACE_SECONDS = 180
 PENDING_REPAIR_GRACE_SECONDS_BY_FEATURE = {
@@ -302,6 +306,18 @@ REPAIRABLE_PENDING_STEPS_BY_FEATURE = {
 }
 
 
+def _repair_actor_identity() -> Dict[str, Any]:
+    """Return durable identity for a watchdog terminal-state mutation."""
+    return {
+        "deployment_root": str(PROJECT_ROOT),
+        "hostname": socket.gethostname(),
+        "pid": os.getpid(),
+        "code_identity": str(
+            os.environ.get("DIG_YTB_CODE_IDENTITY") or _MODULE_CODE_IDENTITY
+        ),
+    }
+
+
 def _pending_step_repairable(feature: Optional[str], step: Optional[str]) -> bool:
     normalized_step = str(step or "").lower()
     if normalized_step in REPAIRABLE_PENDING_STEPS:
@@ -576,6 +592,7 @@ def maybe_requeue_stale_publisher_child(
             "queue": target_queue,
             "closed_at": now_value.isoformat() + "Z",
             "unavailable_materials": list(unavailable_materials),
+            "actor": _repair_actor_identity(),
         })
         message = (
             "publisher 任务所需素材在当前运行节点不可用，已拒绝跨部署重投；"
@@ -597,9 +614,10 @@ def maybe_requeue_stale_publisher_child(
         if repair_outcome is not None:
             repair_outcome["action"] = "closed"
         active_logger.error(
-            "Closed pending publisher task because required materials are unavailable: child=%s paths=%s",
+            "Closed pending publisher task because required materials are unavailable: child=%s paths=%s actor=%s",
             snapshot.id,
             list(unavailable_materials),
+            json.dumps(repair_state["actor"], ensure_ascii=False, sort_keys=True),
         )
         return updated_snapshot, False
 
@@ -1098,10 +1116,15 @@ def maybe_repair_stale_publisher_processing_task(
         )
         updated_snapshot = _detached_repair_task_snapshot(current)
         db.session.remove()
+        repair_actor = dict(updated_snapshot.result or {}).get(
+            PROCESSING_REPAIR_RESULT_KEY,
+            {},
+        ).get("actor")
         active_logger.error(
-            "Closed orphan publisher task because required materials are unavailable: task=%s paths=%s",
+            "Closed orphan publisher task because required materials are unavailable: task=%s paths=%s actor=%s",
             snapshot.id,
             list(unavailable_materials),
+            json.dumps(repair_actor or {}, ensure_ascii=False, sort_keys=True),
         )
         return updated_snapshot, True, "closed"
 
@@ -2286,6 +2309,7 @@ def _mark_processing_publisher_orphan_failed(
         "previous_celery_id": task.celery_task_id,
         "queue": queue,
         "closed_at": now.isoformat() + "Z",
+        "actor": _repair_actor_identity(),
     }
     unavailable_materials = tuple(unavailable_materials)
     if unavailable_materials:

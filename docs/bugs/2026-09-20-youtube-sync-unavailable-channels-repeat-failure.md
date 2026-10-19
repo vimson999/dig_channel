@@ -121,3 +121,66 @@ Session hold 或无界重试，但每日都在制造必然失败和失败通知�
 42.99 秒。失败仍是 `id=21 Smartpet Video AI` 与 `id=56 数字指南针`，没有 DB timeout、长 Session
 或重试风暴。状态保持 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**；下一步仍是人工复核并执行受保护停用
 脚本，随后以 channel 49/49 和 video errors=0 的两个自然周期验收。
+
+## 2026-10-14 自然周期复核
+
+人工停用脚本仍未执行，第十一次巡检窗口继续命中 `id=21 Smartpet Video AI` 与 `id=56 数字指南针`。
+00:03 channel sync 共 51 个来源，45 成功、6 失败；01:00 video sync 处理 49 个来源、新增 20、更新 66、
+`errors=2`。固定两源仍包含在失败详情中；其余新增失败与同窗 Google API SSL EOF/读超时相关，必须按瞬时外部
+链路与永久不可用来源分开统计，不能扩大停用范围。
+
+状态保持 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。责任动作仍是人工只读复核 21/56 后在 DBeaver
+执行受保护脚本；随后以 channel 49/49、video errors=0 连续两个自然周期验收。
+
+## 2026-10-15 第十二个巡检窗口复核
+
+人工停用脚本仍未执行，`id=21 Smartpet Video AI` 与 `id=56 数字指南针` 继续作为固定失败源出现。
+本窗两个 `videos/sync` 请求分别耗时 48.451/89.596 秒，一个 `channels/sync/all` 为 31.618 秒；它们都没有
+匹配慢 SQL，额外失败明确来自 Google API 30 秒 read timeout。首轮视频同步处理 49 个来源，次轮因瞬时外部
+超时只处理 45 个；固定两源与瞬时网络失败仍须分开，禁止扩大停用范围。
+
+状态保持 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。责任动作仍是人工复核 21/56 后在 DBeaver 执行
+`docs/sql/disable_unavailable_youtube_channels_20260920.sql`，随后以 channel 49/49、video errors=0 连续两个
+自然周期验收；外部 read timeout 另按瞬时链路观察。
+
+## 2026-10-16 第十三个巡检窗口复核
+
+人工停用脚本仍未执行。自然 channel sync 为 51 个来源、49 成功/2 失败、业务耗时 12.87 秒；自然 video
+sync 处理 49 个来源、新增 21、更新 58、`errors=2`、耗时 39.20 秒，固定失败仍是 `id=21` 与 `id=56`。
+同窗手工页面同步分别出现 49.581 秒和 62.791 秒的 Google SSL EOF/30 秒 read timeout，且没有匹配慢 SQL；
+这些瞬时网络失败与两个永久不可用来源继续分开管理。
+
+状态保持 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。责任动作仍是人工在 DBeaver 审核并执行
+`docs/sql/disable_unavailable_youtube_channels_20260920.sql`，随后以 channel 49/49、video errors=0 的连续
+两个自然周期验收。
+
+## 2026-10-17 第十四个巡检窗口复核
+
+人工停用脚本仍未执行。00:03 自然 channel sync 为 51 个来源、49 成功/2 失败，业务耗时 21.74 秒；
+01:01 自然 video sync 处理 49 个来源、新增 22、更新 56、`errors=2`、耗时 59.65 秒，固定失败仍为
+`id=21 Smartpet Video AI` 与 `id=56 数字指南针`。同窗页面手工同步 max 60.294 秒且无匹配慢 SQL，
+继续按外部 I/O 与永久不可用来源分开处理。
+
+状态保持 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。责任动作仍是在 DBeaver 只读复核后执行
+`docs/sql/disable_unavailable_youtube_channels_20260920.sql`，随后以 channel 49/49、video errors=0 连续
+两个自然周期验收。
+
+## 2026-10-18 第十五个巡检窗口复核
+
+人工停用脚本仍未执行。00:03 自然 channel sync 为 51 个来源、49 成功/2 失败，耗时约 20.77 秒；
+01:01 自然 video sync 处理 49 个来源、`errors=2`、耗时约 60.44 秒。固定失败仍精确为
+`id=21 Smartpet Video AI` 与 `id=56 数字指南针`，且没有匹配慢 SQL、Session 长持有或重试风暴。
+
+状态保持 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。责任动作仍是在 DBeaver 审核并执行
+`docs/sql/disable_unavailable_youtube_channels_20260920.sql`，随后以 channel 49/49、video errors=0 的连续
+两个自然周期验收。
+
+## 2026-10-19 第十六个巡检窗口复核
+
+人工停用脚本仍未执行。00:03 自然 channel sync 为 51 个来源、49 成功/2 失败；01:00 video sync 处理
+49 个来源、新增 17、更新 62、`errors=2`。固定失败仍精确为 `id=21 Smartpet Video AI` 与
+`id=56 数字指南针`，且没有匹配慢 SQL、Session 长持有或重试风暴。
+
+状态保持 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。责任动作仍是在 DBeaver 审核并执行
+`docs/sql/disable_unavailable_youtube_channels_20260920.sql`，随后以 channel 49/49、video errors=0 的连续
+两个自然周期验收。

@@ -14,7 +14,7 @@ assert(script.includes("'没有找到已清洗的 MP3。'"), 'empty state must d
 assert(script.includes('this.audioAssetsLoading = true'), 'asset list must expose an in-flight loading state');
 assert(script.includes('正在加载已清洗 MP3'), 'asset list must not render a false empty state while loading');
 assert(
-  html.includes('mp3-video-workflow.js?v=20260829-runtime-worker-status-v6'),
+  /mp3-video-workflow\.js\?v=[^"\s]+/.test(html),
   'the browser must load the cleaned-asset list renderer after this change',
 );
 

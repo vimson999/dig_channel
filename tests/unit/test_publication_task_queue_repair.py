@@ -1270,7 +1270,15 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
             publisher_queue_repair,
             "run_publication_pipeline",
             dummy,
-        ):
+        ), patch("socket.gethostname", return_value="repair-host"), patch(
+            "os.getpid", return_value=4242
+        ), patch.dict(
+            os.environ,
+            {"DIG_YTB_CODE_IDENTITY": "test-code-identity"},
+        ), self.assertLogs(
+            publisher_queue_repair.logger,
+            level="ERROR",
+        ) as captured:
             updated, requeued = (
                 publisher_queue_repair.maybe_requeue_stale_publisher_child(
                     child,
@@ -1285,12 +1293,22 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         repair = updated.result["queue_repair"]
         self.assertEqual(repair["reason"], "required_material_unavailable")
         self.assertEqual(
+            repair["actor"],
+            {
+                "deployment_root": str(Path(__file__).resolve().parents[2]),
+                "hostname": "repair-host",
+                "pid": 4242,
+                "code_identity": "test-code-identity",
+            },
+        )
+        self.assertEqual(
             repair["unavailable_materials"],
             [
                 "/old-checkout/audio/source.mp3",
                 "/old-checkout/render/background.jpg",
             ],
         )
+        self.assertTrue(any("repair-host" in line for line in captured.output))
         self.assertEqual(db.session.get(PublicationTask, child_id).status, "failed")
 
     def test_processing_repair_fails_closed_when_required_materials_are_unavailable(self):
@@ -1323,6 +1341,11 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
             publisher_queue_repair,
             "run_publication_pipeline",
             dummy,
+        ), patch("socket.gethostname", return_value="repair-host"), patch(
+            "os.getpid", return_value=4242
+        ), patch.dict(
+            os.environ,
+            {"DIG_YTB_CODE_IDENTITY": "test-code-identity"},
         ):
             updated, repaired, action = (
                 publisher_queue_repair.maybe_repair_stale_publisher_processing_task(
@@ -1336,6 +1359,15 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(updated.status, "failed")
         repair = updated.result["processing_orphan_repair"]
         self.assertEqual(repair["reason"], "required_material_unavailable")
+        self.assertEqual(
+            repair["actor"],
+            {
+                "deployment_root": str(Path(__file__).resolve().parents[2]),
+                "hostname": "repair-host",
+                "pid": 4242,
+                "code_identity": "test-code-identity",
+            },
+        )
         self.assertEqual(
             repair["unavailable_materials"],
             [

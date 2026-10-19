@@ -219,6 +219,9 @@ ORDER BY xact_start NULLS LAST;
 - 业务列表 API、Celery 看板、自动收口逻辑不会因为只读查询留下事务。
 - 详情自动轮询的父查询不含大 JSON，SQL 数与场景/child 数无关；完整详情字段、原始审计数据和内容哈希
   合并语义保持兼容。必须分别记录完整加载与动态轮询的 response bytes、P50/P95/max 和 SQL origin。
+- 活动态状态轮询只能刷新状态判定所需的轻量投影；日期汇总、去重聚合、统计报表等非状态数据不得绑定到
+  定时 tick。需要及时更新统计时，只允许首屏/用户筛选/手工刷新、成功提交或活动态转终态事件触发，并以
+  浏览器行为合同证明请求数不会随活动时长线性增长。
 - watchdog 连续周期不得重复执行不参与卡死判定、告警或修复的仪表盘展示聚合；展示 API 的单次按需查询
   与后台自动轮询必须按 process、request id 和 SQL origin 分开统计。
 - `db_connection_lifecycle` 不应出现超过默认 5 秒的连接持有；确有长 SQL 时必须同时提供 executor 证据，不能把跨外部等待当成长 SQL。
@@ -240,6 +243,13 @@ ORDER BY xact_start NULLS LAST;
 - 页面轮询接口是否避免返回大 JSON，并在查询后释放 session？
 - 是否有测试或现场 SQL 能证明没有 `idle in transaction`？
 
+## 日巡检时间边界纪律
+
+- 应用模型使用 UTC-naive 时间戳时，Asia/Shanghai 等本地自然日边界必须先附加显式时区，再转换为
+  UTC-naive 后查询；禁止把无时区的本地字符串直接传给数据库过滤条件。
+- 诊断器必须同时输出用户窗口和实际数据库 UTC 边界，并以跨午夜合同覆盖转换。日志、数据库快照和报告三者
+  边界不一致时，运行态结论无效，必须纠正后重放。
+
 ## 跨部署 durable task 重投纪律
 
 - Tailscale IP 不是稳定 deployment identity；同一主机重新入网可能换 node/IP。复发追踪必须同时记录
@@ -252,6 +262,13 @@ ORDER BY xact_start NULLS LAST;
   的路径不得被同一门禁误伤。
 - 代码运行替换只证明防线加载。只有自然任务证明旧根写入为 0、缺素材失败不复发，且旧部署已物理停机或
   DB/Redis 凭据与 broker namespace 已隔离，才可关闭根因。
+- 对“素材不可达”作终态写入时，审计必须能归因到 deployment/hostname/PID/code identity。仅有路径、旧根计数
+  或当前 `pg_stat_activity` 不足以证明执行 actor；跨主机共享凭据但无法归因时必须升级为分布式隔离问题。
+- pending/processing 两类 Publisher 素材不可达终态必须把同一 actor identity 同时写入 durable result 和错误日志，
+  且回归测试必须固定 root/hostname/PID/code identity；只写瞬时日志或只写数据库一侧都不构成防复发契约。
+- 所有依赖本地文件系统的 durable workflow，不论成功或失败，都必须在创建、领取和终态记录稳定的 producer/
+  consumer deployment identity；仅凭绝对路径、共享 outbox 的通知消费者或当前节点日志不能证明真正执行 actor。
+  成功的 old-root 任务同样算复发，不能因业务状态为 completed 而跳过隔离与归因验收。
 
 ## 关联文档
 

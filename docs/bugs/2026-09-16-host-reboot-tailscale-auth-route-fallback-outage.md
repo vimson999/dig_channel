@@ -3,7 +3,7 @@
 ## 基本信息
 
 - 日期：2026-09-16
-- 状态：OPEN / RECOVERED / OBSERVING（2026-09-17 复核；仍缺完整后窗和启动依赖防线）
+- 状态：OPEN / CODE_VERIFIED / WAITING_MANUAL_INSTALL / OBSERVING（2026-10-13 复核；启动依赖门禁已实现，LaunchAgent 尚未人工安装且缺下一次真实重启验收）
 - 严重级别：P0
 - 影响模块：全站 API / Celery / 调度器 / PgBouncer / Tailscale / Clash TUN
 - 首次发现：2026-09-16 每日数据库性能巡检
@@ -118,3 +118,29 @@ Celery、Watchdog 和六个 scheduler 的 bootstrap；当前 `/health=healthy`�
 上游 Tailscale/远端网络原因尚未定位；整体继续 OPEN/REPEATED/OBSERVING。
 本轮同时发现故障时 ZSXQ 停用计划被错误 fallback 启用，另见
 `2026-09-18-zsxq-schedule-db-error-enabled-disabled-targets.md`。
+
+## 2026-10-13 再次重启复发与启动门禁落地
+
+固定窗口 `2026-10-12 06:00:00`–`2026-10-13 06:00:00` 内，本机先在 13:24 启动、17:49 关机，
+随后于 10 月 13 日 09:12 再次启动。应用固定窗只有约 2 小时 38 分的日志覆盖；关机切点
+17:47:57–17:49:16 出现 5 个 PgBouncer server crash、5 个去重 query-wait episode、1 个
+connect timeout 和 1 个 TLS receive error。新建数据库连接在关机时从 Tailscale source
+`100.96.3.12` 回退到 `198.18.0.1`，5 条 Watchdog SQL 各等待约 15 秒后报
+`server closed the connection unexpectedly`。系统 shutdown 时间与错误尾部严格重合，根因仍是主机生命周期
+先拆私网路由、后停止应用，而非 PostgreSQL executor、锁或索引。
+
+本轮新增 `scripts/dev/check-boot-runtime-dependencies.py`：启动前要求 Tailscale `Running`、self online、
+存在私网 IP、PostgreSQL/Redis 私网 route 为 `utun*` 且不含 `198.18.0.1`，随后执行认证后的
+PostgreSQL `SELECT 1` 与 Redis `PING`；任一失败以 exit 3 fail closed，错误只输出异常类型，不输出 URL 或凭据。
+`scripts/dev/start-dev-stack-after-boot.sh` 在门禁通过后才启动 PgBouncer、执行不可中断任务安全门并启动
+backend，由现有 bootstrap 补齐 worker/Watchdog/scheduler。提供了
+`docs/operations/com.dig-ytb.dev-stack.plist.example`，但 LaunchAgent 属主机登录配置，未无人值守安装。
+
+TDD 先见到协议探针缺失的 2 个失败，再以 5/5 定向测试转绿；实际门禁在当前主机通过，确认 route=`utun5`、
+PostgreSQL `SELECT 1` 和 Redis `PING` 均成功。标准安全重启前检查 46 条近期任务、0 个活动 ZSXQ run，未使用
+FORCE；当前 backend PID 10371（09:25:55 启动），最终 bootstrap 17/17 Celery、Watchdog、6/6 scheduler
+均 `ok`、`errors=[]`。关键 ZSXQ API 均 200，窗后 10 分钟无慢 SQL、连接错误或 idle-in-transaction。
+
+状态仍不能 CLOSED：新启动入口尚未人工安装，也没有经历下一次真实 logout/reboot 故障注入；当前另一台
+MacBook Pro 仍在线并持有生产库会话，属于独立但相关的跨部署隔离阻塞。下一步需人工审阅并安装 plist，
+随后以真实重启验证“等待身份/路由 → 协议探针通过 → 安全门 → 单实例完整 bootstrap”，再观察完整 24 小时。

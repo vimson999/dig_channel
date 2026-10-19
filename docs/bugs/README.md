@@ -6,6 +6,51 @@
 
 复发根因登记表：[`recurrence-registry.json`](recurrence-registry.json)。正式回顾归档在 [`reviews/`](reviews/)。
 
+2026-10-19 每日复核：[数据库性能巡检](reviews/2026-10-19-db-performance-audit.md)。
+慢 SQL 恶化为 16 条/23.116 秒、P95/max 2.170/2.292 秒，但代表 executor 仅 0.025–35.100ms，
+SQL/PgBouncer 错误、锁和长 Session 均为 0，无 DDL。旧 Mac 再次完整执行 1 个 Web PDF 清洗和 1 个 ZSXQ
+发布，2/2 old-root、累计 1,818.552 秒；当前业务 worker 无 task id，物理隔离根因继续
+OPEN/REPEATED。B站 161/161 成功但 P95 恶化 109.1%，YouTube id21/56 第16窗复发；固定窗自然 HTTP 为 0。
+
+2026-10-18 每日复核：[数据库性能巡检](reviews/2026-10-18-db-performance-audit.md)。
+慢 SQL 改善为 6 条/8.533 秒，P95/max 2.126 秒且 SQL/PgBouncer 错误为 0；但 29/29 目标 durable task
+全部为 old-root，Publisher 4/16 失败、失败率 25%，共享 DB/Redis/Celery 未隔离根因再次自然复发。已为
+素材不可达终态增加 deployment/host/PID/code identity 审计，1,737 项 unit 通过并安全重启到 backend PID
+14483，17/17 worker、Watchdog、6/6 scheduler 和只读 E2E 均正常；代码 RUNTIME_REPLACED，但缺自然后窗，
+整体保持 OPEN/REPEATED/OBSERVING。YouTube 21/56 第15窗复发；无 DDL。
+
+2026-10-17 每日复核：[数据库性能巡检](reviews/2026-10-17-db-performance-audit.md)。
+慢 SQL 改善为 16 条/39.521 秒且 PgBouncer/SQL 错误归零；内容管线统计 14/14 成功、旧指纹与 500 归零，
+达到 CLOSED/RUNTIME_ACCEPTED。纠正时区窗口后发现 Publisher 3/19 被日志外共享 actor 假判当前根素材不可达，
+失败率 15.8%，分布式隔离根因继续 OPEN/REPEATED；audio catalog executor 外尾部和 YouTube 第14窗复发也未关闭。
+另新增[日巡检数据库快照把本地时间误作 UTC](2026-10-17-db-runtime-snapshot-timezone-window.md)，已 TDD 修复并
+完成生产只读重放；无 DDL、无常驻服务重启。
+
+2026-10-16 每日复核：[数据库性能巡检](reviews/2026-10-16-db-performance-audit.md)。
+慢 SQL 反弹至 48 条/214.443 秒，内容管线统计旧全 JSON 查询触发 6 次 PgBouncer query timeout；
+投影 executor 仅 6.600ms，前端每 10 秒把重统计绑定到活动状态轮询是放大根因。已新增
+[内容管线统计被活跃任务轮询放大](2026-10-16-content-pipeline-statistics-polling-query-timeout.md)，
+TDD 改为活动 tick 只刷新轻量历史、转终态才刷新一次统计；静态运行态已替换，待完整后窗，未关闭。
+
+2026-10-15 每日复核：[数据库性能巡检](reviews/2026-10-15-db-performance-audit.md)。
+完整 24 小时窗慢 SQL 改善到 22 条/53.426 秒，P95/max 7.374/7.602 秒，PgBouncer 八类错误均为 0；
+但 audio catalog 应用 7.1–7.6 秒而 executor 仅 4.691ms，网络/驱动尾延迟仍 OPEN。旧 MacBook Pro 的
+6 个生产会话和 2/2 old-root audio transcription 再次复发；B站情报 24/24 周期、168/168 请求 DNS 失败；
+YouTube id21/56 连续第12窗复发。无 DDL、无生产代码或重启，等待分布式隔离、外部链路现场证据和人工配置验收。
+
+2026-10-14 每日复核：[数据库性能巡检](reviews/2026-10-14-db-performance-audit.md)。
+慢 SQL 反弹到 147 条/405.959 秒，P95/max 8.622/18.020 秒，PgBouncer 4 个 query timeout 与 1 个
+query-wait；代表 executor 仅 0.024–47.138ms，根因继续是私网/PgBouncer/driver 传输尾延迟，无 DDL。
+old-root 与远端会话本窗归零但仅覆盖约 20.55h，保持 OPEN/OBSERVING；YouTube id21/56 第11窗复发，
+B站情报三个周期均 0/7 DNS 失败。LaunchAgent 仍未安装，未达到真实 reboot 闭环。
+
+2026-10-13 每日复核：[数据库性能巡检](reviews/2026-10-13-db-performance-audit.md)。
+短覆盖窗慢 SQL 6 条/14.357 秒，P95/max 均 7.114 秒；主机关机阶段 Tailscale route 回退代理 TUN，
+触发 5 个 PgBouncer crash/query-wait episode。已 TDD 落地协议级 boot guard 与安全启动编排，完整回归
+1817 passed/7 skipped，当前栈 17/17 worker、Watchdog、6/6 scheduler ready；LaunchAgent 仍待人工安装和真实
+reboot 验收。旧 MacBook Pro 当前在线并持 6 个生产会话，Publisher 25/25 old-root、9 failed，根因继续
+OPEN/REPEATED/WAITING_DISTRIBUTED_ISOLATION；无 DDL。
+
 2026-09-29 每日复核：[数据库性能巡检](reviews/2026-09-29-db-performance-audit.md)。
 应用慢 SQL 恶化到 47 条/68.197 秒、P95/max 2.531/6.851 秒，但代表 executor 仅 0.024–3.656ms，
 仍无 DDL 依据。Tailscale 证实同一旧 MacBook Pro 重入网换 IP；本窗 27/39 durable task 为 old-root，
@@ -92,6 +137,13 @@ executor、锁和 Session 证据继续排除缺索引，既有网络簇保持 OP
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-10-17 | [每日数据库性能与错误巡检](reviews/2026-10-17-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 外部调度 / 分布式运行拓扑 | 慢 SQL 16 条/39.521 秒；统计专项关闭；Publisher 3/19 假失败；无 DDL |
+| 2026-10-17 | [日巡检数据库快照把本地时间误作 UTC](2026-10-17-db-runtime-snapshot-timezone-window.md) | 日巡检器 / UTC-naive 时间窗 / 验收完整性 | P0 CODE_VERIFIED/PRODUCTION_REPLAY_ACCEPTED；显式时区转换并打印 DB 边界 |
+| 2026-10-16 | [每日数据库性能与错误巡检](reviews/2026-10-16-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 外部调度 / 分布式运行拓扑 | 慢 SQL 48 条/214.443 秒；统计 6 次 query timeout；轮询放大已运行替换待后窗；无 DDL |
+| 2026-10-16 | [内容管线统计被活跃任务轮询放大并触发查询超时](2026-10-16-content-pipeline-statistics-polling-query-timeout.md) | 内容管线统计 / publication_tasks / PgBouncer / 前端轮询 | CLOSED/RUNTIME_ACCEPTED；完整后窗 14/14 200，旧指纹/timeout=0 |
+| 2026-10-15 | [每日数据库性能与错误巡检](reviews/2026-10-15-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 外部调度 / 分布式运行拓扑 | 慢 SQL 22 条/53.426 秒；PgBouncer 错误 0；旧 Mac 会话与 old-root 复发；B站 24/24 周期失败；无 DDL |
+| 2026-10-14 | [每日数据库性能与错误巡检](reviews/2026-10-14-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 外部调度 / 分布式运行拓扑 | 慢 SQL 147 条/405.959 秒；4 query timeout+1 wait；old-root=0 但仅观察窗；无 DDL |
+| 2026-10-13 | [每日数据库性能与错误巡检](reviews/2026-10-13-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 分布式运行拓扑 | 慢 SQL 6 条/14.357 秒；boot guard 已验证待人工安装；Publisher 25/25 old-root、9 failed，根因仍 OPEN；无 DDL |
 | 2026-09-29 | [每日数据库性能与错误巡检](reviews/2026-09-29-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 分布式运行拓扑 | 慢 SQL 47 条/68.197 秒；old-root 27/39，素材门禁已运行替换，根因仍 OPEN；无 DDL |
 | 2026-09-28 | [每日数据库性能与错误巡检](reviews/2026-09-28-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 分布式运行拓扑 | 慢 SQL 6 条/8.261 秒；old-root 4/4 复发，远端当前离线待完整窗；无 DDL |
 | 2026-09-27 | [每日数据库性能与错误巡检](reviews/2026-09-27-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 分布式运行拓扑 | 慢 SQL 11 条/13.393 秒；old-root 远端主机已定位，OPEN；无 DDL |

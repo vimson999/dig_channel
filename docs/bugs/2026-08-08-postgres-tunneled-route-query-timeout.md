@@ -449,3 +449,53 @@ SELECT 318.51/119.96ms；真实终态页面 26 秒仅请求一次，未再产生
 
 状态继续 `OPEN / REPEATED / OBSERVING`。未加索引、未提高 timeout、未自动修改 PgBouncer/Tailscale；下一次
 尖峰必须同期保存 pool/server socket、路由、远端 activity 与链路质量，不能再只依赖事后健康快照。
+
+### 2026-10-14 五类 PgBouncer timeout 与应用尾延迟全面反弹
+
+- 固定窗应用慢 SQL 147 条/405.959 秒，P50/P95/max 1.560/8.622/18.020 秒；相较 09-29 有效基线
+  数量 +212.8%、累计 +495.3%、P95 +240.6%、max +163.0%。
+- PgBouncer 去重后有 4 个 query timeout 和 1 个 query-wait timeout，分别命中 Publisher 主键、
+  audio-clean 主键、HTTP 通知去重和 notification worker/due-provider。没有 connect timeout、server crash、
+  TLS 或 HBA 错误，252 个新服务连接全部来自 `100.96.3.12`，没有代理 TUN fallback。
+- 代表 executor 仅 0.024–47.138ms，现场无 waiting lock 或 idle-in-transaction；39 个 connection hold 中
+  37 个匹配慢 SQL，SQL 462.194 秒、非 SQL 18.297 秒。共同根因仍在 executor 外的私网/PgBouncer/driver
+  传输边界，不能通过索引、加重试或提高 timeout 根治。
+- 当前 boot dependency gate 对 Tailscale/route/PostgreSQL/Redis 均通过，但 LaunchAgent 确认未安装；本窗
+  只覆盖 backend 启动后约 20.55 小时，不能作为完整后窗。
+
+状态保持 **OPEN / REPEATED / OBSERVING**。下一完整 24 小时要求 4+1 timeout 指纹、SQL error、长 hold 和
+idle-in-transaction 全部为 0，慢 SQL P95/max 显著回落；任何新尖峰必须保存同秒 pool/socket/route/activity。
+
+### 2026-10-15 完整绿窗但冷目录网络尾部仍在
+
+固定 24 小时窗应用慢 SQL 降至 22 条/53.426 秒，P50/P95/max 为 1.312/7.374/7.602 秒；PgBouncer
+八类错误、应用 SQL error、statement/lock timeout、deadlock 与持久 idle-in-transaction 均为 0。相较上一窗
+147 条/405.959 秒明显改善，构成一个完整绿窗。
+
+但 MP3 audio catalog 4 次应用 SQL 仍为 7.149–7.602 秒，同形生产 EXPLAIN 只有 4.691ms；4 个连接持有
+全部由 SQL 时间主导，非 SQL 合计仅 0.745 秒。共同尾部仍在 executor 外的驱动/PgBouncer/私网 fetch 边界。
+物理故障断点未定位，且旧 MacBook Pro 会话同窗复发，状态保持 **OPEN / REPEATED / OBSERVING**；不增加索引、
+timeout 或无界重试。下一完整窗继续要求六类错误为 0，并在新尖峰同秒保留 pool/socket/route/activity。
+
+### 2026-10-16 统计查询触发 6 次 query timeout，executor 仍被排除
+
+固定窗慢 SQL 反弹至 48 条/214.443 秒，P50/P95/max 为 6.353/9.216/9.383 秒。内容管线统计旧运行时
+读取完整 `result`，6 个真实请求均在 20.06–20.33 秒被 PgBouncer `query_timeout` 关闭；投影运行态虽不再
+失败，仍有 19 条/131.459 秒应用 SQL。相同投影的生产 `EXPLAIN (ANALYZE, BUFFERS)` 只有 6.600ms，
+无物理读或锁等待，继续排除 PostgreSQL executor 与索引。
+
+另有 audio catalog 7 条/54.684 秒、P95/max 9.255 秒；两类慢点均由 SQL 时间主导，连接持有的非 SQL
+部分很小。统计页每 10 秒重复统计已另行 TDD 修复并进入静态运行态，减少放大源，但不能根治私网/
+PgBouncer/driver 尾延迟。状态保持 **OPEN / REPEATED / OBSERVING**；下一窗口要求统计 query timeout
+归零，并在任何新尖峰同秒保留 pool/socket/route/activity。
+
+### 2026-10-17 timeout 归零，但 audio catalog 尾部继续复发
+
+固定窗慢 SQL 降至 16 条/39.521 秒，P50/P95/max 为 1.307/7.473/7.505 秒；SQL error、八类
+PgBouncer 错误、statement/lock timeout、waiting lock 与持久 idle-in-transaction 全为 0。内容管线统计
+14/14 成功且旧慢指纹为 0，说明上一轮轮询放大修复已通过完整后窗。
+
+但 audio catalog 仍有 3 条/22.276 秒，生产同形 SQL 执行 5.487ms、无锁、仅扫描 4,246 行返回 1,300 行；
+notification due-provider 应用 1.28–2.24 秒而 executor 0.730ms。根因继续位于 PostgreSQL executor 外的
+driver/PgBouncer/私网 fetch 边界。状态保持 **OPEN / REPEATED / OBSERVING**，不增加索引或 timeout；下一
+尖峰必须保存同秒 pool/socket/route/activity。

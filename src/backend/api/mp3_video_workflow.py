@@ -7,6 +7,8 @@ import os
 import re
 import threading
 import time
+import tempfile
+import subprocess
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -410,6 +412,49 @@ def preview_audio_asset(_current_user, asset_id):
         as_attachment=False,
         download_name=audio.get("filename") or f"{asset_id}.mp3",
     )
+
+
+@mp3_video_workflow_bp.route("/audio-export", methods=["POST"])
+@require_login
+def export_audio_only(_current_user):
+    from services.audio_clip_export import clip_options, export_audio_clip
+
+    data = _request_payload()
+    try:
+        options = dict(start=data.get('start', '0'), end=data.get('end', ''), speed=data.get('speed', '1'))
+        clip_options(**options)
+        # Authentication may have opened a transaction; never retain it for media I/O.
+        release_db_session_quietly()
+        uploaded = request.files.get('audio')
+        with tempfile.TemporaryDirectory(prefix='audio-export-') as directory:
+            if uploaded:
+                error = _validate_audio_upload(uploaded)
+                if error:
+                    raise ValueError(error)
+                filename, extension = _audio_upload_filename(uploaded)
+                source = Path(directory) / f'input.{extension}'
+                uploaded.save(source)
+                if source.stat().st_size > _max_audio_upload_bytes():
+                    raise ValueError('上传音频超过大小限制')
+            else:
+                try:
+                    audio = dict(audio_meta_from_asset_reference(str(data.get('audio_asset_id') or '')))
+                finally:
+                    release_db_session_quietly()
+                source = Path(audio['path'])
+                filename = audio.get('filename') or source.name
+            target = Path(directory) / 'clip.mp3'
+            export_audio_clip(source, target, **options)
+            # send_file opens the file before the temporary directory is removed (POSIX).
+            response = send_file(target, mimetype='audio/mpeg', as_attachment=True,
+                                 download_name=f'{Path(filename).stem}_剪辑.mp3', conditional=False)
+            response.headers['Cache-Control'] = 'no-store'
+            return response
+    except ValueError as exc:
+        return jsonify(success=False, message=str(exc)), 400
+    except (subprocess.SubprocessError, OSError):
+        current_app.logger.exception('Standalone audio export failed')
+        return jsonify(success=False, message='音频导出失败，请确认文件有效，或缩短片段后重试'), 422
 
 
 @mp3_video_workflow_bp.route("/jobs", methods=["POST"])

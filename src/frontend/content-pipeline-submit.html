@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>网页内容投递 - Shioa</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="css/content-pipeline-submit.css?v=20261015-local-styles-1">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body class="min-h-screen bg-slate-100 text-slate-900">
@@ -36,6 +36,76 @@
         </section>
 
         <section id="notice" class="mb-4 hidden rounded-lg border px-4 py-3 text-sm" role="status"></section>
+
+        <section class="mb-5 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm" aria-labelledby="submission-stats-title">
+            <div class="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                    <h2 id="submission-stats-title" class="text-base font-black">发布统计</h2>
+                    <p class="mt-1 text-xs leading-5 text-slate-500">默认显示今天，MP3 统一归入“内资机构”。点击任一行查看机构发布明细。</p>
+                </div>
+                <button id="stats-refresh-btn" type="button" title="刷新发布统计" aria-label="刷新发布统计" class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 disabled:cursor-wait disabled:opacity-50">
+                    <i class="fas fa-rotate-right"></i>
+                </button>
+            </div>
+
+            <div class="grid grid-cols-1 gap-3 border-b border-slate-100 p-4 sm:grid-cols-2 lg:grid-cols-4">
+                <label class="text-xs font-bold text-slate-600">
+                    统计粒度
+                    <select id="stats-period" class="mt-1.5 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-400 focus:outline-none">
+                        <option value="day">按天</option>
+                        <option value="week">按周</option>
+                        <option value="month">按月</option>
+                        <option value="year">按年</option>
+                    </select>
+                </label>
+                <label class="text-xs font-bold text-slate-600">
+                    开始日期
+                    <input id="stats-from" type="date" class="mt-1.5 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-400 focus:outline-none">
+                </label>
+                <label class="text-xs font-bold text-slate-600">
+                    结束日期
+                    <input id="stats-to" type="date" class="mt-1.5 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-400 focus:outline-none">
+                </label>
+                <label class="text-xs font-bold text-slate-600">
+                    投行 / 机构
+                    <select id="stats-bank" class="mt-1.5 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-400 focus:outline-none">
+                        <option value="">全部投行</option>
+                    </select>
+                </label>
+            </div>
+
+            <div class="grid grid-cols-1 gap-3 p-4 sm:grid-cols-3">
+                <div class="rounded-lg border border-rose-100 bg-rose-50/60 px-4 py-3">
+                    <div class="text-xs font-bold text-rose-700">PDF 文件</div>
+                    <div id="stats-pdf-total" class="mt-1 text-2xl font-black text-rose-900">0</div>
+                </div>
+                <div class="rounded-lg border border-indigo-100 bg-indigo-50/60 px-4 py-3">
+                    <div class="text-xs font-bold text-indigo-700">MP3 文件</div>
+                    <div id="stats-mp3-total" class="mt-1 text-2xl font-black text-indigo-900">0</div>
+                </div>
+                <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                    <div class="text-xs font-bold text-slate-600">合计文件</div>
+                    <div id="stats-total" class="mt-1 text-2xl font-black text-slate-900">0</div>
+                </div>
+            </div>
+
+            <div class="overflow-x-auto border-t border-slate-100">
+                <table class="min-w-full text-left text-sm">
+                    <thead class="bg-slate-50 text-xs font-black text-slate-500">
+                        <tr>
+                            <th class="whitespace-nowrap px-4 py-3">时间段</th>
+                            <th class="whitespace-nowrap px-4 py-3">投行 / 机构</th>
+                            <th class="whitespace-nowrap px-4 py-3 text-right">PDF</th>
+                            <th class="whitespace-nowrap px-4 py-3 text-right">MP3</th>
+                            <th class="whitespace-nowrap px-4 py-3 text-right">合计</th>
+                        </tr>
+                    </thead>
+                    <tbody id="stats-table-body" class="divide-y divide-slate-100">
+                        <tr><td colspan="5" class="px-4 py-8 text-center text-sm text-slate-400">正在加载统计…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
 
         <section class="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
             <div class="space-y-5">
@@ -156,6 +226,6 @@
 
     <script src="js/env.js"></script>
     <script src="js/shared-navigation.js?v=20261004-navigation-2"></script>
-    <script src="js/content-pipeline-submit.js?v=20260912-web-history-v1"></script>
+    <script src="js/content-pipeline-submit.js?v=20261015-total-sort-v6"></script>
 </body>
 </html>

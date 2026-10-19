@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>机构发布详情 - Shioa</title>
+    <link rel="stylesheet" href="css/content-pipeline-bank-detail.css?v=20261015-1">
+</head>
+<body class="publication-detail-page">
+    <div id="nav-container"></div>
+    <main class="publication-detail-shell">
+        <nav class="breadcrumbs" aria-label="当前位置">
+            <a id="detail-back" href="content-pipeline-submit.html">← 网页内容投递</a>
+            <span aria-hidden="true">/</span><span>机构发布详情</span>
+        </nav>
+        <header class="detail-heading">
+            <div>
+                <p class="eyebrow">发布明细</p>
+                <h1 id="detail-title">机构发布详情</h1>
+                <p class="subtitle">查看已确认发布的文件；可切换日期和文件类型，时间按上海时区显示。</p>
+            </div>
+        </header>
+        <section class="detail-card" aria-label="机构文件明细">
+            <form id="detail-filter-form" class="detail-filters">
+                <label>开始日期<input id="detail-from" type="date" required></label>
+                <label>结束日期<input id="detail-to" type="date" required></label>
+                <label>文件类型
+                    <select id="detail-kind">
+                        <option value="">全部类型</option>
+                        <option value="pdf">PDF</option>
+                        <option value="mp3">MP3</option>
+                    </select>
+                </label>
+                <button id="detail-search" class="primary-button" type="submit">查询</button>
+            </form>
+            <div class="detail-totals" aria-label="当前筛选统计">
+                <div class="metric pdf"><span>PDF 文件</span><strong id="detail-pdf-total">—</strong></div>
+                <div class="metric mp3"><span>MP3 文件</span><strong id="detail-mp3-total">—</strong></div>
+                <div class="metric"><span>合计文件</span><strong id="detail-total">—</strong></div>
+            </div>
+            <p id="detail-status" class="detail-status" role="status" aria-live="polite">正在加载明细…</p>
+            <div class="detail-table-scroll">
+                <table aria-label="已确认发布文件">
+                    <thead><tr><th>发布时间</th><th>文件名</th><th>类型</th><th class="numeric">数量</th><th>发布记录</th></tr></thead>
+                    <tbody id="detail-table-body"><tr><td colspan="5" class="empty-state">正在加载明细…</td></tr></tbody>
+                </table>
+            </div>
+            <div class="detail-pagination" aria-label="明细分页">
+                <span id="detail-page-info">第 1 页</span>
+                <div>
+                    <button id="detail-prev" type="button" disabled>上一页</button>
+                    <button id="detail-next" type="button" disabled>下一页</button>
+                </div>
+            </div>
+        </section>
+    </main>
+    <script src="js/env.js"></script>
+    <script src="js/shared-navigation.js?v=20261004-navigation-2"></script>
+    <script src="js/content-pipeline-bank-detail.js?v=20261015-1"></script>
+</body>
+</html>

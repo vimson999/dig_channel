@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dig-ytb.dev-stack</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/v9/Documents/3---work/06---dev---python/dig_ytb/dig_ytb_channel/scripts/dev/start-dev-stack-after-boot.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/v9/Documents/3---work/06---dev---python/dig_ytb/dig_ytb_channel/logs/boot-runtime.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/v9/Documents/3---work/06---dev---python/dig_ytb/dig_ytb_channel/logs/boot-runtime.log</string>
+</dict>
+</plist>

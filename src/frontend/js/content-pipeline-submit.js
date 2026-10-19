@@ -5,6 +5,7 @@
     ]);
     const WEB_SUBMIT_ENDPOINT = '/content-pipeline/web-submit';
     const WEB_SUBMISSION_HISTORY_ENDPOINT = '/content-pipeline/web-submissions';
+    const WEB_SUBMISSION_STATS_ENDPOINT = '/content-pipeline/web-submissions/statistics';
     const HISTORY_PAGE_SIZE = 20;
     const HISTORY_REFRESH_INTERVAL_MS = 10000;
 
@@ -21,6 +22,18 @@
             loading: false,
             error: '',
         },
+        stats: {
+            period: 'day',
+            from: '',
+            to: '',
+            bank: '',
+            filters: { banks: [] },
+            totals: { pdf: 0, mp3: 0, total: 0 },
+            rows: [],
+            loading: false,
+            error: '',
+            requestId: 0,
+        },
     };
 
     const els = {};
@@ -28,11 +41,16 @@
     document.addEventListener('DOMContentLoaded', () => {
         bindElements();
         bindEvents();
+        initializeStatsControls();
         render();
         renderSubmissionHistory();
+        renderSubmissionStats();
         loadSubmissionHistory();
+        loadSubmissionStats();
         window.setInterval(() => {
-            if (!document.hidden && hasActiveSubmission()) loadSubmissionHistory();
+            if (!document.hidden && hasActiveSubmission()) {
+                loadSubmissionHistory({ refreshStatsOnTerminal: true });
+            }
         }, HISTORY_REFRESH_INTERVAL_MS);
     });
 
@@ -44,6 +62,9 @@
             'clear-selection-btn', 'submit-btn', 'submit-help', 'result-panel',
             'submission-history', 'history-summary', 'history-refresh-btn',
             'history-load-more-btn',
+            'stats-refresh-btn', 'stats-period', 'stats-from', 'stats-to',
+            'stats-bank', 'stats-pdf-total', 'stats-mp3-total',
+            'stats-total', 'stats-table-body',
         ].forEach((id) => {
             els[toCamel(id)] = document.getElementById(id);
         });
@@ -59,6 +80,28 @@
         els.submitBtn?.addEventListener('click', submitSelection);
         els.historyRefreshBtn?.addEventListener('click', () => loadSubmissionHistory());
         els.historyLoadMoreBtn?.addEventListener('click', () => loadSubmissionHistory({ append: true }));
+        els.statsRefreshBtn?.addEventListener('click', () => loadSubmissionStats());
+        els.statsTableBody?.addEventListener('click', (event) => {
+            if (event.target.closest('a')) return;
+            const row = event.target.closest('tr[data-detail-url]');
+            if (row) window.location.assign(row.dataset.detailUrl);
+        });
+        els.statsPeriod?.addEventListener('change', () => {
+            state.stats.period = els.statsPeriod.value;
+            loadSubmissionStats();
+        });
+        els.statsFrom?.addEventListener('change', () => {
+            state.stats.from = els.statsFrom.value;
+            loadSubmissionStats();
+        });
+        els.statsTo?.addEventListener('change', () => {
+            state.stats.to = els.statsTo.value;
+            loadSubmissionStats();
+        });
+        els.statsBank?.addEventListener('change', () => {
+            state.stats.bank = els.statsBank.value;
+            loadSubmissionStats();
+        });
     }
 
     function setMode(mode) {
@@ -206,6 +249,7 @@
             showNotice(payload.data?.errors?.length ? 'warning' : 'success', '投递已提交', payload.message || '文件已进入统一清洗发布链路。');
             clearSelection();
             loadSubmissionHistory();
+            loadSubmissionStats();
         } catch (error) {
             showNotice('error', '投递失败', error.message || String(error));
             els.resultPanel.innerHTML = `<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-700">${escapeHtml(error.message || String(error))}</div>`;
@@ -235,8 +279,136 @@
         `;
     }
 
-    async function loadSubmissionHistory({ append = false } = {}) {
+    function initializeStatsControls() {
+        const today = new Date();
+        const params = new URLSearchParams(window.location?.search || '');
+        const dateParam = (name) => /^\d{4}-\d{2}-\d{2}$/.test(params.get(name) || '')
+            ? params.get(name) : formatDateInput(today);
+        state.stats.from = dateParam('from');
+        state.stats.to = dateParam('to');
+        state.stats.bank = params.get('bank') || '';
+        if (['day', 'week', 'month', 'year'].includes(params.get('period'))) {
+            state.stats.period = params.get('period');
+        }
+        if (els.statsPeriod) els.statsPeriod.value = state.stats.period;
+        if (els.statsFrom) els.statsFrom.value = state.stats.from;
+        if (els.statsTo) els.statsTo.value = state.stats.to;
+    }
+
+    function formatDateInput(value) {
+        const parts = new Intl.DateTimeFormat('en', {
+            timeZone: 'Asia/Shanghai',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+        }).formatToParts(value);
+        const part = (type) => parts.find((item) => item.type === type).value;
+        return `${part('year')}-${part('month')}-${part('day')}`;
+    }
+
+    async function loadSubmissionStats() {
+        const stats = state.stats;
+        const requestId = ++stats.requestId;
+        if (stats.from && stats.to && stats.from > stats.to) {
+            stats.loading = false;
+            stats.error = '开始日期不能晚于结束日期';
+            renderSubmissionStats();
+            return;
+        }
+
+        stats.loading = true;
+        stats.error = '';
+        renderSubmissionStats();
+        try {
+            const query = new URLSearchParams({
+                period: stats.period,
+                from: stats.from,
+                to: stats.to,
+            });
+            if (stats.bank) query.set('bank', stats.bank);
+            const response = await fetch(
+                `${apiBaseUrl()}${WEB_SUBMISSION_STATS_ENDPOINT}?${query.toString()}`,
+                { credentials: 'include' },
+            );
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok || payload.success === false) {
+                throw new Error(payload.message || `HTTP ${response.status}`);
+            }
+            if (requestId !== stats.requestId) return;
+
+            const data = payload.data || {};
+            stats.rows = Array.isArray(data.rows) ? data.rows : [];
+            stats.totals = data.totals || { pdf: 0, mp3: 0, total: 0 };
+            stats.filters = data.filters || { banks: [] };
+            updateStatsSelect(els.statsBank, stats.filters.banks, stats.bank, '全部投行');
+        } catch (error) {
+            if (requestId === stats.requestId) stats.error = error.message || String(error);
+        } finally {
+            if (requestId === stats.requestId) {
+                stats.loading = false;
+                renderSubmissionStats();
+            }
+        }
+    }
+
+    function updateStatsSelect(select, values, selected, allLabel) {
+        if (!select) return;
+        const options = Array.isArray(values) ? values.map((value) => String(value || '').trim()).filter(Boolean) : [];
+        if (selected && !options.includes(selected)) options.push(selected);
+        options.sort((left, right) => left.localeCompare(right, 'zh-CN'));
+        select.innerHTML = `<option value="">${escapeHtml(allLabel)}</option>${options.map((value) => (
+            `<option value="${escapeAttr(value)}">${escapeHtml(value)}</option>`
+        )).join('')}`;
+        select.value = selected || '';
+    }
+
+    function renderSubmissionStats() {
+        if (!els.statsTableBody) return;
+        const stats = state.stats;
+        const totals = stats.totals || {};
+        if (els.statsPdfTotal) els.statsPdfTotal.textContent = String(Number(totals.pdf || 0));
+        if (els.statsMp3Total) els.statsMp3Total.textContent = String(Number(totals.mp3 || 0));
+        if (els.statsTotal) els.statsTotal.textContent = String(Number(totals.total || 0));
+        if (els.statsRefreshBtn) els.statsRefreshBtn.disabled = Boolean(stats.loading);
+
+        if (stats.error) {
+            els.statsTableBody.innerHTML = `<tr><td colspan="5" class="px-4 py-8 text-center text-sm text-amber-700">${escapeHtml(stats.error)}</td></tr>`;
+            return;
+        }
+        if (stats.loading && !stats.rows.length) {
+            els.statsTableBody.innerHTML = '<tr><td colspan="5" class="px-4 py-8 text-center text-sm text-slate-400">正在加载统计…</td></tr>';
+            return;
+        }
+        if (!stats.rows.length) {
+            els.statsTableBody.innerHTML = '<tr><td colspan="5" class="px-4 py-8 text-center text-sm text-slate-400">所选日期范围内暂无确认发布的文件。</td></tr>';
+            return;
+        }
+
+        const rows = [...stats.rows].sort((left, right) =>
+            String(right.period || '').localeCompare(String(left.period || ''))
+            || Number(right.total || 0) - Number(left.total || 0)
+            || String(left.investment_bank || '').localeCompare(String(right.investment_bank || ''), 'zh-CN')
+        );
+        els.statsTableBody.innerHTML = rows.map((row) => `<tr data-detail-url="${escapeAttr(publicationDetailsUrl(row.investment_bank))}" class="cursor-pointer text-slate-700 hover:bg-blue-50/70">
+            <td class="whitespace-nowrap px-4 py-3 font-semibold">${escapeHtml(row.period || '')}</td>
+            <td class="whitespace-nowrap px-4 py-3"><a class="font-bold text-blue-700 hover:underline focus:underline" href="${escapeAttr(publicationDetailsUrl(row.investment_bank))}">${escapeHtml(row.investment_bank || '未识别')} <span aria-hidden="true">→</span><span class="sr-only"> 查看发布详情</span></a></td>
+            <td class="px-4 py-3 text-right tabular-nums">${Number(row.pdf || 0)}</td>
+            <td class="px-4 py-3 text-right tabular-nums">${Number(row.mp3 || 0)}</td>
+            <td class="px-4 py-3 text-right font-black tabular-nums">${Number(row.total || 0)}</td>
+        </tr>`).join('');
+    }
+
+    function publicationDetailsUrl(bank) {
+        const params = new URLSearchParams({
+            bank: bank || '未识别', from: state.stats.from, to: state.stats.to,
+            period: state.stats.period,
+        });
+        return `content-pipeline-bank-detail.html?${params.toString()}`;
+    }
+
+    async function loadSubmissionHistory({ append = false, refreshStatsOnTerminal = false } = {}) {
         if (state.history.loading) return;
+        const hadActiveSubmission = hasActiveSubmission();
         const hadHistoryItems = state.history.items.length > 0;
         const previousHasMore = state.history.hasMore;
         state.history.loading = true;
@@ -265,6 +437,9 @@
             state.history.nextOffset = append
                 ? responseNextOffset
                 : Math.max(state.history.items.length, responseNextOffset);
+            if (refreshStatsOnTerminal && hadActiveSubmission && !hasActiveSubmission()) {
+                loadSubmissionStats();
+            }
         } catch (error) {
             state.history.error = error.message || String(error);
         } finally {

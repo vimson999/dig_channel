@@ -1,11 +1,11 @@
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
 from flask import Blueprint, current_app, jsonify, request
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.orm import load_only
 
 from models import db
@@ -26,6 +26,15 @@ from services.content_pipeline.retention_scheduler_service import (
     start_scheduler as start_retention_scheduler,
     stop_scheduler as stop_retention_scheduler,
     trigger_once as trigger_retention_cleanup_once,
+)
+from services.content_pipeline.web_submission_stats import (
+    DOMESTIC_INSTITUTIONS,
+    SHANGHAI,
+    collect_verified_publication_files,
+    normalize_publication_bank,
+    paginate_publication_files,
+    publication_statistics_result_column,
+    summarize_publication_files,
 )
 from services.watermark.utils import safe_filename
 from services.runtime_guard import end_db_transaction_before_external_io
@@ -373,6 +382,140 @@ def list_web_content_pipeline_submissions(current_user):
                 "next_offset": offset + len(submission_rows) if has_more else None,
             },
         }
+    )
+
+
+@bp.route("/web-submissions/statistics", methods=["GET"])
+@require_login
+def web_content_pipeline_submission_statistics(current_user):
+    period = str(request.args.get("period") or "day").strip().lower()
+    if period not in {"day", "week", "month", "year"}:
+        return jsonify({"success": False, "message": "period 仅支持 day、week、month 或 year"}), 400
+
+    try:
+        start_date, end_date = _web_publication_date_range()
+    except ValueError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+
+    user_id = str(getattr(current_user, "id", "") or "").strip()
+    files = _load_web_publication_files(user_id, start_date, end_date)
+    data = summarize_publication_files(
+        files, period=period, start_date=start_date, end_date=end_date,
+        bank_filter=normalize_publication_bank(request.args.get("bank")),
+    )
+    return jsonify({"success": True, "data": data})
+
+
+@bp.route("/web-submissions/files", methods=["GET"])
+@require_login
+def web_content_pipeline_publication_files(current_user):
+    bank = normalize_publication_bank(request.args.get("bank"))
+    if not bank or len(bank) > 100:
+        return jsonify({"success": False, "message": "请选择有效的投行或内资机构"}), 400
+    kind = str(request.args.get("kind") or "").strip().lower()
+    if kind not in {"", "pdf", "mp3"}:
+        return jsonify({"success": False, "message": "kind 仅支持 pdf 或 mp3"}), 400
+    try:
+        start_date, end_date = _web_publication_date_range()
+        page = int(request.args.get("page") or 1)
+        page_size = int(request.args.get("page_size") or 25)
+        if page < 1 or not 1 <= page_size <= 100:
+            raise ValueError("页码需大于 0，每页条数需为 1–100")
+    except (TypeError, ValueError) as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+
+    user_id = str(getattr(current_user, "id", "") or "").strip()
+    expected_kind = "mp3" if bank == DOMESTIC_INSTITUTIONS else "pdf"
+    files = [] if kind and kind != expected_kind else _load_web_publication_files(
+        user_id, start_date, end_date, file_kind=expected_kind, include_details=True,
+    )
+    data = paginate_publication_files(
+        files, bank=bank, start_date=start_date, end_date=end_date,
+        kind=kind, page=page, page_size=page_size,
+    )
+    return jsonify({"success": True, "data": data})
+
+
+def _web_publication_date_range():
+    today = datetime.now(timezone.utc).astimezone(SHANGHAI).date()
+    try:
+        start_date = date.fromisoformat(request.args.get("from") or today.isoformat())
+        end_date = date.fromisoformat(request.args.get("to") or today.isoformat())
+    except (TypeError, ValueError):
+        raise ValueError("from 和 to 必须使用 YYYY-MM-DD 日期格式") from None
+    if start_date > end_date:
+        raise ValueError("from 不能晚于 to")
+    return start_date, end_date
+
+
+def _load_web_publication_files(user_id, start_date, end_date, *, file_kind="", include_details=False):
+    clean_features = {
+        "pdf": ("content_pdf_clean",), "mp3": ("content_audio_clean",),
+    }.get(file_kind, ("content_pdf_clean", "content_audio_clean"))
+    web_clean_tasks = (
+        db.session.query(PublicationTask.id, PublicationTask.feature)
+        .filter(
+            PublicationTask.content_submission_channel == WEB_SUBMISSION_CHANNEL,
+            PublicationTask.content_web_submission_id.isnot(None),
+            PublicationTask.user_id == user_id,
+            PublicationTask.feature.in_(clean_features),
+        )
+        .all()
+    )
+    task_kinds = {
+        str(task_id): "pdf" if feature == "content_pdf_clean" else "mp3"
+        for task_id, feature in web_clean_tasks
+    }
+
+    if task_kinds:
+        web_clean_task_ids = (
+            select(PublicationTask.id)
+            .where(
+                PublicationTask.content_submission_channel == WEB_SUBMISSION_CHANNEL,
+                PublicationTask.content_web_submission_id.isnot(None),
+                PublicationTask.user_id == user_id,
+                PublicationTask.feature.in_(clean_features),
+            )
+        )
+        start_at_utc = datetime.combine(
+            start_date,
+            datetime.min.time(),
+            tzinfo=SHANGHAI,
+        ).astimezone(timezone.utc).replace(tzinfo=None)
+        end_at_utc = datetime.combine(
+            end_date + timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=SHANGHAI,
+        ).astimezone(timezone.utc).replace(tzinfo=None)
+        publish_timestamp = func.coalesce(
+            PublicationTask.completed_at,
+            PublicationTask.updated_at,
+            PublicationTask.created_at,
+        )
+        publish_tasks = (
+            db.session.query(
+                PublicationTask.id,
+                PublicationTask.source_task_id,
+                publication_statistics_result_column(db.engine.dialect.name, include_details=include_details),
+                PublicationTask.created_at,
+                PublicationTask.updated_at,
+                PublicationTask.completed_at,
+            )
+            .filter(
+                PublicationTask.feature == "zsxq_clean_output_publish",
+                PublicationTask.user_id == user_id,
+                PublicationTask.source_task_id.in_(web_clean_task_ids),
+                publish_timestamp >= start_at_utc,
+                publish_timestamp < end_at_utc,
+            )
+            .order_by(PublicationTask.created_at.asc(), PublicationTask.id.asc())
+            .all()
+        )
+    else:
+        publish_tasks = []
+
+    return collect_verified_publication_files(
+        publish_tasks, task_kinds, include_details=include_details,
     )
 
 

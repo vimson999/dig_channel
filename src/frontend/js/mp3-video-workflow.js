@@ -208,6 +208,7 @@ class Mp3VideoWorkflowPage {
     }
 
     bind() {
+        document.getElementById('audio-export-btn')?.addEventListener('click', () => this.exportAudio());
         this.els.refreshStatusBtn.addEventListener('click', () => this.refreshStatus());
         this.els.restartWorkerBtn.addEventListener('click', () => this.restartWorker());
         this.els.audioAssetRefreshBtn.addEventListener('click', () => this.loadAudioAssets({ page: this.audioAssetPage, forceRefresh: true, trigger: 'refresh' }));
@@ -611,6 +612,60 @@ class Mp3VideoWorkflowPage {
         this.els.selectedAudioPlayer.src = asset.is_upload && this.uploadedAudioObjectUrl
             ? this.uploadedAudioObjectUrl
             : this.absoluteUrl(`/api/mp3-video-workflows/audio-assets/${encodeURIComponent(asset.attachment_id)}/preview`);
+    }
+
+    async exportAudio() {
+        const button = document.getElementById('audio-export-btn');
+        const result = document.getElementById('audio-export-result');
+        if (!this.selectedAudioAsset) {
+            result.textContent = '请先在上方选择音频或上传本地音频。';
+            return;
+        }
+        const source = this.selectedAudioAsset;
+        const file = source.is_upload ? this.uploadedAudioFile : null;
+        if (source.is_upload && !file) return;
+        button.disabled = true;
+        button.textContent = '正在处理音频…';
+        result.textContent = '正在截取和变速，请保持页面打开。';
+        if (this.audioExportUrl) {
+            URL.revokeObjectURL(this.audioExportUrl);
+            this.audioExportUrl = '';
+        }
+        try {
+            const options = {
+                start: document.getElementById('audio-export-start').value.trim(),
+                end: document.getElementById('audio-export-end').value.trim(),
+                speed: document.getElementById('audio-export-speed').value,
+            };
+            let body;
+            if (file) {
+                body = new FormData();
+                body.append('audio', file, file.name);
+                Object.entries(options).forEach(([key, value]) => body.append(key, value));
+            } else {
+                body = JSON.stringify({ ...options, audio_asset_id: source.attachment_id });
+            }
+            const response = await fetch(`${this.apiRoot()}/api/mp3-video-workflows/audio-export`, {
+                method: 'POST', headers: this.headers(!file), body,
+            });
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({}));
+                throw new Error(error.message || `HTTP ${response.status}`);
+            }
+            this.audioExportUrl = URL.createObjectURL(await response.blob());
+            const link = document.createElement('a');
+            link.href = this.audioExportUrl;
+            link.download = `${(file?.name || source.filename || '音频').replace(/\.[^.]+$/, '')}_剪辑.mp3`;
+            link.className = 'font-bold text-indigo-700 underline';
+            link.textContent = '剪辑完成，点击下载 MP3';
+            result.replaceChildren(link);
+            link.click();
+        } catch (error) {
+            result.textContent = `导出失败：${error.message}`;
+        } finally {
+            button.disabled = false;
+            button.textContent = '导出音频';
+        }
     }
 
     async submit() {

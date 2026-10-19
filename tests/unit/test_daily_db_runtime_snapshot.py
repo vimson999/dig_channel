@@ -1,5 +1,6 @@
 import importlib.util
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 
@@ -19,6 +20,24 @@ def load_snapshot_module():
 
 
 class DailyDbRuntimeSnapshotTest(unittest.TestCase):
+    def test_local_audit_window_is_converted_to_utc_naive_database_bounds(self):
+        snapshot = load_snapshot_module()
+
+        self.assertEqual(
+            snapshot.utc_naive_database_boundary(
+                "2026-10-16 06:00:00",
+                timezone_name="Asia/Shanghai",
+            ),
+            datetime(2026, 10, 15, 22, 0, 0),
+        )
+        self.assertEqual(
+            snapshot.utc_naive_database_boundary(
+                "2026-10-17T06:00:00",
+                timezone_name="Asia/Shanghai",
+            ),
+            datetime(2026, 10, 16, 22, 0, 0),
+        )
+
     def test_task_root_summary_covers_non_publisher_features(self):
         snapshot = load_snapshot_module()
 

@@ -10,6 +10,12 @@ Full local restart:
 - `./scripts/dev/stop-backend.sh` 只停止本地 Flask 后端，默认端口 `5001`
 - `./scripts/dev/stop-all-background-jobs.sh` 只停止 Celery worker、Watchdog 和计划任务，不停止 Flask 后端
 
+Host reboot recovery:
+
+- `./scripts/dev/check-boot-runtime-dependencies.py` 在主机启动后验证 Tailscale 已登录且在线、私网服务走 `utun*` 而不是 `198.18.0.1` 代理 TUN，并以认证后的 PostgreSQL `SELECT 1` 与 Redis `PING` 验证协议级 readiness；任一条件失败即返回 3，且不输出凭据
+- `./scripts/dev/start-dev-stack-after-boot.sh` 等待上述依赖，通过后启动 PgBouncer、执行不可中断任务安全门，再以前台方式启动后端；后端继续按既有 bootstrap 补齐 17 类 worker、Watchdog 和 scheduler。健康后端已存在时脚本幂等退出
+- [`../../docs/operations/com.dig-ytb.dev-stack.plist.example`](../../docs/operations/com.dig-ytb.dev-stack.plist.example) 是可审计的 LaunchAgent 模板。它属于主机登录配置，必须人工复制到 `~/Library/LaunchAgents/com.dig-ytb.dev-stack.plist` 并用 `launchctl bootstrap gui/$(id -u) ...` 启用；自动巡检不得无人值守安装
+
 For ZSXQ scheduler lifecycle:
 
 - `./scripts/dev/run-zsxq-auto-scheduler.sh` 启动 `run_zsxq_auto_scheduler.py`
