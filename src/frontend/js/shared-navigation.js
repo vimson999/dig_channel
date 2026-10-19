@@ -333,6 +333,13 @@ class SharedNavigation {
                         "icon": "fas fa-circle-nodes",
                         "href": "zsxq-lab.html",
                         "group": "星球情报"
+                    },
+                    {
+                        "id": "zsxq-import",
+                        "name": "星球数据导入",
+                        "icon": "fas fa-file-import",
+                        "href": "zsxq-import.html",
+                        "group": "星球情报"
                     }
                 ]
             },

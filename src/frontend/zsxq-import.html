@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>星球数据导入 - Shioa</title>
+    <link href="css/zsxq-lab.css?v=20260730-content-workbench" rel="stylesheet">
+    <link href="css/zsxq-import.css?v=20261019-1" rel="stylesheet">
+</head>
+<body>
+<main class="import-shell">
+    <header class="import-heading">
+        <div><p class="import-eyebrow">知识星球 / 数据管理</p><h1>星球数据导入</h1><p class="import-subtitle">把浏览器采集的内容，整理进你的本地知识库。</p></div>
+        <a class="import-button secondary" href="zsxq-lab.html">返回内容分析 <span aria-hidden="true">↗</span></a>
+    </header>
+    <div class="import-layout">
+        <section class="import-card upload-card" aria-labelledby="upload-title">
+            <div class="section-heading"><span class="step-number">01</span><div><h2 id="upload-title">选择采集文件</h2><p>支持知识星球 API 采集 JSON</p></div></div>
+            <label class="file-drop" id="json-import-drop" for="json-import-file">
+                <span class="file-icon" aria-hidden="true">↥</span><strong id="json-import-filename">点击选择 JSON 文件</strong><span id="json-import-filesize">或将文件拖到这里 · 最大 12 MiB</span>
+                <input id="json-import-file" type="file" accept=".json,application/json" aria-label="选择星球 JSON 文件">
+            </label>
+            <button id="json-import-preview" class="import-button primary full-width" type="button">解析并预览 <span aria-hidden="true">→</span></button>
+            <div class="import-help"><h3>导入前了解</h3><p>重复帖子自动去重，较旧的快照不会覆盖新内容。</p><p>仅导入文件中实际采集的帖子；时间跨度不代表历史完整。图片、附件保存元数据，文件不会自动下载。</p></div>
+        </section>
+        <section class="import-card preview-card" aria-labelledby="preview-title">
+            <div class="section-heading"><span class="step-number">02</span><div><h2 id="preview-title">预览与入库</h2><p>核对所属星球和变更数量，再确认保存</p></div><span class="status-pill" id="json-import-phase">等待文件</span></div>
+            <div id="json-import-report" role="status" aria-live="polite"><div class="preview-empty"><span aria-hidden="true">▤</span><h3>让每一次更新都有据可查</h3><p>选择文件并点击「解析并预览」，这里会显示星球、帖子范围和导入统计。</p></div></div>
+            <div class="commit-footer"><span id="json-import-hint">预览不会修改数据库</span><button id="json-import-commit" class="import-button primary" disabled type="button">确认入库</button></div>
+        </section>
+    </div>
+    <section class="import-card history-card" aria-labelledby="history-title">
+        <div class="history-heading"><div><h2 id="history-title">导入记录</h2><p>最近 20 次完成的导入 · 时间均为北京时间</p></div><button id="json-import-history" class="import-button secondary" type="button">刷新记录</button></div>
+        <div id="json-import-history-list" aria-live="polite"><p class="history-empty">正在读取导入记录…</p></div>
+    </section>
+</main>
+<script src="js/env.js"></script>
+<script src="js/config.js"></script>
+<script src="js/shared-navigation.js?v=20261019-import"></script>
+<script src="js/zsxq-json-import.js?v=20261019-2"></script>
+</body>
+</html>

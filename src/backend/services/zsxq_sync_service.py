@@ -6406,7 +6406,22 @@ class ZsxqSyncService:
             grouped.setdefault(str(snapshot.topic_id), []).append(snapshot)
         return grouped
 
-    def _attachment_projection_values(self, group_id, tab_id, topic_id, key, attachment_type, payload):
+    def _attachment_projection_values(
+        self,
+        group_id,
+        tab_id,
+        topic_id,
+        key,
+        attachment_type,
+        payload,
+        previous_record=None,
+    ):
+        download_count = self._download_count(payload)
+        if download_count is None and previous_record is not None:
+            download_count = self._loaded_model_attr(
+                previous_record,
+                "download_count",
+            )
         return {
             "group_id": group_id,
             "tab_id": tab_id,
@@ -6415,7 +6430,7 @@ class ZsxqSyncService:
             "attachment_type": attachment_type,
             "name": self._attachment_name(payload, attachment_type),
             "file_id": self._attachment_file_id(payload),
-            "download_count": self._download_count(payload),
+            "download_count": download_count,
             "raw_payload": payload,
         }
 
@@ -6550,6 +6565,7 @@ class ZsxqSyncService:
                     key,
                     attachment_type,
                     payload,
+                    previous_record=record,
                 )
                 projected = ZsxqAttachment(
                     name=values["name"],
@@ -6615,6 +6631,7 @@ class ZsxqSyncService:
                 key,
                 attachment_type,
                 payload,
+                previous_record=record,
             )
             if record:
                 projected = ZsxqAttachment(

@@ -993,6 +993,48 @@ class ZsxqSyncQueryDisciplineTest(unittest.TestCase):
         unchanged = db.session.get(ZsxqAttachment, "batched-update-row-1")
         self.assertEqual(unchanged_updated_at, unchanged.updated_at)
 
+    def test_attachment_refresh_preserves_download_count_missing_from_remote_payload(self):
+        path = Path(self.temp_dir.name) / "count-preservation.pdf"
+        path.write_bytes(b"%PDF-1.4\nfixture")
+        attachment = self._add_downloaded_attachment(
+            "count-preservation-row",
+            "topic-count-preservation",
+            path,
+        )
+        attachment.attachment_key = "count-preservation-file"
+        attachment.download_count = 73
+        db.session.commit()
+        db.session.remove()
+
+        service = ZsxqSyncService()
+        tab = {"id": "tab-1", "label": "外资研报"}
+        topic = {
+            "topic_id": "topic-count-preservation",
+            "files": [{
+                "file_id": "count-preservation-file",
+                "name": "count-preservation.pdf",
+                "mime_type": "application/pdf",
+            }],
+        }
+        snapshots = service._load_existing_attachment_snapshots(
+            "group-1",
+            "tab-1",
+            [topic],
+        )
+
+        service._refresh_existing_attachment_snapshots_for_page(
+            "group-1",
+            tab,
+            [topic],
+            snapshots,
+        )
+        db.session.commit()
+
+        refreshed = db.session.get(ZsxqAttachment, "count-preservation-row")
+        self.assertEqual(73, refreshed.download_count)
+        self.assertEqual("downloaded", refreshed.download_status)
+        self.assertEqual(str(path), refreshed.local_path)
+
     def test_postgres_attachment_refresh_compiles_as_one_set_update(self):
         service = ZsxqSyncService()
         table = ZsxqAttachment.__table__

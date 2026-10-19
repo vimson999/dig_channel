@@ -92,6 +92,8 @@ def register_blueprints(app):
     from .zsxq import bp as zsxq_bp
     app.register_blueprint(zsxq_bp)
     app.register_blueprint(zsxq_browser_import_bp)
+    from .zsxq_json_import import bp as zsxq_json_import_bp
+    app.register_blueprint(zsxq_json_import_bp)
 
     # 注册知识星球情报分析 API
     from .zsxq_insights import bp as zsxq_insights_bp
