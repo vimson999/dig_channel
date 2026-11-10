@@ -163,24 +163,52 @@
         `).join('')}</div>`;
     }
 
+    function renderBody(value) {
+        const lines = String(value || '').split(/\r?\n/);
+        const isRow = (line) => /^\|.*\|$/.test(line.trim());
+        const cells = (line) => line.trim().slice(1, -1).split('|').map((cell) => cell.trim());
+        const blocks = [];
+        let prose = [];
+        const flush = () => {
+            if (prose.length) blocks.push(`<div class="section-prose">${escapeHtml(prose.join('\n').trim())}</div>`);
+            prose = [];
+        };
+        for (let i = 0; i < lines.length; i++) {
+            if (!isRow(lines[i]) || !isRow(lines[i + 1] || '') ||
+                !cells(lines[i + 1]).every((cell) => /^:?-{3,}:?$/.test(cell))) {
+                prose.push(lines[i]);
+                continue;
+            }
+            flush();
+            const headings = cells(lines[i]);
+            const rows = [];
+            i += 2;
+            while (i < lines.length && isRow(lines[i])) {
+                rows.push(`<tr>${cells(lines[i++]).map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`);
+            }
+            i--;
+            blocks.push(`<div class="table-wrap" tabindex="0" aria-label="报告数据表"><table class="report-table">
+                <thead><tr>${headings.map((cell) => `<th scope="col">${escapeHtml(cell)}</th>`).join('')}</tr></thead>
+                <tbody>${rows.join('')}</tbody></table></div>`);
+        }
+        flush();
+        return blocks.join('');
+    }
+
+    function disclosure(title, body, note = '', count = '') {
+        return `<details class="report-disclosure"><summary>
+            <span class="disclosure-label"><strong>${escapeHtml(title)}</strong>${note ? `<small>${escapeHtml(note)}</small>` : ''}</span>
+            ${count ? `<span class="count-pill">${escapeHtml(count)}</span>` : ''}
+            <i class="fa-solid fa-chevron-down" aria-hidden="true"></i>
+        </summary><div class="disclosure-content">${body}</div></details>`;
+    }
+
     function renderSections(sections) {
-        if (!sections?.length) return '';
-        return `
-            <section class="content-section">
-                <h3><i class="fa-solid fa-list-check" aria-hidden="true"></i>分析模块</h3>
-                ${sections.map((section) => `
-                    <article class="content-section">
-                        <h3><i class="fa-regular fa-file-lines" aria-hidden="true"></i>${escapeHtml(section.title)}</h3>
-                        ${section.evidence_state ? `<div class="report-tags"><span class="report-tag">证据状态：${escapeHtml(section.evidence_state)}</span></div>` : ''}
-                        ${section.summary_text ? `<p class="section-summary">${escapeHtml(section.summary_text)}</p>` : ''}
-                        <pre class="section-body">${escapeHtml(section.body_text)}</pre>
-                        ${section.sources?.length ? `<div class="section-sources">${section.sources.map((link) => `
-                            <span class="source-chip" title="${escapeHtml(link.evidence_note || '')}"><i class="fa-solid fa-paperclip" aria-hidden="true"></i>${escapeHtml(roleLabel(link.source_role))} · ${escapeHtml(link.source?.name || '')}</span>
-                        `).join('')}</div>` : ''}
-                    </article>
-                `).join('')}
-            </section>
-        `;
+        return sections?.map((section) => disclosure(section.title, `
+            <div class="section-body">${renderBody(section.body_text)}</div>
+            ${section.sources?.length ? disclosure('本节引用', `<div class="section-sources">${section.sources.map((link) => `
+                <div class="source-chip" title="${escapeHtml(link.evidence_note || '')}">${escapeHtml(roleLabel(link.source_role))} · ${escapeHtml(link.source?.name || '')}</div>`).join('')}</div>`, '', String(section.sources.length)) : ''}
+        `, section.summary_text)).join('') || '';
     }
 
     function renderTopics(topics) {
@@ -221,9 +249,7 @@
                 ${[...groups.entries()].map(([key, rows]) => {
                     const [type, topic] = key.split('|||');
                     return `
-                        <div class="content-section">
-                            <h3>${escapeHtml(rankingLabel(type))}${topic ? ` · ${escapeHtml(topic)}` : ''}</h3>
-                            <div class="evidence-list">${rows.map((row) => `
+                        ${disclosure([rankingLabel(type), topic].filter(Boolean).join(' · '), `<div class="evidence-list">${rows.map((row) => `
                                 <article class="evidence-card">
                                     <strong><span class="muted">#${escapeHtml(row.rank)}</span> ${escapeHtml(row.source?.name || '')}</strong>
                                     <div class="source-meta">
@@ -234,8 +260,7 @@
                                         <span>${escapeHtml(row.source?.status || '状态未提供')}</span>
                                     </div>
                                 </article>
-                            `).join('')}</div>
-                        </div>
+                            `).join('')}</div>`, '', String(rows.length))}
                     `;
                 }).join('')}
             </section>
@@ -273,13 +298,13 @@
                         ${candidate.new_evidence ? `<p class="candidate-copy"><strong>新增证据：</strong>${escapeHtml(candidate.new_evidence)}</p>` : ''}
                         <p class="candidate-copy"><strong>推荐理由：</strong>${escapeHtml(candidate.rationale)}</p>
                         ${candidate.uncertainty_text ? `<p class="candidate-copy"><strong>不确定性：</strong>${escapeHtml(candidate.uncertainty_text)}</p>` : ''}
-                        <div class="candidate-source-list">${(candidate.sources || []).map((link) => `
+                        ${candidate.sources?.length ? disclosure('查看引用', `<div class="candidate-source-list">${candidate.sources.map((link) => `
                             <article class="candidate-source">
                                 <strong>[${escapeHtml(roleLabel(link.source_role))}] ${escapeHtml(link.source?.name || '')}</strong>
                                 <p>${escapeHtml(link.selection_reason)}</p>
                                 <div class="source-meta"><span>${escapeHtml(link.source?.institution || '机构未提供')}</span><span>报告日 ${escapeHtml(link.source?.report_date_text || '未提供')}</span><span>下载 ${formatNumber(link.source?.download_count)}</span></div>
                             </article>
-                        `).join('')}</div>
+                        `).join('')}</div>`, '', String(candidate.sources.length)) : ''}
                     </article>
                 `).join('')}</div>
             </section>
@@ -290,7 +315,6 @@
         if (!sources?.length) return '';
         return `
             <section class="content-section">
-                <h3><i class="fa-solid fa-file-pdf" aria-hidden="true"></i>引用 PDF 目录</h3>
                 <div class="evidence-list">${sources.map((source) => `
                     <article class="evidence-card">
                         <strong>${escapeHtml(source.name)}</strong>
@@ -305,33 +329,126 @@
         `;
     }
 
+    function renderOverview(detail, run) {
+        const primary = detail.candidates?.find((candidate) => candidate.is_primary);
+        const themes = (detail.topics || []).filter((topic) => topic.classification_scope === 'multi')
+            .sort((a, b) => a.rank - b.rank).slice(0, 3);
+        const max = Math.max(1, ...themes.map((theme) => theme.pdf_count));
+        return `
+            ${primary ? `<article class="lead-card">
+                <span class="eyebrow"><i class="fa-solid fa-lightbulb" aria-hidden="true"></i> 本期主推</span>
+                <h3>${escapeHtml(primary.title)}</h3>
+                <p>${escapeHtml(primary.rationale)}</p>
+                <button type="button" class="archive-action" data-show-tab="candidates">查看选题与引用 <span aria-hidden="true">→</span></button>
+            </article>` : ''}
+            <div class="overview-grid">
+                <section class="overview-card"><h3>报告摘要</h3><p class="summary">${escapeHtml(run.overall_summary || '暂无摘要')}</p></section>
+                ${themes.length ? `<section class="overview-card"><h3>主要研究主题</h3>
+                    <p class="chart-caption">按 PDF 数量 · 标题多标签</p>
+                    ${themes.map((theme) => `<div class="theme-row">
+                        <span>${escapeHtml(theme.topic_name)}</span><strong>${formatNumber(theme.pdf_count)}</strong>
+                        <span class="theme-track" aria-hidden="true"><span style="width:${Math.min(100, Math.max(0, theme.pdf_count / max * 100))}%"></span></span>
+                    </div>`).join('')}
+                </section>` : ''}
+            </div>`;
+    }
+
+    function initSourceSearch(panel, sources) {
+        const input = panel.querySelector('input');
+        const list = panel.querySelector('.source-results');
+        const info = panel.querySelector('.source-count');
+        const prev = panel.querySelector('[data-source-prev]');
+        const next = panel.querySelector('[data-source-next]');
+        const pageSize = 10;
+        let page = 0;
+        function update() {
+            const query = input.value.trim().toLowerCase();
+            const matches = sources.filter((source) => [source.name, source.institution].some((value) =>
+                String(value || '').toLowerCase().includes(query)));
+            const start = page * pageSize;
+            list.innerHTML = matches.length ? renderSourceIndex(matches.slice(start, start + pageSize)) :
+                '<p class="empty-state">没有匹配的引用</p>';
+            info.textContent = matches.length ? `${start + 1}–${Math.min(start + pageSize, matches.length)} / ${matches.length} 份` : '0 份';
+            prev.disabled = page === 0;
+            next.disabled = start + pageSize >= matches.length;
+        }
+        input.addEventListener('input', () => { page = 0; update(); });
+        prev.addEventListener('click', () => { if (!prev.disabled) { page--; update(); } });
+        next.addEventListener('click', () => { if (!next.disabled) { page++; update(); } });
+        update();
+    }
+
     function renderReport(detail) {
         const run = detail.run || {};
         const title = run.source_filename || 'PDF 分析报告';
-        const tags = [
-            `导出时间 ${formatDate(run.source_exported_at)}`,
-            `生成时间 ${formatDate(run.completed_at || run.created_at)}`,
-            `合同 ${run.contract_version || '—'}`,
-            `分析版本 ${run.analysis_version || '—'}`,
-            `SHA-256 ${run.source_sha256 || run.source_sha256_prefix || '—'}`,
+        const sources = detail.sources || [];
+        const tabs = [
+            ['overview', '概览', () => renderOverview(detail, run)],
+            ['sections', '分析正文', () => renderSections(detail.sections)],
+            ['data', '统计与排行', () => `
+                ${detail.topics?.length ? disclosure('主题统计', renderTopics(detail.topics)) : ''}
+                ${detail.targets?.length ? disclosure('标的聚合', renderTargets(detail.targets)) : ''}
+                ${renderRankings(detail.rankings)}`],
+            ['candidates', '选题池', () => renderCandidates(detail.candidates)],
+            ['sources', '引用 PDF', () => `
+                <div class="source-toolbar">
+                    <label><span>搜索引用</span><input type="search" placeholder="按文件名或机构搜索"></label>
+                    <div class="source-controls">
+                        <button type="button" data-source-prev aria-label="上一页">‹</button>
+                        <span class="source-count" role="status"></span>
+                        <button type="button" data-source-next aria-label="下一页">›</button>
+                    </div>
+                </div><div class="source-results"></div>`],
         ];
         nodes.empty.hidden = true;
         nodes.content.hidden = false;
         nodes.content.innerHTML = `
             <header class="report-head">
-                <div class="report-head-top"><div><span class="eyebrow">Codex LLM 分析 · ${escapeHtml(run.status || 'completed')}</span><h2>${escapeHtml(title)}</h2></div></div>
-                <div class="report-tags">${tags.map((tag) => `<span class="report-tag">${escapeHtml(tag)}</span>`).join('')}</div>
-                <p class="summary">${escapeHtml(run.overall_summary || '')}</p>
+                <span class="eyebrow">分析批次 · ${escapeHtml(formatDate(run.completed_at || run.created_at))}</span>
+                <h2>${escapeHtml(title)}</h2>
+                ${renderMetrics(run, detail)}
+                ${disclosure('来源与数据说明', `<div class="report-tags">
+                    ${[`导出 ${formatDate(run.source_exported_at)}`, run.contract_version, run.analysis_version,
+                        `SHA-256 ${run.source_sha256 || run.source_sha256_prefix || '—'}`].filter(Boolean).map((tag) =>
+                        `<span class="report-tag">${escapeHtml(tag)}</span>`).join('')}
+                    </div>${run.data_quality_note ? `<p class="quality-note">${escapeHtml(run.data_quality_note)}</p>` : ''}`)}
             </header>
-            ${renderMetrics(run, detail)}
-            ${run.data_quality_note ? `<section class="content-section"><h3><i class="fa-solid fa-shield-halved" aria-hidden="true"></i>数据质量提示</h3><div class="quality-note">${escapeHtml(run.data_quality_note)}</div></section>` : ''}
-            ${renderTopics(detail.topics)}
-            ${renderRankings(detail.rankings)}
-            ${renderTargets(detail.targets)}
-            ${renderCandidates(detail.candidates)}
-            ${renderSections(detail.sections)}
-            ${renderSourceIndex(detail.sources)}
+            <div class="report-tabs" role="tablist" aria-label="报告视图">
+                ${tabs.map(([key, label]) => `<button type="button" role="tab" id="tab-${key}"
+                    aria-controls="panel-${key}" aria-selected="false" tabindex="-1">${label}</button>`).join('')}
+            </div>
+            ${tabs.map(([key]) => `<div class="tab-panel" role="tabpanel" id="panel-${key}" aria-labelledby="tab-${key}" tabindex="0" hidden></div>`).join('')}
         `;
+        const buttons = [...nodes.content.querySelectorAll('[role="tab"]')];
+        const panels = [...nodes.content.querySelectorAll('[role="tabpanel"]')];
+        const loaded = new Set();
+        function select(index, focus = false) {
+            const [key, , render] = tabs[index];
+            const panel = panels[index];
+            if (!loaded.has(key)) {
+                panel.innerHTML = render() || '<p class="empty-state">本批次暂无此项内容</p>';
+                if (key === 'sources') initSourceSearch(panel, sources);
+                if (key === 'overview') panel.querySelector('[data-show-tab]')?.addEventListener('click', () => select(3, true));
+                loaded.add(key);
+            }
+            buttons.forEach((button, i) => {
+                button.setAttribute('aria-selected', String(i === index));
+                button.tabIndex = i === index ? 0 : -1;
+                panels[i].hidden = i !== index;
+            });
+            if (focus) buttons[index].focus();
+        }
+        buttons.forEach((button, index) => {
+            button.addEventListener('click', () => select(index));
+            button.addEventListener('keydown', (event) => {
+                const destination = { ArrowLeft: (index + tabs.length - 1) % tabs.length,
+                    ArrowRight: (index + 1) % tabs.length, Home: 0, End: tabs.length - 1 };
+                if (!Object.hasOwn(destination, event.key)) return;
+                event.preventDefault();
+                select(destination[event.key], true);
+            });
+        });
+        select(0);
         markActiveHistoryItem();
         document.title = `${title} - Codex PDF 分析归档`;
     }
