@@ -340,6 +340,13 @@ class SharedNavigation {
                         "icon": "fas fa-file-import",
                         "href": "zsxq-import.html",
                         "group": "星球情报"
+                    },
+                    {
+                        "id": "codex-pdf-analyses",
+                        "name": "Codex PDF 分析归档",
+                        "icon": "fas fa-file-circle-check",
+                        "href": "codex-pdf-analyses.html",
+                        "group": "Codex PDF 分析"
                     }
                 ]
             },

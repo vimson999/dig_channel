@@ -51,6 +51,17 @@ from .zsxq_analysis import (
     ZsxqAnalysisRun,
     ZsxqAnalysisTopic,
 )
+from .codex_pdf_analysis import (
+    CodexPdfAnalysisCandidate,
+    CodexPdfAnalysisCandidateSource,
+    CodexPdfAnalysisRanking,
+    CodexPdfAnalysisRun,
+    CodexPdfAnalysisSection,
+    CodexPdfAnalysisSectionSource,
+    CodexPdfAnalysisSource,
+    CodexPdfAnalysisTarget,
+    CodexPdfAnalysisTopic,
+)
 from .report_video import (
     ReportVideoTask,
     ReportVideoReport,
@@ -96,6 +107,15 @@ __all__ = [
     'TTSSegment',
     'ZsxqSyncRun',
     'ZsxqSyncRunDownload',
+    'CodexPdfAnalysisRun',
+    'CodexPdfAnalysisSource',
+    'CodexPdfAnalysisSection',
+    'CodexPdfAnalysisTopic',
+    'CodexPdfAnalysisRanking',
+    'CodexPdfAnalysisTarget',
+    'CodexPdfAnalysisCandidate',
+    'CodexPdfAnalysisCandidateSource',
+    'CodexPdfAnalysisSectionSource',
     'ZsxqTopic',
     'ZsxqTopicFavorite',
     'ZsxqTopicComment',

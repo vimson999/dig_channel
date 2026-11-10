@@ -10,6 +10,7 @@ from .documents import bp as documents_bp
 from .gemini import bp as gemini_bp
 from .batch_transcription import bp as batch_transcription_bp
 from .zsxq_browser_import import bp as zsxq_browser_import_bp
+from .codex_pdf_analyses import bp as codex_pdf_analyses_bp
 
 def register_blueprints(app):
     """注册所有API蓝图
@@ -102,6 +103,9 @@ def register_blueprints(app):
     # 注册知识星球清单分析与历史 API
     from .zsxq_analysis import bp as zsxq_analysis_bp
     app.register_blueprint(zsxq_analysis_bp)
+    # 独立的 Codex PDF 分析结果只读 API，不复用星球清单分析接口。
+    app.register_blueprint(codex_pdf_analyses_bp)
+
 
     # 注册外链文档富化 API
     from .external_documents import bp as external_documents_bp
