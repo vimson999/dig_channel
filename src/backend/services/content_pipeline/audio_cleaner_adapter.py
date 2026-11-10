@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 from xml.sax.saxutils import escape
 
+from services.audio_ad_detection import DEFAULT_AD_SAMPLE, matches
 from services.content_pipeline.clean_checkpoint import load_completed_clean_result
 
 
@@ -37,9 +38,8 @@ class AudioCleanOptions:
 class AudioCleanerAdapter:
     """Local MP3 cleaner used by the content pipeline.
 
-    The current rule follows the Hermes audio skill: trim 11s from the head,
-    trim 90s from the tail, and add the configured interval audio before and
-    after the clipped middle section.
+    Trim the configured head and tail, remove default ad matches from the
+    remaining audio, then add the configured interval audio at both ends.
     """
 
     def __init__(self, output_root: Optional[str | Path] = None):
@@ -163,8 +163,40 @@ class AudioCleanerAdapter:
                     "message": "音频时长不足以执行去头去尾",
                 }
 
+            middle_start = float(options.head_trim_seconds)
+            middle_end = duration - float(options.tail_trim_seconds)
+            if not DEFAULT_AD_SAMPLE.is_file():
+                raise AudioCleanerError(f"默认广告样本不存在: {DEFAULT_AD_SAMPLE}")
+            ad_ranges = []
+            for match in matches(source, DEFAULT_AD_SAMPLE):
+                start = max(middle_start, match["start"])
+                end = min(middle_end, match["end"])
+                if start >= end:
+                    continue
+                if ad_ranges and start <= ad_ranges[-1][1]:
+                    ad_ranges[-1][1] = max(ad_ranges[-1][1], end)
+                else:
+                    ad_ranges.append([start, end])
+
+            keep_ranges = []
+            cursor = middle_start
+            for start, end in ad_ranges:
+                if start > cursor:
+                    keep_ranges.append((cursor, start))
+                cursor = end
+            if cursor < middle_end:
+                keep_ranges.append((cursor, middle_end))
+            if not keep_ranges:
+                return {
+                    "status": "skipped",
+                    "reason": "no_audio_after_ad_removal",
+                    "source_path": str(source),
+                    "source_duration": round(duration, 3),
+                    "message": "裁剪首尾和广告后没有剩余音频",
+                }
+
             fast_error = ""
-            if options.fast_copy:
+            if options.fast_copy and not ad_ranges:
                 try:
                     result = self._clean_one_stream_copy(
                         source=source,
@@ -189,13 +221,17 @@ class AudioCleanerAdapter:
                 source=source,
                 target=target,
                 duration=duration,
-                keep_duration=keep_duration,
+                keep_ranges=keep_ranges,
                 gap_audio=gap_audio,
                 options=options,
                 started_at=started_at,
             )
             if fast_error:
                 result["stream_copy_fallback_error"] = fast_error
+            if ad_ranges:
+                result["removed_ad_ranges"] = [
+                    {"start": round(start, 3), "end": round(end, 3)} for start, end in ad_ranges
+                ]
             return result
         except Exception as exc:
             try:
@@ -323,12 +359,27 @@ class AudioCleanerAdapter:
         source: Path,
         target: Path,
         duration: float,
-        keep_duration: float,
+        keep_ranges: list[tuple[float, float]],
         gap_audio: Path,
         options: AudioCleanOptions,
         started_at: float,
     ) -> dict:
-        middle_end = duration - float(options.tail_trim_seconds)
+        output_format = (
+            f"aresample={int(options.sample_rate)},"
+            f"aformat=sample_fmts=fltp:channel_layouts={_channel_layout(options.channels)}"
+        )
+        middle_filters = [
+            f"[1:a]atrim=start={start:.6f}:end={end:.6f},"
+            f"asetpts=PTS-STARTPTS,{output_format}[mid{index}]"
+            for index, (start, end) in enumerate(keep_ranges)
+        ]
+        middle_labels = "".join(f"[mid{index}]" for index in range(len(keep_ranges)))
+        filters = ";".join([
+            f"[0:a]{output_format}[g0]",
+            *middle_filters,
+            f"[2:a]{output_format}[g1]",
+            f"[g0]{middle_labels}[g1]concat=n={len(keep_ranges) + 2}:v=0:a=1[out]",
+        ])
         command = [
             "ffmpeg",
             "-hide_banner",
@@ -342,16 +393,7 @@ class AudioCleanerAdapter:
             "-i",
             str(gap_audio),
             "-filter_complex",
-            (
-                f"[0:a]aresample={int(options.sample_rate)},"
-                f"aformat=sample_fmts=fltp:channel_layouts={_channel_layout(options.channels)}[g0];"
-                f"[1:a]atrim=start={float(options.head_trim_seconds):.3f}:end={middle_end:.3f},"
-                f"asetpts=PTS-STARTPTS,aresample={int(options.sample_rate)},"
-                f"aformat=sample_fmts=fltp:channel_layouts={_channel_layout(options.channels)}[mid];"
-                f"[2:a]aresample={int(options.sample_rate)},"
-                f"aformat=sample_fmts=fltp:channel_layouts={_channel_layout(options.channels)}[g1];"
-                "[g0][mid][g1]concat=n=3:v=0:a=1[out]"
-            ),
+            filters,
             "-map",
             "[out]",
             "-vn",

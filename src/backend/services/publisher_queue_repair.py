@@ -425,6 +425,33 @@ def _publisher_required_material_paths(params: Dict[str, Any]) -> Tuple[str, ...
     return tuple(sorted({value for value in values if value}))
 
 
+def _foreign_deployment_materials(paths: Iterable[str]) -> Tuple[str, ...]:
+    """Recognize project-managed inputs owned by a different checkout.
+
+    A shared database does not imply shared local storage. A watchdog must
+    leave foreign tasks for their owning deployment instead of failing them.
+    Arbitrary external input paths retain the existing missing-file policy.
+    """
+    foreign = []
+    root = PROJECT_ROOT.resolve()
+    for value in paths:
+        path = Path(value)
+        if not path.is_absolute() or path.is_file():
+            continue
+        parts = path.parts
+        for marker in (("runtime", "content_pipeline"), ("data", "processed")):
+            for index in range(len(parts) - len(marker) + 1):
+                if parts[index:index + len(marker)] == marker:
+                    owner = Path(*parts[:index]).resolve()
+                    if owner != root:
+                        foreign.append(value)
+                    break
+            else:
+                continue
+            break
+    return tuple(foreign)
+
+
 def _unavailable_local_materials(paths: Iterable[str]) -> Tuple[str, ...]:
     return tuple(
         path
@@ -569,6 +596,15 @@ def maybe_requeue_stale_publisher_child(
     else:
         worker_visible = False
         queue_visible = False
+
+    foreign_materials = _foreign_deployment_materials(required_materials)
+    if foreign_materials:
+        active_logger.info(
+            "Skipping publisher repair owned by another deployment: task=%s paths=%s",
+            snapshot.id,
+            list(foreign_materials),
+        )
+        return snapshot, False
 
     unavailable_materials = _unavailable_local_materials(required_materials)
     if unavailable_materials:
@@ -1100,6 +1136,15 @@ def maybe_repair_stale_publisher_processing_task(
     )
     if not queue_checked:
         return snapshot, False, "visibility_unknown"
+
+    foreign_materials = _foreign_deployment_materials(required_materials)
+    if foreign_materials:
+        active_logger.info(
+            "Skipping publisher repair owned by another deployment: task=%s paths=%s",
+            snapshot.id,
+            list(foreign_materials),
+        )
+        return snapshot, False, "foreign_deployment"
 
     unavailable_materials = _unavailable_local_materials(required_materials)
     current = _load_matching_processing_publisher_task(snapshot)

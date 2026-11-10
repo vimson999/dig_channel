@@ -342,6 +342,34 @@ class SharedNavigation {
                         "group": "星球情报"
                     },
                     {
+                        "id": "hotspots",
+                        "name": "热点二创",
+                        "icon": "fas fa-fire",
+                        "href": "hotspots.html",
+                        "group": "内容运营"
+                    },
+                    {
+                        "id": "x-content",
+                        "name": "X 内容运营",
+                        "icon": "fas fa-comments",
+                        "href": "x-content.html",
+                        "group": "内容运营"
+                    },
+                    {
+                        "id": "shengcai-projects",
+                        "name": "生财项目库",
+                        "icon": "fas fa-lightbulb",
+                        "href": "shengcai-projects.html",
+                        "group": "星球情报"
+                    },
+                    {
+                        "id": "voyage-analysis",
+                        "name": "航海项目分析",
+                        "icon": "fas fa-compass-drafting",
+                        "href": "voyage-analysis.html",
+                        "group": "航海项目分析"
+                    },
+                    {
                         "id": "codex-pdf-analyses",
                         "name": "Codex PDF 分析归档",
                         "icon": "fas fa-file-circle-check",
@@ -526,6 +554,13 @@ class SharedNavigation {
                         "icon": "fas fa-file-shield",
                         "href": "pdf-tools.html",
                         "group": "文档处理"
+                    },
+                    {
+                        "id": "audio-ad-removal",
+                        "name": "讲课音频去广告",
+                        "icon": "fas fa-waveform-lines",
+                        "href": "audio-ad-removal.html",
+                        "group": "音频处理"
                     },
                     {
                         "id": "pdf-merge-workflow",

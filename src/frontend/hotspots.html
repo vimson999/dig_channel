@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>热点二创 - Shioa</title>
+<link rel="stylesheet" href="css/zsxq-lab.css">
+<link rel="stylesheet" href="css/hotspots.css?v=studio-1">
+</head>
+<body>
+<main class="studio">
+  <header class="studio-heading">
+    <div><p class="eyebrow">CONTENT STUDIO <span>/</span> X 内容运营</p><h1>热点二创<span class="title-note">从热点到你的表达</span></h1></div>
+    <div class="studio-guide"><span>01 选热点</span><i>→</i><span>02 挑文案</span><i>→</i><span>03 复制发布</span></div>
+  </header>
+  <div class="hotspot-layout">
+    <aside class="hotspot-panel feed-panel" aria-label="热点列表">
+      <div class="feed-heading"><h2>发现热点 <span id="feed-count"></span></h2><button id="refresh" class="text-button" type="button" title="刷新热点列表">↻ 刷新</button></div>
+      <form id="hot-search">
+        <label class="search-label"><span class="sr-only">热点标题</span><input type="search" name="q" placeholder="搜索你感兴趣的话题…" autocomplete="off"></label>
+        <div class="filter-line">
+          <label><span class="sr-only">来源平台</span><select name="source_platform" aria-label="来源平台"><option value="">全部平台</option><option value="baidu">百度</option><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option><option value="x">X</option><option value="reddit">Reddit</option><option value="github">GitHub</option></select></label>
+          <label><span class="sr-only">热点状态筛选</span><select name="status" aria-label="热点状态筛选"><option value="">全部状态</option><option value="pending">待审</option><option value="processed">已采用</option><option value="ignored">已忽略</option></select></label>
+          <button type="submit" class="filter-submit">筛选</button>
+        </div>
+      </form>
+      <div id="hot-list" aria-busy="true"><p class="empty-state">正在读取热点…</p></div>
+      <nav class="feed-pagination" aria-label="热点分页"><button id="hot-prev" type="button">← 上一页</button><span id="hot-page">第 1 页</span><button id="hot-next" type="button">下一页 →</button></nav>
+    </aside>
+    <section id="hot-detail" class="detail-panel" aria-label="热点详情" aria-busy="false">
+      <div class="welcome-state"><span class="welcome-icon">✦</span><h2>找到值得表达的那一条</h2><p>从左侧选择热点，在这里比较候选文案。<br>正文、配图和发布状态，都在一处完成。</p></div>
+    </section>
+  </div>
+  <p id="hot-message" role="status" aria-live="polite"></p>
+</main>
+<script src="js/env.js"></script>
+<script src="js/config.js"></script>
+<script src="js/shared-navigation.js?v=20261105-hotspots"></script>
+<script src="js/hotspots.js?v=studio-1"></script>
+</body>
+</html>

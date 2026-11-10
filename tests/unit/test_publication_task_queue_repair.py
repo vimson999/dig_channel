@@ -1239,6 +1239,39 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
         self.assertEqual(repair["previous_celery_id"], "old-render-celery-id")
         self.assertEqual(repair["previous_step"], "v_synthesis")
 
+    def test_foreign_deployment_pending_task_is_not_closed_or_requeued(self):
+        _, task = self._parent_with_publisher_child(parent_status="processing")
+        self._assert_foreign_deployment_task_untouched(task, processing=False)
+
+    def test_foreign_deployment_processing_task_is_not_closed_or_requeued(self):
+        task = self._processing_publisher_task(step="v_synthesis")
+        self._assert_foreign_deployment_task_untouched(task, processing=True)
+
+    def _assert_foreign_deployment_task_untouched(self, task, *, processing):
+        task.params = {
+            "feature": "publisher",
+            "metadata": {"audio": {"path": "/another-deployment/runtime/content_pipeline/batches/b/audio_cleaned/source.mp3"}},
+            "video": {"enabled": True, "media_type": "image", "image_path": "/another-deployment/data/processed/background.jpg"},
+        }
+        task.updated_at = datetime.utcnow() - timedelta(minutes=20)
+        db.session.commit()
+        task_id, status, step = str(task.id), task.status, task.current_step
+        dummy = DummyCeleryTask()
+        with patch.object(publisher_queue_repair, "_message_visible_in_workers", return_value=(False, True)), patch.object(
+            publisher_queue_repair, "_message_visible_in_queue", return_value=(False, True)
+        ), patch.object(publisher_queue_repair, "run_publication_pipeline", dummy):
+            if processing:
+                _, changed, action = publisher_queue_repair.maybe_repair_stale_publisher_processing_task(task)
+                self.assertEqual(action, "foreign_deployment")
+            else:
+                _, changed = publisher_queue_repair.maybe_requeue_stale_publisher_child(task)
+        persisted = db.session.get(PublicationTask, task_id)
+        self.assertFalse(changed)
+        self.assertEqual(persisted.status, status)
+        self.assertEqual(persisted.current_step, step)
+        self.assertIsNone(persisted.completed_at)
+        self.assertEqual(dummy.calls, [])
+
     def test_pending_repair_fails_closed_when_required_materials_are_unavailable(self):
         _, child = self._parent_with_publisher_child(parent_status="processing")
         child.params = {

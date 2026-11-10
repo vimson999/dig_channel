@@ -18,6 +18,8 @@ def register_blueprints(app):
     Args:
         app: Flask应用实例
     """
+    from .audio_ad_removal import bp as audio_ad_removal_bp
+    app.register_blueprint(audio_ad_removal_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(channels_bp)
     app.register_blueprint(rankings_bp)
@@ -95,6 +97,14 @@ def register_blueprints(app):
     app.register_blueprint(zsxq_browser_import_bp)
     from .zsxq_json_import import bp as zsxq_json_import_bp
     app.register_blueprint(zsxq_json_import_bp)
+    from .shengcai_projects import bp as shengcai_projects_bp
+    app.register_blueprint(shengcai_projects_bp)
+    from .voyage_analysis import bp as voyage_analysis_bp
+    app.register_blueprint(voyage_analysis_bp)
+    from .x_content import bp as x_content_bp
+    app.register_blueprint(x_content_bp)
+    from .hotspots import bp as hotspots_bp
+    app.register_blueprint(hotspots_bp)
 
     # 注册知识星球情报分析 API
     from .zsxq_insights import bp as zsxq_insights_bp
@@ -103,9 +113,9 @@ def register_blueprints(app):
     # 注册知识星球清单分析与历史 API
     from .zsxq_analysis import bp as zsxq_analysis_bp
     app.register_blueprint(zsxq_analysis_bp)
+
     # 独立的 Codex PDF 分析结果只读 API，不复用星球清单分析接口。
     app.register_blueprint(codex_pdf_analyses_bp)
-
 
     # 注册外链文档富化 API
     from .external_documents import bp as external_documents_bp

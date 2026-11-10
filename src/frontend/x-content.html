@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>X 内容运营 - Shioa</title><link rel="stylesheet" href="css/zsxq-lab.css?v=20260730-content-workbench"><link rel="stylesheet" href="css/x-content.css?v=20261027"></head>
+<body>
+<main class="x-shell">
+<header class="x-heading"><div><p class="eyebrow">X GROWTH STUDIO / 内容运营智库</p><h1>让每一次创作，都有积累。</h1><p class="subtitle">@vimson999 · 学样本，提套路，写内容，聊评论。</p></div><div class="actions"><button id="import-open" hidden>导入数据</button><button id="create" class="primary" hidden>＋ 新建记录</button></div></header>
+<section id="overview" class="overview" aria-label="知识库概况"></section>
+<div class="notice"><span id="source-notice">正在连接知识库…</span><button id="clear-mock" hidden>清理示例数据</button></div>
+<nav id="tabs" class="tabs" aria-label="内容栏目"></nav>
+<section class="tools" aria-label="搜索筛选"><label class="search">搜索<input id="search" type="search" placeholder="搜索文案、公式、作者或熟客…"></label><label>条件<select id="filter"></select></label><label>时段<select id="slot"><option value="">全部时段</option><option value="early_stall">出早摊</option><option value="morning">早间茶馆</option><option value="night_chat">夜间复盘</option><option value="anytime">全天通用</option></select></label><label>排序<select id="sort"></select></label><button id="reset">重置</button></section>
+<div class="section-title"><div><h2 id="section-name"></h2><p id="section-description"></p></div><p id="result" role="status" aria-live="polite"></p></div>
+<section id="cards" class="cards" aria-busy="true"></section>
+<nav class="pagination" aria-label="分页"><button id="prev">← 上一页</button><span id="page"></span><button id="next">下一页 →</button></nav>
+<footer>指标按已记录的采集时点展示。效果拆解与算法判断来自来源经验，尚未经本系统独立验证。</footer>
+</main>
+<dialog id="detail"><div class="dialog-head"><h2 id="detail-title">记录详情</h2><button data-close="detail" aria-label="关闭详情">×</button></div><div id="detail-body"></div><div id="detail-actions" class="actions"></div></dialog>
+<dialog id="editor"><div class="dialog-head"><h2 id="editor-title">编辑记录</h2><button data-close="editor" aria-label="关闭编辑">×</button></div><form id="edit-form"><div id="fields" class="fields"></div><p id="edit-error" role="alert"></p><div class="actions"><button type="button" data-close="editor">取消</button><button type="submit" class="primary" id="save">保存记录</button></div></form></dialog>
+<dialog id="import-dialog"><div class="dialog-head"><h2>导入真实数据</h2><button data-close="import-dialog" aria-label="关闭导入">×</button></div><p>支持 x_viral_patterns、x_viral_cases、x_own_posts、x_reply_tactics 四个数组，以及原始交接包的 code 字段。相同 ID 更新，其他真实记录保留。</p><label class="file-label">选择 JSON 文件（最大 5 MiB）<input id="import-file" type="file" accept=".json,.txt,application/json,text/plain"></label><label class="check"><input id="replace-mock" type="checkbox" checked>导入成功后清理全部示例数据</label><p>校验失败会整体回滚。缺失的原始案例编号保留为“来源待补全”。</p><p id="import-message" role="status"></p><div class="actions"><button id="import-submit" class="primary">校验并导入</button></div></dialog>
+<div id="toast" role="status" aria-live="polite" hidden></div>
+<script src="js/env.js"></script><script src="js/config.js"></script><script src="js/shared-navigation.js?v=20261027-x"></script><script src="js/x-content.js?v=20261027"></script>
+</body></html>

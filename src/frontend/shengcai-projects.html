@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>生财项目库 - Shioa</title>
+    <link rel="stylesheet" href="css/zsxq-lab.css?v=20260730-content-workbench">
+    <link rel="stylesheet" href="css/shengcai-projects.css?v=20261026-3">
+</head>
+<body>
+<main class="catalog-shell">
+    <header class="catalog-heading">
+        <div><p class="catalog-eyebrow">选题情报 / 项目机会</p><h1>生财项目库<span class="catalog-badge">项目列表</span></h1><p class="catalog-subtitle">从平台、技能和变现方式出发，找到值得进一步了解的项目。</p></div>
+        <button id="open-import" class="catalog-button primary" type="button">＋ 导入列表</button>
+    </header>
+    <section class="catalog-metrics" aria-label="项目库概况">
+        <div><span>收录项目</span><strong id="metric-total">—</strong><small>个项目方向</small></div>
+        <div><span>覆盖平台</span><strong id="metric-platforms">—</strong><small>种平台标签</small></div>
+        <div><span>变现方式</span><strong id="metric-monetizations">—</strong><small>种变现标签</small></div>
+        <div class="catalog-sync"><span>最近入库</span><strong id="metric-imported">—</strong><small>数据保存在本地数据库</small></div>
+    </section>
+    <section class="catalog-tools" aria-label="搜索与筛选">
+        <div class="search-row search-sentence">
+            <label class="query-part"><select id="catalog-published-within" aria-label="发布时间范围" title="最近一个月按最近 30 天计算"><option value="7">最近一周</option><option value="30" selected>最近一个月</option><option value="90">最近三个月</option><option value="365">最近一年</option><option value="all">全部时间</option></select><span>发布的，</span></label>
+            <label class="query-part"><span>按</span><select id="catalog-sort" aria-label="项目排序"><option value="income_max" selected>收益上限从高到低</option><option value="income_min">收益下限从高到低</option><option value="newest">最近发布</option><option value="likes">点赞最多</option><option value="cost">成本从低到高</option><option value="time">时间从少到多</option></select><span>排序，</span></label>
+            <label class="query-part query-name"><span>名称包含</span><input id="catalog-search" type="search" placeholder="输入项目名称" aria-label="项目名称包含"></label>
+            <label class="query-part"><span>每页</span><select id="catalog-page-size" aria-label="每页显示数量"><option value="12">12 条</option><option value="24">24 条</option><option value="48" selected>48 条</option><option value="100">100 条</option></select></label>
+        </div>
+        <div class="filter-row"><label>平台<select id="filter-platform" aria-label="按平台筛选"><option value="">全部平台</option></select></label><label>变现方式<select id="filter-monetize" aria-label="按变现方式筛选"><option value="">全部方式</option></select></label><label>适合人群<select id="filter-crowd" aria-label="按人群或技能筛选"><option value="">全部人群</option></select></label><button id="clear-filters" class="clear-button" type="button">重置筛选</button></div>
+    </section>
+    <div class="catalog-result-heading"><p id="result-count" role="status" aria-live="polite">正在读取项目…</p><span>收益与成本按来源值展示，未注明币种及收益周期</span></div>
+    <section id="catalog-grid" class="catalog-grid" aria-label="项目列表" aria-busy="true"></section>
+    <nav id="catalog-pagination" class="catalog-pagination" aria-label="项目分页"><button id="prev-page" class="catalog-button" type="button" disabled>← 上一页</button><span id="page-label"></span><button id="next-page" class="catalog-button" type="button" disabled>下一页 →</button></nav>
+    <p class="catalog-footer">仅展示已采集的项目列表 · 点击项目名称或「查看原文」前往生财详情页</p>
+</main>
+<dialog id="import-dialog" class="catalog-dialog" aria-labelledby="import-title">
+    <div class="dialog-heading"><h2 id="import-title">导入生财项目列表</h2><button id="close-import" class="dialog-close" type="button" aria-label="关闭导入窗口">×</button></div>
+    <p>上传包含 data.items 的 JSON 文件。同 ID 项目更新，重复内容保留一份。</p>
+    <label class="import-file">选择项目列表 JSON<input id="import-file" type="file" accept=".json,.txt,application/json,text/plain"></label>
+    <small>最大 5 MiB。不会删除本次文件中未出现的已有项目。</small>
+    <p id="import-status" role="status" aria-live="polite"></p>
+    <div class="dialog-actions"><button id="confirm-import" class="catalog-button primary" type="button">确认导入</button></div>
+</dialog>
+<script src="js/env.js"></script><script src="js/config.js"></script>
+<script src="js/shared-navigation.js?v=20261021-projects"></script>
+<script src="js/shengcai-projects.js?v=20261026-3"></script>
+</body>
+</html>

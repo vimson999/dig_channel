@@ -24,6 +24,10 @@ from .report_pdf_evidence import (
 )
 from .download_task import DownloadTask
 from .system_config import SystemConfig
+from .hotspot import Hotspot, XPost
+from .x_content import XViralPattern, XViralCase, XOwnPost, XReplyTactic
+from .shengcai_project import ShengcaiProject, ShengcaiProjectImport
+from .voyage_analysis import VoyageAnalysis
 from .platform_credential import PlatformCredentialAccount, PlatformCredentialBinding
 from .zsxq_history_api_client import ZsxqHistoryApiClient
 from .external_document import ExternalDocument, ZsxqTopicExternalDocument
@@ -94,6 +98,9 @@ __all__ = [
     'ReportVisualPlanSegmentEvidence',
     'DownloadTask',
     'SystemConfig',
+    'ShengcaiProject',
+    'ShengcaiProjectImport',
+    'VoyageAnalysis',
     'PlatformCredentialAccount',
     'PlatformCredentialBinding',
     'ZsxqHistoryApiClient',
@@ -107,15 +114,6 @@ __all__ = [
     'TTSSegment',
     'ZsxqSyncRun',
     'ZsxqSyncRunDownload',
-    'CodexPdfAnalysisRun',
-    'CodexPdfAnalysisSource',
-    'CodexPdfAnalysisSection',
-    'CodexPdfAnalysisTopic',
-    'CodexPdfAnalysisRanking',
-    'CodexPdfAnalysisTarget',
-    'CodexPdfAnalysisCandidate',
-    'CodexPdfAnalysisCandidateSource',
-    'CodexPdfAnalysisSectionSource',
     'ZsxqTopic',
     'ZsxqTopicFavorite',
     'ZsxqTopicComment',
@@ -127,6 +125,15 @@ __all__ = [
     'ZsxqAnalysisItem',
     'ZsxqAnalysisTopic',
     'ZsxqAnalysisKeyword',
+    'CodexPdfAnalysisRun',
+    'CodexPdfAnalysisSource',
+    'CodexPdfAnalysisSection',
+    'CodexPdfAnalysisTopic',
+    'CodexPdfAnalysisRanking',
+    'CodexPdfAnalysisTarget',
+    'CodexPdfAnalysisCandidate',
+    'CodexPdfAnalysisCandidateSource',
+    'CodexPdfAnalysisSectionSource',
     'ReportVideoTask',
     'ReportVideoReport',
     'ReportVideoAnalysis',

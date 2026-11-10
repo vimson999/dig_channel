@@ -278,6 +278,8 @@ def create_app(config_class=Config, *, register_apis=True):
             from utils.contact_api_auth import is_valid_contact_request
             if is_valid_contact_request():
                 return None
+        if request.method == 'POST' and path == '/api/v1/sync/hotspots-with-posts':
+            return None  # The ingestion route requires its dedicated bearer token.
         if path in public_paths or path.startswith('/access/'):
             return None
 

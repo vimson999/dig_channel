@@ -39,6 +39,7 @@ class RequestLoggerMiddleware:
         
         # 记录请求参数（排除敏感信息）
         sensitive_path = request.path.startswith('/api/v1/auth/') or 'credentials' in request.path
+        sensitive_path |= request.path == '/api/v1/sync/hotspots-with-posts' or request.path.startswith('/api/v1/hotspots')
         if request.args and not sensitive_path:
             safe_args = self._filter_sensitive_data(dict(request.args))
             logger.debug(f"📝 [{g.request_id}] Query params: {safe_args}")
@@ -75,7 +76,7 @@ class RequestLoggerMiddleware:
             # 记录响应体（仅在调试模式下）
             if logger.isEnabledFor(10):  # DEBUG level
                 try:
-                    if response.is_json and not request.path.startswith('/api/v1/auth/'):
+                    if response.is_json and not request.path.startswith(('/api/v1/auth/', '/api/v1/hotspots')):
                         response_data = response.get_json()
                         safe_response = self._filter_sensitive_data(response_data)
                         logger.debug(f"📤 [{g.request_id}] Response: {json.dumps(safe_response, ensure_ascii=False)}")

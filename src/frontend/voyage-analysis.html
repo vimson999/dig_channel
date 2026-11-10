@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#f4f6f2">
+    <title>航海项目分析 - Shioa</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+    <link rel="stylesheet" href="css/zsxq-lab.css?v=20260730-content-workbench">
+    <link rel="stylesheet" href="css/voyage-analysis.css?v=20261110-1">
+</head>
+<body class="voyage-analysis-page">
+<main class="voyage-shell">
+    <header class="voyage-hero">
+        <div class="voyage-hero-copy">
+            <p class="voyage-eyebrow"><span></span>独立研究档案 / 2026 年 11 月</p>
+            <h1>航海项目分析</h1>
+            <p class="voyage-subtitle">按统一结构沉淀项目路径、门槛、证据与判断，逐个阅读和复盘。</p>
+            <div class="voyage-principles"><span>事实与判断分开</span><span>案例注明来源</span><span>Markdown 持久化</span></div>
+        </div>
+        <div class="voyage-hero-stat"><strong id="analysis-total">—</strong><span>份项目分析</span><small id="analysis-updated">正在读取档案</small></div>
+        <div class="voyage-hero-mark" aria-hidden="true">航</div>
+    </header>
+
+    <section class="voyage-workspace" aria-label="航海项目分析库">
+        <aside class="voyage-library">
+            <div class="voyage-library-heading">
+                <div><p class="voyage-kicker">LIBRARY</p><h2>项目目录</h2></div>
+                <span id="visible-total" class="voyage-count">—</span>
+            </div>
+            <label class="voyage-search">
+                <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i>
+                <input id="analysis-search" type="search" placeholder="搜索项目名称或判断" autocomplete="off" aria-label="搜索项目分析">
+                <kbd>/</kbd>
+            </label>
+            <div id="analysis-list" class="voyage-list" aria-live="polite" aria-busy="true"></div>
+            <p class="voyage-library-note"><i class="fa-regular fa-folder-open" aria-hidden="true"></i> 每份分析独立保存为 Markdown，可持续追加。</p>
+        </aside>
+
+        <article id="analysis-reader" class="voyage-reader" aria-live="polite" aria-busy="true">
+            <div class="voyage-reader-message">正在读取项目分析…</div>
+        </article>
+    </section>
+</main>
+<script src="js/env.js"></script>
+<script src="js/config.js"></script>
+<script src="js/shared-navigation.js?v=20261110-voyage-analysis"></script>
+<script src="js/voyage-analysis.js?v=20261110-1"></script>
+</body>
+</html>
