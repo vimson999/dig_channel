@@ -163,52 +163,85 @@
         `).join('')}</div>`;
     }
 
-    function renderBody(value) {
-        const lines = String(value || '').split(/\r?\n/);
-        const isRow = (line) => /^\|.*\|$/.test(line.trim());
-        const cells = (line) => line.trim().slice(1, -1).split('|').map((cell) => cell.trim());
-        const blocks = [];
-        let prose = [];
-        const flush = () => {
-            if (prose.length) blocks.push(`<div class="section-prose">${escapeHtml(prose.join('\n').trim())}</div>`);
-            prose = [];
-        };
-        for (let i = 0; i < lines.length; i++) {
-            if (!isRow(lines[i]) || !isRow(lines[i + 1] || '') ||
-                !cells(lines[i + 1]).every((cell) => /^:?-{3,}:?$/.test(cell))) {
-                prose.push(lines[i]);
-                continue;
-            }
-            flush();
-            const headings = cells(lines[i]);
-            const rows = [];
-            i += 2;
-            while (i < lines.length && isRow(lines[i])) {
-                rows.push(`<tr>${cells(lines[i++]).map((cell) => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`);
-            }
-            i--;
-            blocks.push(`<div class="table-wrap" tabindex="0" aria-label="报告数据表"><table class="report-table">
-                <thead><tr>${headings.map((cell) => `<th scope="col">${escapeHtml(cell)}</th>`).join('')}</tr></thead>
-                <tbody>${rows.join('')}</tbody></table></div>`);
-        }
-        flush();
-        return blocks.join('');
-    }
-
-    function disclosure(title, body, note = '', count = '') {
-        return `<details class="report-disclosure"><summary>
+    function disclosure(title, body, note = '', count = '', group = '') {
+        return `<details class="report-disclosure"${group ? ` name="${escapeHtml(group)}"` : ''}><summary>
             <span class="disclosure-label"><strong>${escapeHtml(title)}</strong>${note ? `<small>${escapeHtml(note)}</small>` : ''}</span>
             ${count ? `<span class="count-pill">${escapeHtml(count)}</span>` : ''}
             <i class="fa-solid fa-chevron-down" aria-hidden="true"></i>
         </summary><div class="disclosure-content">${body}</div></details>`;
     }
 
-    function renderSections(sections) {
+    const sectionNumber = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 12 });
+    const pdfColumns = ['PDF 文件名', '机构', '报告日候选', '上传时间', '下载', '状态'];
+    const pdfCells = (source) => [source?.name, source?.institution, source?.report_date_text,
+        source?.upload_time_text, source?.download_count, source?.status];
+
+    function sectionTable(title, columns, rows) {
+        return `<div class="table-wrap section-table" tabindex="0" aria-label="${escapeHtml(title)}"><table class="report-table">
+            <thead><tr>${columns.map((cell) => `<th scope="col"${cell === 'PDF 文件名' ? ' class="pdf-column"' : ''}>${escapeHtml(cell)}</th>`).join('')}</tr></thead>
+            <tbody>${rows.map((row) => `<tr>${row.map((cell) => typeof cell === 'number'
+                ? `<td class="num">${escapeHtml(sectionNumber.format(cell))}</td>`
+                : `<td>${escapeHtml(cell ?? '—')}</td>`).join('')}</tr>`).join('')}</tbody>
+        </table></div>`;
+    }
+
+    function sourceTable(title, entries) {
+        return sectionTable(title, [...pdfColumns, '用途', '证据说明'], entries.map((link) =>
+            [...pdfCells(link.source), roleLabel(link.source_role), link.evidence_note]));
+    }
+
+    function renderBlocks(blocks, rankings) {
+        const html = [];
+        let cards = [];
+        let cardKind = '';
+        function flush() {
+            if (cards.length) html.push(`<div class="section-card-grid ${cardKind}">${cards.join('')}</div>`);
+            cards = [];
+        }
+        for (const block of blocks) {
+            const title = escapeHtml(block.title);
+            if (['metric', 'finding', 'limitation'].includes(block.kind)) {
+                if (cardKind !== block.kind) flush();
+                cardKind = block.kind;
+                cards.push(block.kind === 'metric'
+                    ? `<div class="metric-card"><span>${title}</span><strong>${formatNumber(block.value)} <small>${escapeHtml(block.unit)}</small></strong></div>`
+                    : `<article class="section-point"><h4>${title}</h4><p>${escapeHtml(block.text)}</p></article>`);
+                continue;
+            }
+            flush();
+            if (block.kind === 'heading') html.push(`<h4 class="section-subtitle">${title}</h4>`);
+            if (block.kind === 'table') {
+                const table = sectionTable(block.title, block.columns, block.rows);
+                html.push(block.columns.includes('PDF 文件名') || block.rows.length > 6
+                    ? disclosure(block.title, table, '', String(block.rows.length))
+                    : `<div class="section-table-block"><h4 class="section-subtitle">${title}</h4>${table}</div>`);
+            }
+            if (block.kind === 'ranking') {
+                const rows = rankings.filter((row) => row.ranking_type === block.ranking_type);
+                const groups = new Map();
+                rows.forEach((row) => {
+                    const topic = row.topic_name || '';
+                    if (!groups.has(topic)) groups.set(topic, []);
+                    groups.get(topic).push(row);
+                });
+                html.push(disclosure(block.title, [...groups].map(([topic, items]) =>
+                    `${topic ? `<h4 class="section-subtitle">${escapeHtml(topic)}</h4>` : ''}
+                    ${sectionTable(topic || block.title, ['排名', ...pdfColumns],
+                        items.map(({ rank, source }) => [rank, ...pdfCells(source)]))}`).join(''), '', String(rows.length)));
+            }
+        }
+        flush();
+        return html.join('');
+    }
+
+    function renderSections(sections, rankings = []) {
         return sections?.map((section) => disclosure(section.title, `
-            <div class="section-body">${renderBody(section.body_text)}</div>
-            ${section.sources?.length ? disclosure('本节引用', `<div class="section-sources">${section.sources.map((link) => `
-                <div class="source-chip" title="${escapeHtml(link.evidence_note || '')}">${escapeHtml(roleLabel(link.source_role))} · ${escapeHtml(link.source?.name || '')}</div>`).join('')}</div>`, '', String(section.sources.length)) : ''}
-        `, section.summary_text)).join('') || '';
+            <div class="structured-section">${section.blocks?.length
+                ? renderBlocks(section.blocks, rankings)
+                : `<p class="section-prose">${escapeHtml(section.body_text)}</p>`}
+            ${section.sources?.length ? disclosure('引用与取材', sourceTable('引用与取材', section.sources),
+                '', String(section.sources.length)) : ''}</div>
+        `, section.summary_text, '', 'analysis-chapters')).join('') || '';
     }
 
     function renderTopics(topics) {
@@ -384,7 +417,7 @@
         const sources = detail.sources || [];
         const tabs = [
             ['overview', '概览', () => renderOverview(detail, run)],
-            ['sections', '分析正文', () => renderSections(detail.sections)],
+            ['sections', '分析正文', () => renderSections(detail.sections, detail.rankings)],
             ['data', '统计与排行', () => `
                 ${detail.topics?.length ? disclosure('主题统计', renderTopics(detail.topics)) : ''}
                 ${detail.targets?.length ? disclosure('标的聚合', renderTargets(detail.targets)) : ''}

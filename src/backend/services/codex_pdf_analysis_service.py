@@ -24,7 +24,10 @@ from models import (
 )
 
 
-SUBMISSION_SCHEMA = "codex-pdf-analysis/v1"
+from models.codex_pdf_analysis import CodexPdfAnalysisBlock, CodexPdfAnalysisCell
+
+
+SUBMISSION_SCHEMA = "codex-pdf-analysis/v2"
 MAX_PAYLOAD_BYTES = 5 * 1024 * 1024
 MAX_SOURCE_RECORD_COUNT = 10000
 MAX_SOURCES = 1000
@@ -161,6 +164,58 @@ def _date(value: Any, label: str):
     return parsed
 
 
+def _section_blocks(value, label):
+    fields = {
+        "heading": set(), "finding": {"text"}, "limitation": {"text"},
+        "metric": {"value", "unit"}, "table": {"columns", "rows"},
+        "ranking": {"ranking_type"},
+    }
+
+    def finite_number(value, path):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or abs(value) > 1e15 or not math.isfinite(value):
+            raise CodexPdfAnalysisValidationError(f"{path} 必须是有限数字")
+        return float(value)
+
+    result = []
+    for index, entry in enumerate(_rows(value, label, 80), 1):
+        path = f"{label}[{index}]"
+        kind = entry.get("kind") if isinstance(entry, dict) else None
+        if not isinstance(kind, str) or kind not in fields:
+            raise CodexPdfAnalysisValidationError(f"{path}.kind 不受支持")
+        _object(entry, path, {"kind", "title"} | fields[kind])
+        row = {"kind": kind, "title": _text(entry["title"], f"{path}.title", 255), "ordinal": index, "cells": []}
+        if kind in {"finding", "limitation"}:
+            row["content_text"] = _text(entry["text"], f"{path}.text", 1200)
+            if len(row["content_text"].splitlines()) != 1:
+                raise CodexPdfAnalysisValidationError(f"{path}.text 每条只允许一段文字")
+        elif kind == "metric":
+            row["number_value"] = finite_number(entry["value"], f"{path}.value")
+            row["unit"] = _text(entry["unit"], f"{path}.unit", 32, required=False)
+        elif kind == "ranking":
+            row["ranking_type"] = _text(entry["ranking_type"], f"{path}.ranking_type", 48)
+            if row["ranking_type"] not in RANKING_TYPES:
+                raise CodexPdfAnalysisValidationError(f"{path}.ranking_type 不受支持")
+        elif kind == "table":
+            columns = [_text(col, f"{path}.columns", 120) for col in _rows(entry["columns"], f"{path}.columns", 12)]
+            rows = _rows(entry["rows"], f"{path}.rows", 100)
+            if not columns or len(set(columns)) != len(columns) or not rows:
+                raise CodexPdfAnalysisValidationError(f"{path} 必须有数据行和不重复的表头")
+            for r, values in enumerate([columns, *rows]):
+                if not isinstance(values, list) or len(values) != len(columns):
+                    raise CodexPdfAnalysisValidationError(f"{path}.rows 列数必须与表头一致")
+                for c, cell in enumerate(values):
+                    typed = {"row_no": r, "column_no": c}
+                    if cell is None or isinstance(cell, str):
+                        typed["text_value"] = _text(cell, f"{path}.rows", 1200, required=False)
+                    else:
+                        typed["number_value"] = finite_number(cell, f"{path}.rows")
+                    row["cells"].append(typed)
+        result.append(row)
+    if not result or all(row["kind"] == "heading" for row in result):
+        raise CodexPdfAnalysisValidationError(f"{label} 必须包含分析内容")
+    return result
+
+
 def validate_submission(submission: Any) -> dict[str, Any]:
     """Validate shape, limits, enumerations, and all within-run references."""
 
@@ -238,7 +293,7 @@ def validate_submission(submission: Any) -> dict[str, Any]:
         row = _object(
             value,
             f"sections[{index}]",
-            {"module_code", "title", "ordinal", "summary_text", "body_text", "evidence_state"},
+            {"module_code", "title", "ordinal", "summary_text", "blocks", "evidence_state"},
         )
         module_code = _text(row["module_code"], f"sections[{index}].module_code", 64)
         if module_code not in SECTION_CODES:
@@ -260,7 +315,7 @@ def validate_submission(submission: Any) -> dict[str, Any]:
                 "title": _text(row["title"], f"sections[{index}].title", 255),
                 "ordinal": ordinal,
                 "summary_text": _text(row["summary_text"], f"sections[{index}].summary_text", 20000, required=False),
-                "body_text": _text(row["body_text"], f"sections[{index}].body_text", 200000),
+                "blocks": _section_blocks(row["blocks"], f"sections[{index}].blocks"),
                 "evidence_state": _text(row["evidence_state"], f"sections[{index}].evidence_state", 48, required=False),
             }
         )
@@ -477,6 +532,12 @@ def validate_submission(submission: Any) -> dict[str, Any]:
     elif normalized["selected_candidate_title"]:
         raise CodexPdfAnalysisValidationError("没有候选时 selected_candidate_title 必须为空")
 
+    ranking_types = {row["ranking_type"] for row in normalized["rankings"]}
+    for section in normalized["sections"]:
+        for block in section["blocks"]:
+            if block["kind"] == "ranking" and block["ranking_type"] not in ranking_types:
+                raise CodexPdfAnalysisValidationError(f"{section['module_code']} 引用了不存在的排行")
+
     return normalized
 
 
@@ -544,13 +605,23 @@ def save_codex_pdf_analysis(user_id: int, submission: Any) -> CodexPdfAnalysisRu
 
         section_by_code = {}
         section_rows = [
-            CodexPdfAnalysisSection(run_id=run.id, **row)
+            CodexPdfAnalysisSection(run_id=run.id, body_text="", **{key: value for key, value in row.items() if key != "blocks"})
             for row in data["sections"]
         ]
         db.session.add_all(section_rows)
         db.session.flush()
         for row in section_rows:
             section_by_code[row.module_code] = row
+
+        block_rows = [
+            (CodexPdfAnalysisBlock(section_id=section_by_code[section["module_code"]].id,
+                                   **{key: value for key, value in block.items() if key != "cells"}), block["cells"])
+            for section in data["sections"] for block in section["blocks"]
+        ]
+        db.session.add_all(block for block, _ in block_rows)
+        db.session.flush()
+        db.session.add_all(CodexPdfAnalysisCell(block_id=block.id, **cell)
+                           for block, cells in block_rows for cell in cells)
 
         db.session.add_all(
             CodexPdfAnalysisTopic(run_id=run.id, **row)
@@ -660,12 +731,37 @@ def get_codex_pdf_analysis_detail(user_id: int, run_id: str):
         CodexPdfAnalysisRanking.topic_name,
         CodexPdfAnalysisRanking.rank,
     ).all()
+    blocks = CodexPdfAnalysisBlock.query.join(CodexPdfAnalysisSection).filter(
+        CodexPdfAnalysisSection.run_id == run.id
+    ).order_by(CodexPdfAnalysisBlock.ordinal).all()
+    cells_by_block = {}
+    if blocks:
+        cells = CodexPdfAnalysisCell.query.join(CodexPdfAnalysisBlock).join(CodexPdfAnalysisSection).filter(
+            CodexPdfAnalysisSection.run_id == run.id
+        ).order_by(CodexPdfAnalysisCell.row_no, CodexPdfAnalysisCell.column_no)
+        for cell in cells:
+            rows = cells_by_block.setdefault(cell.block_id, {})
+            rows.setdefault(cell.row_no, []).append(cell.number_value if cell.number_value is not None else cell.text_value)
+    blocks_by_section = {}
+    for block in blocks:
+        rows = cells_by_block.get(block.id, {})
+        blocks_by_section.setdefault(block.section_id, []).append({
+            "kind": block.kind, "title": block.title, "text": block.content_text,
+            "value": block.number_value, "unit": block.unit, "ranking_type": block.ranking_type,
+            "columns": rows.get(0, []), "rows": [row for number, row in rows.items() if number],
+        })
+
+    def serialize_section(row):
+        section = row.to_dict()
+        section["sources"] = section_sources_by_id[row.id]
+        section["blocks"] = blocks_by_section.get(row.id, [])
+        if section["blocks"]:
+            section.pop("body_text", None)
+        return section
+
     return {
         "run": run.to_detail_dict(),
-        "sections": [
-            {**row.to_dict(), "sources": section_sources_by_id[row.id]}
-            for row in sections
-        ],
+        "sections": [serialize_section(row) for row in sections],
         "sources": [row.to_dict() for row in sources],
         "topics": [
             row.to_dict()

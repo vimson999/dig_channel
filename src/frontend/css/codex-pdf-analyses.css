@@ -179,3 +179,24 @@
     .report-tabs button { padding-inline: 7px; font-size: 12px; }
     .archive-shell { padding-top: 13px; }
 }
+
+.structured-section { display: grid; gap: 10px; padding: 5px 0 0; }
+.structured-section > .report-disclosure { margin-bottom: 0; }
+.section-card-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.section-card-grid.limitation { grid-template-columns: minmax(0, 1fr); }
+.section-point { min-width: 0; padding: 11px 13px; border: 1px solid #e1eaf4; border-radius: 9px; background: #f4f8fc; }
+.section-point:only-child { grid-column: 1 / -1; }
+.limitation .section-point { border-color: #f0dfbb; background: #fff9ed; }
+.section-point h4, .section-subtitle { margin: 0 0 5px; font-size: 13px; color: var(--cpa-ink); }
+.section-point p { margin: 0; color: #43536a; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
+.section-subtitle { margin: 0; }
+.section-table-block .section-subtitle { margin: 2px 0 7px; }
+.section-table table { min-width: 400px; }
+.section-table .pdf-column { min-width: min(36vw, 290px); }
+.section-table td { overflow-wrap: anywhere; }
+.section-table tbody tr:nth-child(even) { background: #f8fafd; }
+.section-table th:where(:not(:first-child)) { white-space: normal; }
+.metric-card small { color: #53657d; font-size: 11px; }
+@media (max-width: 600px) {
+    .section-card-grid.finding { grid-template-columns: minmax(0, 1fr); }
+}

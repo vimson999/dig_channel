@@ -145,6 +145,34 @@ class CodexPdfAnalysisSection(db.Model):
         }
 
 
+class CodexPdfAnalysisBlock(db.Model):
+    __tablename__ = "codex_pdf_analysis_blocks"
+    __table_args__ = (
+        UniqueConstraint("section_id", "ordinal", name="uq_codex_pdf_blocks_order"),
+        db.CheckConstraint("kind IN ('heading','finding','limitation','metric','table','ranking')", name="ck_codex_pdf_blocks_kind"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    section_id = db.Column(db.Integer, db.ForeignKey("codex_pdf_analysis_sections.id", ondelete="CASCADE"), nullable=False)
+    ordinal = db.Column(db.Integer, nullable=False)
+    kind = db.Column(db.String(16), nullable=False)
+    title = db.Column(db.String(255), nullable=False)
+    content_text = db.Column(db.Text)
+    number_value = db.Column(db.Float)
+    unit = db.Column(db.String(32))
+    ranking_type = db.Column(db.String(48))
+
+
+class CodexPdfAnalysisCell(db.Model):
+    __tablename__ = "codex_pdf_analysis_cells"
+
+    block_id = db.Column(db.Integer, db.ForeignKey("codex_pdf_analysis_blocks.id", ondelete="CASCADE"), primary_key=True)
+    row_no = db.Column(db.Integer, primary_key=True)
+    column_no = db.Column(db.Integer, primary_key=True)
+    text_value = db.Column(db.Text)
+    number_value = db.Column(db.Float)
+
+
 class CodexPdfAnalysisTopic(db.Model):
     __tablename__ = "codex_pdf_analysis_topics"
     __table_args__ = (
