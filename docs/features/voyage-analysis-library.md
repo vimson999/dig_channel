@@ -16,3 +16,9 @@ venv/bin/python scripts/maintenance/import_voyage_analyses.py --ensure-table
 ```
 
 后续修改 Markdown 和 README 索引后，运行同一脚本（省略 `--ensure-table`）即可同步变更。Alembic migration 为 `20261110_voyage_analyses`，位于 `20261105_hotspot_images` 之后。
+
+## 综合评级
+
+评级存入独立表 `voyage_analysis_ratings`，包含项目标识、分数、等级和理由。API 每次从数据库读取，并按分数降序排列；未评级项目排在最后。A 为 80 分及以上，B 为 65–79 分，C 为 65 分以下。这是基于已有分析、面向个人副业筛选的主观综合判断，不是收益预测。
+
+初始评级来源为 `src/backend/apis/v1/voyage_ratings.json`，使用 `venv/bin/python scripts/maintenance/import_voyage_ratings.py` 幂等写入数据库。

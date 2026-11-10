@@ -138,7 +138,7 @@
             button.addEventListener('click', () => selectItem(item.id, true));
 
             const top = document.createElement('span'); top.className = 'voyage-item-top';
-            const title = document.createElement('span'); title.className = 'voyage-item-title'; title.textContent = item.title;
+            const title = document.createElement('span'); title.className = 'voyage-item-title'; title.textContent = `${item.rating ? item.rating.grade + ' · ' + item.rating.score + '分 ｜ ' : ''}${item.title}`;
             const date = document.createElement('span'); date.className = 'voyage-item-date'; date.textContent = item.analysis_date || '';
             top.append(title, date);
             button.append(top);
@@ -164,6 +164,7 @@
             <header class="voyage-reader-head">
                 <div class="voyage-reader-overline"><span>航海项目</span>${meta.map(value => `<span>${value}</span>`).join('')}</div>
                 <h2 class="voyage-reader-title">${escapeHtml(item.title)}</h2>
+                ${item.rating ? `<p class="voyage-reader-summary"><strong>${escapeHtml(item.rating.grade)} 级 · ${item.rating.score} 分</strong> — ${escapeHtml(item.rating.reason)}</p>` : ''}
                 ${item.summary ? `<p class="voyage-reader-summary">${escapeHtml(item.summary)}</p>` : ''}
                 ${toc}
             </header>
