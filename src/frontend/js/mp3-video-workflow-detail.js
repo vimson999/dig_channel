@@ -487,13 +487,13 @@ class Mp3VideoWorkflowDetailPage {
                 uploadPath: (jobId) => `/api/mp3-video-workflows/jobs/${encodeURIComponent(jobId)}/bilibili-upload`,
                 cancelPath: (jobId, uploadTaskId) => `/api/mp3-video-workflows/jobs/${encodeURIComponent(jobId)}/bilibili-upload/${encodeURIComponent(uploadTaskId)}/cancel`,
                 uploads: (payload) => payload.bilibili_uploads || [],
-                videoOptions: (payload) => this.biliVideoOptions(payload),
+                videoOptions: (payload) => this.biliVideoOptions(payload, { includeWsj: true }),
                 coverOptions: (payload, videoKey) => this.biliCoverOptions(payload, videoKey),
                 defaultCoverKey: (payload, videoKey) => this.defaultBiliCoverKey(payload, videoKey),
                 accountDefaults: (credential) => this.mp3BilibiliAccountDefaults(credential),
                 defaultTitle: (payload, videoKey) => this.defaultBiliTitle(payload, videoKey),
                 defaultTags: '财经,音频,内资闭门会',
-                emptyDescription: '当前任务还没有完整视频文件。请先用“完整横竖屏视频”模式生成横屏或竖屏视频，关键帧预览不能直接投递 B站。',
+                emptyDescription: '当前任务还没有完整视频文件。请先生成小君君横屏、此刻此声竖屏或 WSJ 4:3 视频，关键帧预览不能直接投递 B站。',
                 onAfterSubmit: async () => this.refreshBilibiliUploads(),
                 onAfterCancel: async () => this.refreshBilibiliUploads(),
             });
@@ -533,7 +533,7 @@ class Mp3VideoWorkflowDetailPage {
                 listPath: (jobId) => `/api/mp3-video-workflows/jobs/${encodeURIComponent(jobId)}/douyin-uploads`,
                 uploadPath: (jobId) => `/api/mp3-video-workflows/jobs/${encodeURIComponent(jobId)}/douyin-upload`,
                 cancelPath: (jobId, taskId) => `/api/mp3-video-workflows/jobs/${encodeURIComponent(jobId)}/douyin-upload/${encodeURIComponent(taskId)}/cancel`,
-                videoOptions: (payload) => this.biliVideoOptions(payload),
+                videoOptions: (payload) => this.biliVideoOptions(payload, { includeWsj: false }),
                 defaultTitle: (payload, videoKey) => this.defaultBiliTitle(payload, videoKey),
                 defaultTags: '财经,音频,内资闭门会',
                 emptyDescription: '当前任务还没有完整视频文件。请先生成横屏或竖屏视频。',
@@ -566,7 +566,7 @@ class Mp3VideoWorkflowDetailPage {
                 listPath: (jobId) => `/api/mp3-video-workflows/jobs/${encodeURIComponent(jobId)}/wechat-channels-uploads`,
                 uploadPath: (jobId) => `/api/mp3-video-workflows/jobs/${encodeURIComponent(jobId)}/wechat-channels-upload`,
                 cancelPath: (jobId, taskId) => `/api/mp3-video-workflows/jobs/${encodeURIComponent(jobId)}/wechat-channels-upload/${encodeURIComponent(taskId)}/cancel`,
-                videoOptions: (payload) => this.biliVideoOptions(payload),
+                videoOptions: (payload) => this.biliVideoOptions(payload, { includeWsj: false }),
                 defaultTitle: (payload, videoKey) => this.defaultBiliTitle(payload, videoKey),
                 defaultTags: '财经,音频,内资闭门会',
                 emptyDescription: '当前任务还没有完整视频文件。请先生成横屏或竖屏视频。',
@@ -599,10 +599,14 @@ class Mp3VideoWorkflowDetailPage {
         const continueEndText = planAudio.end_seconds !== undefined && planAudio.end_seconds !== null
             ? this.formatDuration(planAudio.end_seconds)
             : '';
+        const defaultSpeeds = job.default_video_speeds || {};
+        const speedLabel = job.video_speed_override == null
+            ? `默认倍速：小君君 ${(defaultSpeeds.xiaojunjun_landscape ?? 1.18).toFixed(2)}× / 此刻此声 ${(defaultSpeeds.ciketc_vertical ?? 1.20).toFixed(2)}× / WSJ ${(defaultSpeeds.wsj_4_3 ?? 1.22).toFixed(2)}×`
+            : `统一倍速 ${job.video_speed_override}×`;
         const range = [
             planAudio.start_seconds !== undefined ? `起点 ${this.formatDuration(planAudio.start_seconds)}` : '',
             planAudio.end_seconds !== undefined && planAudio.end_seconds !== null ? `终点 ${this.formatDuration(planAudio.end_seconds)}` : '终点自动',
-            `倍速 ${planAudio.speed || 1.2}`,
+            speedLabel,
         ].filter(Boolean).join(' · ');
         const regeneration = job.regeneration || {};
         const regenerationAudio = regeneration.audio_range || {};
@@ -656,7 +660,7 @@ class Mp3VideoWorkflowDetailPage {
                 ${regeneration.active ? `
                     <div class="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs">
                         <div class="font-bold text-amber-900">
-                            <i class="fas fa-spinner fa-spin mr-1.5"></i>正在按新范围 ${this.escape(regenerationRange)}、${this.escape(planAudio.speed || 1.2)}× 重新生成
+                            <i class="fas fa-spinner fa-spin mr-1.5"></i>正在按新范围 ${this.escape(regenerationRange)} 重新生成 · ${this.escape(speedLabel)}
                         </div>
                         <div class="text-amber-700">新视频完成前，页面中的旧视频只代表上一版本。</div>
                     </div>
@@ -678,7 +682,7 @@ class Mp3VideoWorkflowDetailPage {
             { key: 'source', label: 'Gemini / DS', icon: 'fa-wand-magic-sparkles' },
             { key: 'plan', label: '文案与时间轴', icon: 'fa-file-lines' },
             { key: 'visual', label: '视觉素材', icon: 'fa-images' },
-            { key: 'video', label: keyframeMode ? '横竖屏关键帧' : '横竖屏视频', icon: keyframeMode ? 'fa-photo-film' : 'fa-film' },
+            { key: 'video', label: keyframeMode ? '视频关键帧' : '视频合成', icon: keyframeMode ? 'fa-photo-film' : 'fa-film' },
             { key: 'done', label: '任务完成', icon: 'fa-circle-check' },
         ];
         const taskStatus = String(job?.status || '').trim().toLowerCase();
@@ -758,7 +762,7 @@ class Mp3VideoWorkflowDetailPage {
         return ['succeeded', 'completed'].includes(status)
             && mode === 'keyframes'
             && hasKeyframes
-            && !(hasLandscape && hasVertical);
+            && !(hasLandscape && hasVertical && job?.download_wsj_video_url);
     }
 
     canRegenerateVideos(job) {
@@ -768,7 +772,7 @@ class Mp3VideoWorkflowDetailPage {
         const hasVertical = Boolean(job?.download_vertical_video_url || job?.vertical_video?.video_path);
         return ['succeeded', 'completed'].includes(status)
             && mode === 'full_video'
-            && (hasLandscape || hasVertical);
+            && (hasLandscape || hasVertical || job?.download_wsj_video_url);
     }
 
     renderDsExtract(job) {
@@ -777,7 +781,7 @@ class Mp3VideoWorkflowDetailPage {
             return `
                 <section class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                     <div class="text-sm font-black text-slate-900">DS 清洗结果</div>
-                    <div class="mt-2 rounded-md border border-dashed border-slate-200 p-4 text-sm text-slate-500">暂无可清洗的 DS 1、2、时间戳、6、7。</div>
+                    <div class="mt-2 rounded-md border border-dashed border-slate-200 p-4 text-sm text-slate-500">暂无可清洗的 DS 1、2、时间戳、6、7、8、9。</div>
                 </section>
             `;
         }
@@ -791,13 +795,15 @@ class Mp3VideoWorkflowDetailPage {
             ['4', '精华片段时间戳', clipText],
             ['6', '小君君横屏标题（斜杠）', ds.title_6],
             ['7', '此刻此声竖屏标题（竖线）', ds.title_7],
+            ['8', 'WSJ 视频标题', ds.title_8],
+            ['9', 'WSJ 封面三行文案', (ds.wsj_title_lines || []).join('\n')],
         ];
         return `
             <section class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
                     <div>
                         <div class="text-sm font-black text-slate-900">DS 清洗结果</div>
-                        <div class="mt-1 text-xs text-slate-500">展示 DS 返回值中的 1、2、时间戳、6、7，去掉 Markdown 和说明性前缀。</div>
+                        <div class="mt-1 text-xs text-slate-500">展示 DS 返回值中的 1、2、时间戳、6、7、8、9，去掉 Markdown 和说明性前缀。</div>
                     </div>
                     ${ds.raw_text ? `<button type="button" data-copy-text="${this.escapeAttr(ds.raw_text)}" class="rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50">复制 DS 原文</button>` : ''}
                 </div>
@@ -879,7 +885,7 @@ class Mp3VideoWorkflowDetailPage {
                 key,
                 url,
                 label: artifact?.label || (vertical ? '竖屏视频关键帧' : '横屏视频关键帧'),
-                orientation: vertical ? '竖屏' : '横屏',
+                orientation: key.startsWith('keyframe_wsj_') ? '4:3' : (vertical ? '竖屏' : '横屏'),
             });
         };
         Object.entries(job?.keyframes || {}).forEach(([key, artifact]) => add(key, artifact, urls[key]));
@@ -926,10 +932,18 @@ class Mp3VideoWorkflowDetailPage {
             .filter(([key]) => {
                 const artifact = artifacts[key] || {};
                 const label = String(artifact.label || key);
-                return !key.startsWith('keyframe_') && !/json/i.test(label);
+                return !['wsj_cover', 'xiaojunjun_cover', 'xiaojunjun_background'].includes(key)
+                    && !key.startsWith('keyframe_')
+                    && !/json/i.test(label);
             })
             .map(([key, url]) => ({ key, url, label: artifacts[key]?.label || key }));
-        if (!images.length) return '';
+        const showWsj = Boolean(urls.wsj_cover || (job.plan?.title && this.canEditArtifactNow(job)));
+        const showXiaojunjunPair = Boolean(
+            urls.xiaojunjun_cover
+            || urls.xiaojunjun_background
+            || (job.plan?.title && this.canEditArtifactNow(job))
+        );
+        if (!images.length && !showWsj && !showXiaojunjunPair) return '';
         return `
             <section class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div class="mb-3 text-sm font-black text-slate-900">封皮 / 背景图预览</div>
@@ -946,7 +960,53 @@ class Mp3VideoWorkflowDetailPage {
                         </div>
                     `).join('')}
                 </div>
+                ${showXiaojunjunPair ? this.renderXiaojunjunArtifacts(job, urls.xiaojunjun_cover, urls.xiaojunjun_background) : ''}
+                ${showWsj ? this.renderWsjArtifacts(job, urls.wsj_cover) : ''}
             </section>
+        `;
+    }
+
+    renderXiaojunjunArtifacts(job, coverUrl, backgroundUrl) {
+        const renderCard = (label, url) => url ? `
+            <div class="overflow-hidden rounded-md border border-slate-200 bg-slate-50">
+                <a href="${this.absoluteUrl(url)}" target="_blank" rel="noopener noreferrer" class="block">
+                    <img src="${this.absoluteUrl(url)}" alt="${label}" class="aspect-video w-full object-cover">
+                </a>
+                <div class="px-2 py-2 text-xs font-bold text-slate-600">${label}</div>
+            </div>
+        ` : '';
+        const hasImages = Boolean(coverUrl || backgroundUrl);
+        return `
+            <div class="mt-4 border-t border-slate-200 pt-4">
+                <div class="mb-2 text-sm font-black text-slate-900">小君君横屏 · 封皮和背景图</div>
+                <p class="mb-2 text-xs text-slate-500">一次输入、一起重做；封皮保留日期，背景图不带日期。</p>
+                ${hasImages ? `<div class="mb-3 grid max-w-3xl grid-cols-1 gap-3 sm:grid-cols-2">
+                    ${renderCard('小君君-横屏视频封皮', coverUrl)}${renderCard('小君君 横屏视频 背景', backgroundUrl)}
+                </div>` : ''}
+                <div class="max-w-2xl">${this.renderArtifactRegenerateForm(job, {key: 'xiaojunjun_pair', hasImage: hasImages})}</div>
+            </div>
+        `;
+    }
+
+    renderWsjArtifacts(job, url) {
+        const renderCard = (label) => `
+            <div class="overflow-hidden rounded-md border border-slate-200 bg-slate-50">
+                <a href="${this.absoluteUrl(url)}" target="_blank" rel="noopener noreferrer" class="block">
+                    <img src="${this.absoluteUrl(url)}" alt="${label}" class="aspect-[4/3] w-full object-contain">
+                </a>
+                <div class="px-2 py-2 text-xs font-bold text-slate-600">${label}</div>
+            </div>
+        `;
+        return `
+            <div class="mt-4 border-t border-slate-200 pt-4">
+                <div class="mb-2 text-sm font-black text-slate-900">WSJ 4:3 · 封皮与背景图</div>
+                <p class="mb-2 text-xs text-slate-500">${url ? '封皮和背景图共用一张图。' : '尚未生成。可沿用本期标题，或输入新文案。'}</p>
+                ${url ? `<div class="mb-2 grid max-w-2xl grid-cols-1 gap-3 sm:grid-cols-2">
+                    ${renderCard('WSJ 封皮')}${renderCard('WSJ 背景图')}
+                </div>` : ''}
+                <div class="max-w-2xl">${this.renderArtifactRegenerateForm(job, {key: 'wsj_cover', hasImage: Boolean(url)})}</div>
+                ${job.wsj_video_outdated ? '<p class="mt-2 text-xs font-bold text-amber-700">封皮已更新。重新生成完整视频后，WSJ 视频将使用新版图片。</p>' : ''}
+            </div>
         `;
     }
 
@@ -957,7 +1017,7 @@ class Mp3VideoWorkflowDetailPage {
         return `
             <details class="rounded-md border border-indigo-100 bg-white">
                 <summary class="cursor-pointer select-none px-2.5 py-2 text-[11px] font-black text-indigo-700 hover:bg-indigo-50">
-                    <i class="fas fa-wand-magic-sparkles mr-1"></i>重做封皮
+                    <i class="fas fa-wand-magic-sparkles mr-1"></i>${item.key === 'wsj_cover' && !item.hasImage ? '生成 WSJ 封皮与背景图' : (item.key === 'xiaojunjun_pair' ? '重新生成封皮和背景图' : '重做封皮')}
                 </summary>
                 <form data-artifact-regenerate-form data-artifact-key="${this.escapeAttr(item.key)}" class="space-y-2 border-t border-indigo-50 p-2.5">
                     <label class="block text-[11px] font-bold text-slate-500">
@@ -965,9 +1025,9 @@ class Mp3VideoWorkflowDetailPage {
                         <textarea name="title_text" rows="3" maxlength="240" class="mt-1 w-full resize-y rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs font-bold leading-5 text-slate-900 focus:border-indigo-500 focus:outline-none" placeholder="${this.escapeAttr(this.artifactTitlePlaceholder(item.key))}">${this.escape(defaultText)}</textarea>
                     </label>
                     <div class="text-[10px] leading-4 text-slate-400">${this.escape(this.artifactRegenerateHint(item.key))}</div>
-                    ${canSubmit ? '' : '<div class="rounded-md border border-amber-100 bg-amber-50 px-2 py-1.5 text-[10px] font-bold text-amber-700">当前任务运行中，结束后再替换封皮。</div>'}
+                    ${canSubmit ? '' : `<div class="rounded-md border border-amber-100 bg-amber-50 px-2 py-1.5 text-[10px] font-bold text-amber-700">当前任务运行中，结束后再${item.key === 'xiaojunjun_pair' ? '替换两张图' : '替换封皮'}。</div>`}
                     <button type="submit" ${canSubmit ? '' : 'disabled'} class="w-full rounded-md bg-indigo-600 px-2.5 py-1.5 text-[11px] font-black text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300">
-                        <i class="fas fa-rotate mr-1"></i>生成并替换
+                        <i class="fas fa-rotate mr-1"></i>${item.key === 'xiaojunjun_pair' ? '生成并替换两张图' : '生成并替换'}
                     </button>
                 </form>
             </details>
@@ -975,7 +1035,7 @@ class Mp3VideoWorkflowDetailPage {
     }
 
     canRegenerateArtifact(key) {
-        return ['finance_cover', 'audio_background', 'xiaojunjun_cover', 'xiaojunjun_background'].includes(String(key || ''));
+        return ['finance_cover', 'audio_background', 'xiaojunjun_cover', 'xiaojunjun_background', 'xiaojunjun_pair', 'wsj_cover'].includes(String(key || ''));
     }
 
     canEditArtifactNow(job) {
@@ -984,13 +1044,26 @@ class Mp3VideoWorkflowDetailPage {
 
     defaultArtifactTitleText(job, key) {
         const plan = job?.plan || {};
+        const artifact = key === 'xiaojunjun_pair'
+            ? (job?.artifacts?.xiaojunjun_cover || job?.artifacts?.xiaojunjun_background || {})
+            : (job?.artifacts?.[key] || {});
+        if (key === 'wsj_cover' && Array.isArray(artifact.title_lines)) return artifact.title_lines.join('\n');
+        const currentArtifactText = artifact.manual_title_text
+            || (Array.isArray(artifact.manual_title_lines) ? artifact.manual_title_lines.join('\n') : '');
+        if (String(currentArtifactText || '').trim()) return currentArtifactText;
+        if (key === 'wsj_cover') {
+            const planTitleLines = Array.isArray(plan.wsj_title_lines) ? plan.wsj_title_lines : [];
+            const dsTitleLines = this.normalizedDsExtract(job).wsj_title_lines || [];
+            const titleLines = planTitleLines.length ? planTitleLines : dsTitleLines;
+            return titleLines.join('\n') || plan.title || '';
+        }
         if (key === 'finance_cover') {
             return plan.finance_cover_subtitle || plan.title || '';
         }
         if (key === 'audio_background') {
             return [plan.cover_title, plan.cover_subtitle].filter(Boolean).join('\n') || plan.title || '';
         }
-        if (key === 'xiaojunjun_cover' || key === 'xiaojunjun_background') {
+        if (key === 'xiaojunjun_cover' || key === 'xiaojunjun_background' || key === 'xiaojunjun_pair') {
             return plan.xiaojunjun_subtitle || plan.xiaojunjun_video_title || plan.title || '';
         }
         return '';
@@ -1002,8 +1075,10 @@ class Mp3VideoWorkflowDetailPage {
     }
 
     artifactRegenerateHint(key) {
+        if (key === 'wsj_cover') return '每行对应左侧一条文案，最多 3 行；不足时自动拆分。右侧图表固定，封皮和背景同步更新。';
         if (key === 'finance_cover') return '替换黄色大标题；栏目标题和日期沿用当前任务。';
         if (key === 'audio_background') return '前两行作为竖屏主标题，第三行作为副标题。';
+        if (key === 'xiaojunjun_pair') return '同一份文案同步用于两张图；封皮保留日期，背景图不带日期。';
         if (key === 'xiaojunjun_cover') return '替换小君君横屏封皮的黄色高亮条，日期保留。';
         if (key === 'xiaojunjun_background') return '替换小君君横屏背景的黄色高亮条，不带日期。';
         return '只重做当前这张图。';
@@ -1013,12 +1088,13 @@ class Mp3VideoWorkflowDetailPage {
         const links = [
             ['小君君横屏视频', job.download_landscape_video_url],
             ['此刻此声竖屏视频', job.download_vertical_video_url],
+            ['WSJ 4:3 视频', job.download_wsj_video_url],
         ].filter(([, url]) => url);
         if (!links.length) return '';
         return `
             <section class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
                 <div class="mb-3 text-sm font-black text-slate-900">视频文件</div>
-                <div class="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                <div class="grid grid-cols-1 gap-3 lg:grid-cols-3">
                     ${links.map(([label, url]) => `
                         <div class="rounded-md border border-slate-200 bg-slate-50 p-3">
                             <div class="mb-2 text-xs font-black text-slate-500">${this.escape(label)}</div>
@@ -1221,7 +1297,7 @@ class Mp3VideoWorkflowDetailPage {
                                     </div>
                                 </div>
                                 <div class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-slate-500">
-                                    <span>${this.escape(item.video_key === 'vertical' ? '此刻此声竖屏' : '小君君横屏')}</span>
+                                    <span>${this.escape(item.video_key === 'vertical' ? '此刻此声竖屏' : (item.video_key === 'wsj' ? 'WSJ 4:3' : '小君君横屏'))}</span>
                                     ${item.credential_name ? `<span>账号 ${this.escape(item.credential_name)}</span>` : ''}
                                     ${item.delay_time ? `<span>定时 ${this.escape(this.formatBiliDelayTime(item.delay_time))}</span>` : ''}
                                     ${item.season_id ? `<span>合集 ${this.escape(item.season_id)}</span>` : ''}
@@ -1289,13 +1365,14 @@ class Mp3VideoWorkflowDetailPage {
         });
         add('landscape_video', '小君君横屏视频', job.download_landscape_video_url, 'video');
         add('vertical_video', '此刻此声竖屏视频', job.download_vertical_video_url, 'video');
+        add('wsj_video', 'WSJ 4:3 视频', job.download_wsj_video_url, 'video');
         add('result_json', '编排结果 JSON', job.download_result_url, 'json');
         return items;
     }
 
-    biliVideoOptions(job) {
+    biliVideoOptions(job, { includeWsj = true } = {}) {
         const ds = this.normalizedDsExtract(job);
-        return [
+        const options = [
             {
                 key: 'landscape',
                 label: '小君君横屏视频',
@@ -1308,7 +1385,14 @@ class Mp3VideoWorkflowDetailPage {
                 url: job.download_vertical_video_url,
                 defaultTitle: this.firstCleanBiliTitle(ds.title_7, job.plan?.ciketc_video_title, job.plan?.title),
             },
-        ].filter((item) => item.url);
+        ];
+        if (includeWsj) options.push({
+                key: 'wsj',
+                label: 'WSJ 4:3 视频',
+                url: job.download_wsj_video_url,
+                defaultTitle: this.firstCleanBiliTitle(ds.title_8, job.plan?.wsj_video_title, job.plan?.title),
+            });
+        return options.filter((item) => item.url);
     }
 
     biliCoverOptions(job, videoKey = '') {
@@ -1316,7 +1400,9 @@ class Mp3VideoWorkflowDetailPage {
         const urls = job.artifact_download_urls || {};
         const preferred = videoKey === 'vertical'
             ? ['finance_cover', 'podcast_cover', 'vertical_cover', 'audio_background', 'xiaojunjun_cover', 'xiaojunjun_background']
-            : ['xiaojunjun_cover', 'finance_cover', 'xiaojunjun_background', 'audio_background', 'podcast_cover', 'vertical_cover'];
+            : (videoKey === 'wsj'
+                ? ['wsj_cover', 'xiaojunjun_cover', 'finance_cover', 'audio_background']
+                : ['xiaojunjun_cover', 'finance_cover', 'xiaojunjun_background', 'audio_background', 'podcast_cover', 'vertical_cover']);
         const entries = Object.entries(urls)
             .filter(([key]) => !key.startsWith('keyframe_'))
             .map(([key, url]) => ({
@@ -1342,6 +1428,9 @@ class Mp3VideoWorkflowDetailPage {
             .toLowerCase();
         if (label.includes('小君君')) {
             return { videoKey: 'landscape', coverKey: 'xiaojunjun_cover' };
+        }
+        if (label.includes('ai研报') || label.includes('ai研究报告') || label.includes('豆包研报') || label.includes('豆包研究报告')) {
+            return { videoKey: 'wsj', coverKey: 'wsj_cover' };
         }
         if (label.includes('此刻此声')) {
             return { videoKey: 'vertical', coverKey: 'finance_cover' };
@@ -1448,7 +1537,7 @@ class Mp3VideoWorkflowDetailPage {
         const checkbox = document.getElementById('bili-schedule-enabled');
         const input = document.getElementById('bili-schedule-time');
         if (!checkbox || !input) return;
-        const minDate = new Date(Date.now() + 6 * 60 * 1000);
+        const minDate = new Date(Date.now() + 16 * 60 * 1000);
         const maxDate = new Date(Date.now() + 15 * 24 * 60 * 60 * 1000);
         minDate.setSeconds(0, 0);
         maxDate.setSeconds(0, 0);
@@ -1469,10 +1558,10 @@ class Mp3VideoWorkflowDetailPage {
         const value = formData.get('schedule_time');
         if (!value) throw new Error('请选择 B站定时发布时间');
         const timestamp = Math.floor(new Date(value).getTime() / 1000);
-        const minTimestamp = Math.floor((Date.now() + 5 * 60 * 1000) / 1000);
+        const minTimestamp = Math.floor((Date.now() + 15 * 60 * 1000) / 1000);
         const maxTimestamp = Math.floor((Date.now() + 15 * 24 * 60 * 60 * 1000) / 1000);
         if (!Number.isFinite(timestamp) || timestamp < minTimestamp || timestamp > maxTimestamp) {
-            throw new Error('B站定时发布时间需在 5 分钟后、15 天内');
+            throw new Error('B站定时发布时间需在 15 分钟后、15 天内');
         }
         return timestamp;
     }
@@ -1607,7 +1696,7 @@ class Mp3VideoWorkflowDetailPage {
             return;
         }
         const rangeLabel = `${this.formatDuration(payload.start_seconds)} - ${payload.end_seconds === null ? '自动' : this.formatDuration(payload.end_seconds)}`;
-        if (!window.confirm(`确认关键帧效果可以，继续生成完整横屏和竖屏视频？\n本次音频截取：${rangeLabel}\n已有 DS、封皮、背景和关键帧会复用。`)) return;
+        if (!window.confirm(`确认关键帧效果可以，继续生成三组完整视频？\n本次音频截取：${rangeLabel}\n已有 DS、封皮、背景和关键帧会复用。`)) return;
         const originalHtml = button?.innerHTML || '';
         try {
             if (button) {
@@ -1697,7 +1786,7 @@ class Mp3VideoWorkflowDetailPage {
             this.els.regenerateEnd.value = Number.isFinite(end) ? this.formatDuration(end) : '';
         }
         if (this.els.regenerateSpeed) {
-            this.els.regenerateSpeed.value = String(planAudio.speed || 1.2);
+            this.els.regenerateSpeed.value = '';
         }
         if (this.els.regenerateError) {
             this.els.regenerateError.textContent = '';
@@ -1720,13 +1809,13 @@ class Mp3VideoWorkflowDetailPage {
             if (end <= start) throw new Error('终点时间必须大于起点时间');
             const speedText = String(this.els.regenerateSpeed?.value ?? '').trim();
             const speed = Number(speedText);
-            if (!speedText || !Number.isFinite(speed) || speed < 0.5 || speed > 2) {
+            if (speedText && (!Number.isFinite(speed) || speed < 0.5 || speed > 2)) {
                 throw new Error('播放倍速必须在 0.5×–2.0× 之间');
             }
             payload = {
                 start_seconds: Math.round(start * 1000) / 1000,
                 end_seconds: Math.round(end * 1000) / 1000,
-                speed: Math.round(speed * 1000) / 1000,
+                ...(speedText ? { speed: Math.round(speed * 1000) / 1000 } : {}),
             };
         } catch (error) {
             if (this.els.regenerateError) {
@@ -1796,22 +1885,43 @@ class Mp3VideoWorkflowDetailPage {
         }
         const button = form.querySelector('button[type="submit"]');
         const originalHtml = button?.innerHTML || '';
+        const artifactKeys = key === 'xiaojunjun_pair'
+            ? ['xiaojunjun_cover', 'xiaojunjun_background']
+            : [key];
+        let regeneratedCount = 0;
         try {
             if (button) {
                 button.disabled = true;
-                button.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>生成中...';
+                button.innerHTML = key === 'xiaojunjun_pair'
+                    ? '<i class="fas fa-spinner fa-spin mr-1"></i>正在生成第 1/2 张...'
+                    : '<i class="fas fa-spinner fa-spin mr-1"></i>生成中...';
             }
-            const result = await this.request(`/api/mp3-video-workflows/jobs/${encodeURIComponent(this.jobId)}/artifacts/${encodeURIComponent(key)}/regenerate`, {
-                method: 'POST',
-                timeoutMs: 60000,
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ title_text: lines.join('\n') }),
-            });
-            this.job = result.data || result;
+            for (const [index, artifactKey] of artifactKeys.entries()) {
+                if (button && key === 'xiaojunjun_pair') {
+                    button.innerHTML = `<i class="fas fa-spinner fa-spin mr-1"></i>正在生成第 ${index + 1}/2 张...`;
+                }
+                const result = await this.request(`/api/mp3-video-workflows/jobs/${encodeURIComponent(this.jobId)}/artifacts/${encodeURIComponent(artifactKey)}/regenerate`, {
+                    method: 'POST',
+                    timeoutMs: 60000,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title_text: lines.join('\n') }),
+                });
+                this.job = result.data || result;
+                regeneratedCount += 1;
+            }
             this.render();
-            this.setNotice(result.message || '封皮已重做并替换。后续重新生成视频会使用新版图片。', 'success');
+            this.setNotice(
+                key === 'xiaojunjun_pair'
+                    ? '小君君横屏封皮和背景图已一起重做并替换。'
+                    : '封皮已重做并替换。后续重新生成视频会使用新版图片。',
+                'success',
+            );
         } catch (error) {
-            this.setNotice(`重做封皮失败：${error.message}`, 'error');
+            if (regeneratedCount) this.render();
+            const message = key === 'xiaojunjun_pair' && regeneratedCount
+                ? `第一张图已更新，第二张图失败：${error.message}。再点一次可补齐。`
+                : `${key === 'xiaojunjun_pair' ? '成组重做封皮和背景图' : '重做封皮'}失败：${error.message}`;
+            this.setNotice(message, 'error');
         } finally {
             if (button) {
                 button.disabled = false;
@@ -1849,20 +1959,31 @@ class Mp3VideoWorkflowDetailPage {
     }
 
     normalizedDsExtract(job) {
-        if (job.ds_extract?.has_content) return job.ds_extract;
+        const existing = job.ds_extract?.has_content ? job.ds_extract : {};
         const rawText = this.sourceResponseText(job);
         const sections = this.numberedSections(rawText);
-        const clip = this.extractClip(sections['4'] || rawText);
+        const parsedTitleLines = (sections['9'] || '').split(/\r?\n/)
+            .map(line => this.cleanDsText(line))
+            .filter(line => line && !line.startsWith('```') && !/^WSJ\s*封面/i.test(line))
+            .slice(0, 3);
+        const existingTitleLines = Array.isArray(existing.wsj_title_lines) ? existing.wsj_title_lines : [];
+        const planTitleLines = Array.isArray(job.plan?.wsj_title_lines) ? job.plan.wsj_title_lines : [];
+        const clip = existing.clip?.start_text
+            ? existing.clip
+            : this.extractClip(sections['4'] || rawText);
         const payload = {
-            title_1: this.cleanDsTitle(sections['1'] || ''),
-            title_2: this.cleanDsTitle(sections['2'] || ''),
+            ...existing,
+            title_1: existing.title_1 || this.cleanDsTitle(sections['1'] || ''),
+            title_2: existing.title_2 || this.cleanDsTitle(sections['2'] || ''),
             clip,
-            title_6: this.cleanDsTitle(sections['6'] || '', { preferClosedDoor: true }),
-            title_7: this.cleanDsTitle(sections['7'] || '', { preferClosedDoor: true }),
-            raw_text: rawText,
-            raw_sections: sections,
+            title_6: existing.title_6 || this.cleanDsTitle(sections['6'] || '', { preferClosedDoor: true }),
+            title_7: existing.title_7 || this.cleanDsTitle(sections['7'] || '', { preferClosedDoor: true }),
+            title_8: existing.title_8 || job.plan?.wsj_video_title || this.cleanDsTitle(sections['8'] || '', { preferClosedDoor: true }),
+            wsj_title_lines: existingTitleLines.length ? existingTitleLines : (planTitleLines.length ? planTitleLines : parsedTitleLines),
+            raw_text: existing.raw_text || rawText,
+            raw_sections: Object.keys(existing.raw_sections || {}).length ? existing.raw_sections : sections,
         };
-        payload.has_content = Boolean(payload.title_1 || payload.title_2 || payload.title_6 || payload.title_7 || clip.start_text || clip.end_text);
+        payload.has_content = Boolean(payload.title_1 || payload.title_2 || payload.title_6 || payload.title_7 || payload.title_8 || payload.wsj_title_lines.length || clip.start_text || clip.end_text);
         return payload;
     }
 
@@ -1885,15 +2006,28 @@ class Mp3VideoWorkflowDetailPage {
     numberedSections(text) {
         const source = String(text || '');
         if (!source.trim()) return {};
-        const markerRe = /(?:(?<=\n)|^)\s*(?:[-*]\s*)?(?:\*\*)?\s*([1-7])\s*[.．、:：]\s*|(?:\*\*)\s*([1-7])\s*[.．、:：]\s*/g;
-        const matches = Array.from(source.matchAll(markerRe));
+        const markerRe = /(?:(?<=\n)|^)\s*(?:[-*]\s*)?(?:\*\*)?\s*([1-9])\s*[.．、:：]\s*|(?:\*\*)\s*([1-9])\s*[.．、:：]\s*/g;
+        const markers = Array.from(source.matchAll(markerRe)).map((match) => ({
+            number: match[1] || match[2],
+            index: match.index,
+            length: match[0].length,
+        }));
+        const descriptiveMarkerRe = /^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?[ \t]*(WSJ[ \t]*视频标题[^\n]*|WSJ[ \t]*封面[^\n]*(?:三行|3行)[^\n]*)[ \t]*(?:\*\*)?[ \t]*$/gim;
+        Array.from(source.matchAll(descriptiveMarkerRe)).forEach((match) => {
+            const heading = match[1] || '';
+            markers.push({
+                number: /封面/.test(heading) ? '9' : '8',
+                index: match.index,
+                length: match[0].length,
+            });
+        });
+        markers.sort((a, b) => a.index - b.index);
         const sections = {};
-        matches.forEach((match, index) => {
-            const number = match[1] || match[2];
-            const start = match.index + match[0].length;
-            const end = index + 1 < matches.length ? matches[index + 1].index : source.length;
+        markers.forEach((marker, index) => {
+            const start = marker.index + marker.length;
+            const end = index + 1 < markers.length ? markers[index + 1].index : source.length;
             const content = source.slice(start, end).trim();
-            if (number && content) sections[number] = content;
+            if (marker.number && content) sections[marker.number] = content;
         });
         return sections;
     }

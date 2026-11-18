@@ -152,9 +152,14 @@ class YouTubeSyncService:
             # 第二阶段在数据库事务外请求 YouTube。
             stats = self.youtube_api.get_channel_statistics(youtube_channel_id)
             if not stats:
+                consume_error = getattr(self.youtube_api, 'consume_last_error', None)
+                upstream_error = consume_error() if callable(consume_error) else None
+                message = '无法获取频道统计数据'
+                if upstream_error and isinstance(upstream_error, str):
+                    message = f'{message}: {upstream_error}'
                 return {
                     'success': False,
-                    'message': '无法获取频道统计数据'
+                    'message': message
                 }
 
             # 第三阶段重新加载数据并在短事务内写入结果。

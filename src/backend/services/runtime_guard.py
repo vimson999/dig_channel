@@ -1,8 +1,11 @@
+import hashlib
 import json
 import logging
 import os
+import socket
 import time
 from datetime import datetime
+from pathlib import Path
 
 from celery.exceptions import Retry
 from flask import g, has_app_context, has_request_context
@@ -123,6 +126,20 @@ class TaskAdmissionDenied(RuntimeError):
 
 class DatabaseSessionBoundaryError(RuntimeError):
     """Raised when external I/O would cross an uncommitted DB unit of work."""
+
+
+def deployment_actor_identity(*, deployment_root, code_path):
+    """Return durable process identity for terminal mutations and audits."""
+    module_path = Path(code_path)
+    module_identity = "sha256:" + hashlib.sha256(module_path.read_bytes()).hexdigest()[:12]
+    return {
+        "deployment_root": str(deployment_root),
+        "hostname": socket.gethostname(),
+        "pid": os.getpid(),
+        "code_identity": str(
+            os.environ.get("DIG_YTB_CODE_IDENTITY") or module_identity
+        ),
+    }
 
 
 def task_guard_enabled():

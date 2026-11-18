@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 
@@ -14,6 +15,11 @@ logger = logging.getLogger("bilibili")
 
 DEFAULT_NEUTRAL_MARK = "个人观点，仅供参考"
 DEFAULT_CHARGING_PREVIEW_END = 5
+BILIBILI_MIN_SCHEDULE_LEAD_SECONDS = 5 * 60
+BILIBILI_UPLOAD_BUDGET_SECONDS = 10 * 60
+BILIBILI_SCHEDULE_ADMISSION_SECONDS = (
+    BILIBILI_MIN_SCHEDULE_LEAD_SECONDS + BILIBILI_UPLOAD_BUDGET_SECONDS
+)
 CREATION_STATEMENT_IDS = {
     "内容无需标注": -1,
     "含AI生成内容": 1,
@@ -30,6 +36,34 @@ class BilibiliUploadTimeoutError(RuntimeError):
 
 class BilibiliChunkRetryError(RuntimeError):
     """One SDK media chunk exhausted its bounded retry budget."""
+
+
+class BilibiliStaleChargingTierError(RuntimeError):
+    """The selected charging tier is no longer offered by the account."""
+
+
+class BilibiliScheduledUploadMarginError(RuntimeError):
+    """A scheduled publish no longer has enough time to upload safely."""
+
+
+def _require_scheduled_upload_margin(
+    delay_time: Optional[int],
+    *,
+    minimum_lead_seconds: int,
+) -> None:
+    if delay_time in (None, "", 0, "0", False):
+        return
+    remaining_seconds = int(delay_time) - int(time.time())
+    if remaining_seconds >= int(minimum_lead_seconds):
+        return
+    if int(minimum_lead_seconds) > BILIBILI_MIN_SCHEDULE_LEAD_SECONDS:
+        raise BilibiliScheduledUploadMarginError(
+            "B站定时发布时间至少保留 15 分钟（5 分钟平台要求 + 10 分钟上传预算），"
+            "请重新选择发布时间"
+        )
+    raise BilibiliScheduledUploadMarginError(
+        "B站定时发布时间已不足 5 分钟，请重新选择发布时间"
+    )
 
 
 def _positive_int_env(name: str, default: int, minimum: int = 1) -> int:
@@ -85,6 +119,17 @@ class BoundedVideoUploader(VideoUploader):
             )
         return result
 
+    async def _submit(self, videos: list, cover_url: str = "") -> dict:
+        if isinstance(self.meta, dict):
+            delay_time = self.meta.get("dtime")
+        else:
+            delay_time = getattr(self.meta, "delay_time", None)
+        _require_scheduled_upload_margin(
+            delay_time,
+            minimum_lead_seconds=BILIBILI_MIN_SCHEDULE_LEAD_SECONDS,
+        )
+        return await super()._submit(videos, cover_url)
+
 class BiliUploader:
     """Bilibili video uploader service."""
 
@@ -128,7 +173,14 @@ class BiliUploader:
 
     @classmethod
     def _is_non_retryable_upload_error(cls, error: Exception) -> bool:
-        if isinstance(error, (BilibiliUploadTimeoutError, BilibiliChunkRetryError)):
+        if isinstance(
+            error,
+            (
+                BilibiliUploadTimeoutError,
+                BilibiliChunkRetryError,
+                BilibiliScheduledUploadMarginError,
+            ),
+        ):
             return True
         if cls._is_auth_upload_error(error):
             return True
@@ -293,6 +345,27 @@ class BiliUploader:
                 or output[0]["id"]
             ),
         }
+
+    def validate_charging_pay_selection(self, charging_pay: Optional[Dict[str, Any]]) -> None:
+        """Reject a retired durable selection before any media bytes are uploaded."""
+        if not charging_pay or not self._truthy(
+            charging_pay.get("enabled", charging_pay.get("charging_pay"))
+        ):
+            return
+        selected_level_id = str(charging_pay.get("upower_level_id") or "").strip()
+        if not selected_level_id:
+            return
+
+        options = self.charging_pay_options()
+        active_level_ids = {
+            str(level.get("id") or "").strip()
+            for level in (options.get("levels") or [])
+            if isinstance(level, dict) and level.get("id")
+        }
+        if selected_level_id not in active_level_ids:
+            raise BilibiliStaleChargingTierError(
+                "选择的 B站充电档位已失效，请重新选择后再投稿"
+            )
 
     def creator_seasons(self) -> List[Dict[str, Any]]:
         """Return seasons selectable in Bilibili's creator upload form.
@@ -524,6 +597,15 @@ class BiliUploader:
         except (TypeError, ValueError):
             raise ValueError("Bilibili delay_time must be a Unix timestamp in seconds")
 
+    @classmethod
+    def validate_scheduled_upload_margin(cls, value: Any) -> Optional[int]:
+        delay_time = cls._normalize_delay_time(value)
+        _require_scheduled_upload_margin(
+            delay_time,
+            minimum_lead_seconds=BILIBILI_SCHEDULE_ADMISSION_SECONDS,
+        )
+        return delay_time
+
     @staticmethod
     def _normalize_season_id(value: Any) -> Optional[int]:
         if value in (None, "", 0, "0", False):
@@ -594,7 +676,7 @@ class BiliUploader:
             neutral_mark,
         )
         charging_pay_fields = self._charging_pay_fields(charging_pay)
-        delay_time = self._normalize_delay_time(delay_time)
+        delay_time = self.validate_scheduled_upload_margin(delay_time)
         season_id = self._normalize_season_id(season_id)
         season_section_id = self._resolve_season_section_id(season_id) if season_id else None
         is_only_self = 1 if int(is_only_self or 0) else 0
@@ -687,6 +769,10 @@ class BiliUploader:
         result = None
         for attempt in range(max_retries):
             try:
+                # A retry can consume most of the upload budget. Re-admit every
+                # media attempt so we never start another external upload that
+                # cannot still leave Bilibili's five-minute submit margin.
+                self.validate_scheduled_upload_margin(delay_time)
                 try:
                     result = await asyncio.wait_for(
                         uploader.start(),

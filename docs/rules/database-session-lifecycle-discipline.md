@@ -177,6 +177,10 @@ def release_db_session_quietly():
   unclassified，不得只检查 Publisher 或当前活跃进程。任何 feature 出现 old-root 都必须列出 task id、时间、
   状态和持续时间，并与本地 worker 日志对账；Publisher 为 0、远端当前离线或当前会话归零都不能覆盖窗口内
   其他工作流的旧根写入，也不能单独作为物理隔离已完成的证据。
+- durable JSON 同时出现 current-root 与 old-root 字符串时必须单列 `mixed_root_reference`，不得同时累计为
+  两个 actor，也不得按任一字符串优先归因。历史 dedupe/source 审计引用不等于执行 actor；mixed 行必须保留
+  原始 JSON，并用结构化 producer/consumer identity、实际输入输出、worker 日志和时间线复核。四类计数必须
+  互斥并满足 `total = old + current + mixed + unclassified`。
 - processing 的非幂等外部副作用任务同样必须核对 worker active/reserved/scheduled、目标 broker 队列与
   Redis unacked；任一来源可见时禁止撤销、降级或重投。orphan grace 不得短于执行器硬超时与结算余量，任务
   类型和目标队列必须来自结构化投影，禁止热扫描为判型回读 `params/result` 大 JSON。
@@ -266,9 +270,40 @@ ORDER BY xact_start NULLS LAST;
   或当前 `pg_stat_activity` 不足以证明执行 actor；跨主机共享凭据但无法归因时必须升级为分布式隔离问题。
 - pending/processing 两类 Publisher 素材不可达终态必须把同一 actor identity 同时写入 durable result 和错误日志，
   且回归测试必须固定 root/hostname/PID/code identity；只写瞬时日志或只写数据库一侧都不构成防复发契约。
+- upload-only 在领取后判定本地视频不存在并写失败终态时，同样必须原子持久化 deployment/hostname/PID/
+  code identity、原视频路径和关闭时间，并在错误日志写同一 actor；不得因为它不经过 queue-repair 就豁免。
+  日快照必须关联结构化上传投影，并仅在文件 mtime 不晚于终态时把“actor 缺失但文件存在”计入
+  `foreign_actor_evidence`，避免把失败后才生成的文件误作旧 actor 证据。
+- 当前 checkout 的绝对路径字符串不是 writer actor 证明。每日快照必须同时检查素材不可达终态的 actor 字段与
+  当前节点文件真实存在性；若 actor 缺失且终态声称不可达的全部文件在当前节点存在，应记为
+  `foreign_actor_evidence` 并升级分布式隔离事故，禁止用 `old_root=0` 判绿。只有可归因 actor、自然业务与完整
+  后窗同时通过，才能接受运行态闭环。
+- 分布式隔离验收必须把固定窗内 `pg_stat_activity` 的 `application_name/client_addr` 守卫记录、稳定主机身份、
+  durable 终态 actor 与本地执行日志按时间关联；巡检时刻远端会话为 0 或主机当前离线，不能抵消窗口内旧
+  watchdog/scheduler/backend 的真实连接。只要同窗存在远端 actor 或 `foreign_actor_evidence`，状态必须保持
+  OPEN/REPEATED，直到物理停机或凭据/namespace 隔离后的完整 24 小时与自然任务共同通过。
 - 所有依赖本地文件系统的 durable workflow，不论成功或失败，都必须在创建、领取和终态记录稳定的 producer/
   consumer deployment identity；仅凭绝对路径、共享 outbox 的通知消费者或当前节点日志不能证明真正执行 actor。
   成功的 old-root 任务同样算复发，不能因业务状态为 completed 而跳过隔离与归因验收。
+- 每一种自动修复终态都必须从其自己的结构化结果子树读取 actor identity；禁止用 queue repair actor 代替
+  processing orphan actor。日快照只能把当前仍处于对应 repair 终态的行计入缺 actor 数，历史已恢复或完成的任务
+  不得误计；空对象与字段缺失都按缺 actor 处理，并以合同测试固定各 repair 子树相互独立。
+- 任务参数引用外部平台可变资源（收费档位、分类、合集、凭据下的远端对象）时，执行前必须先结束数据库事务，
+  从外部权威接口重新验证 ID。已删除或停用的 ID 必须保持原参数和原始上游错误并进入可重选终态；不得持有
+  Session 跨远端复核，不得用无界重试、静默替换其他收费选项或伪造默认值改变用户语义。
+- 外部平台定时任务的准入窗口必须覆盖“平台硬门槛 + 经生产 P95/上界证明的排队与执行预算”；worker 在释放
+  Session 后、产生外部副作用前必须重新校验，最终提交前还要复核平台硬门槛。窗口不足时保留用户原始时点并
+  进入明确可重选终态，禁止静默改时、重复上传媒体或持有 Session 等待窗口。
+- 当应用 `execute/fetch` 明显慢于 `EXPLAIN (ANALYZE, BUFFERS)` executor 时，可在相同只读 SQL、相同参数、
+  相同返回行数/字节数和显式超时下做 PgBouncer/直连 A/B；两条路径同慢只能排除 pooler 为主断点，不能直接
+  宣称数据库或网络健康。必须记录 connect、execute/fetch、Python materialize、executor、route/source/MTU，
+  再由同机房或非隧道路由 A/B 与后续自然窗验收公共驱动/隧道接收链路。
+- 历史/状态页面轮询宽任务 JSON 时，必须同时满足“存在活动任务、页面可见、上一请求已结束”；全部终态应立即
+  停止轮询。禁止固定定时器在空闲页持续读取 `params/result`，完整统计也不得绑定高频状态 tick。
+- 历史媒体元素默认 `preload="none"`；后端只有在本地文件真实存在时才可投影下载/播放 URL。任务原始 JSON、
+  成功计数和审计路径必须原样保留，但不能用失效 URL 诱发浏览器 404 风暴。
+- 查询完成后若还要访问文件系统、网络或媒体元数据，必须先复制必要标量并 `db.session.remove()`；不得持有
+  request-scoped Session 跨文件存在性检查或大批量序列化。
 
 ## 关联文档
 

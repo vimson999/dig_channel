@@ -58,6 +58,24 @@ assert.match(hooks.els.submissionHistory.innerHTML, /PDF/, 'grouped submissions 
 assert.match(hooks.els.submissionHistory.innerHTML, /MP3/, 'grouped submissions must show the MP3 task');
 assert.match(hooks.els.submissionHistory.innerHTML, /文件夹投递/, 'history must identify the submission input mode');
 assert.match(hooks.els.submissionHistory.innerHTML, /45%/, 'history must show submission progress');
-assert.match(hooks.els.submissionHistory.innerHTML, /成功 1 · 失败 1/, 'history must expose per-media partial file counts');
+assert.match(hooks.els.submissionHistory.innerHTML, /清洗成功 1 · 清洗失败 1/, 'history must label cleaning file counts');
+
+hooks.state.history.items = [{
+    submission_id: 'submission-failed-publish',
+    submitted_at: '2026-11-13T06:43:00Z',
+    input_mode: 'folder',
+    media_types: ['mp3'],
+    status: 'failed',
+    progress: 100,
+    tasks: [{
+        kind: 'mp3', status: 'failed', clean_status: 'completed', publish_status: 'failed',
+        progress: 100, files_count: 28, success_count: 28, failed_count: 0,
+        error: '两个账号上传均返回 HTTP 401 <auth>',
+    }],
+}];
+hooks.renderSubmissionHistory();
+assert.match(hooks.els.submissionHistory.innerHTML, /清洗已完成 · 知识星球发布失败/);
+assert.match(hooks.els.submissionHistory.innerHTML, /清洗成功 28 · 清洗失败 0/);
+assert.match(hooks.els.submissionHistory.innerHTML, /HTTP 401 &lt;auth&gt;/);
 
 console.log('content pipeline submission history contract: ok');

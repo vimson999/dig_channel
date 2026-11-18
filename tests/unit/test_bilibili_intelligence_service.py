@@ -10,6 +10,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from services.bilibili_intelligence_service import (  # noqa: E402
+    _configure_bilibili_api_proxy,
     deepseek_match_batch,
     _deepseek_model,
     _normalize_ai_match,
@@ -22,6 +23,29 @@ from apis.v1.bilibili_intelligence import VIDEO_LIST_COLUMNS  # noqa: E402
 
 
 class BilibiliIntelligenceMatchingTest(unittest.TestCase):
+    def test_bilibili_client_uses_explicit_proxy_before_tun_dns(self):
+        with patch.dict(os.environ, {
+            "BILIBILI_INTELLIGENCE_PROXY": "http://127.0.0.1:17890",
+            "https_proxy": "http://127.0.0.1:7890",
+        }, clear=True), patch(
+            "services.bilibili_intelligence_service.request_settings.set_proxy",
+        ) as set_proxy:
+            selected = _configure_bilibili_api_proxy()
+
+        self.assertEqual(selected, "http://127.0.0.1:17890")
+        set_proxy.assert_called_once_with("http://127.0.0.1:17890")
+
+    def test_bilibili_client_falls_back_to_existing_https_proxy(self):
+        with patch.dict(os.environ, {
+            "https_proxy": "http://127.0.0.1:7890",
+        }, clear=True), patch(
+            "services.bilibili_intelligence_service.request_settings.set_proxy",
+        ) as set_proxy:
+            selected = _configure_bilibili_api_proxy()
+
+        self.assertEqual(selected, "http://127.0.0.1:7890")
+        set_proxy.assert_called_once_with("http://127.0.0.1:7890")
+
     def test_institution_aliases_are_normalized_before_recall(self):
         self.assertIn("摩根士丹利", normalize_match_text("大摩：光模块行业更新"))
         self.assertIn("摩根士丹利", normalize_match_text("Morgan Stanley Optical Transceiver.pdf"))

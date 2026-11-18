@@ -36,9 +36,76 @@ def _percentile(values, quantile):
     return ordered[lower] + ((ordered[upper] - ordered[lower]) * fraction)
 
 
+def _path_existed_before(path, completed_at):
+    if not path or not completed_at:
+        return False
+    candidate = Path(str(path))
+    if not candidate.is_file():
+        return False
+    completed = completed_at
+    if completed.tzinfo is None:
+        completed = completed.replace(tzinfo=timezone.utc)
+    modified = datetime.fromtimestamp(candidate.stat().st_mtime, tz=timezone.utc)
+    return modified <= completed.astimezone(timezone.utc)
+
+
 def summarize_publisher_rows(rows):
     values = [dict(row) for row in rows]
     durations = [float(row.get("duration_s") or 0.0) for row in values]
+    processing_orphan_rows = [
+        row
+        for row in values
+        if row.get("current_step") == "orphaned_processing"
+        and row.get("processing_repair_reason")
+    ]
+    processing_orphan_actor_missing_rows = [
+        row
+        for row in processing_orphan_rows
+        if not row.get("processing_repair_actor")
+    ]
+    material_unavailable_rows = [
+        row
+        for row in values
+        if row.get("repair_reason") == "required_material_unavailable"
+    ]
+    actor_missing_rows = [
+        row for row in material_unavailable_rows if not row.get("repair_actor")
+    ]
+    local_material_rows = [
+        row
+        for row in material_unavailable_rows
+        if row.get("unavailable_materials")
+        and all(
+            Path(str(path)).is_file()
+            for path in row.get("unavailable_materials")
+        )
+    ]
+    upload_video_unavailable_rows = [
+        row
+        for row in values
+        if str(row.get("error") or "").startswith(
+            "无法补发 B站：找不到已生成的视频文件"
+        )
+    ]
+    upload_actor_missing_rows = [
+        row
+        for row in upload_video_unavailable_rows
+        if not row.get("upload_failure_actor")
+    ]
+    upload_local_video_rows = [
+        row
+        for row in upload_video_unavailable_rows
+        if _path_existed_before(
+            row.get("upload_video_path"),
+            row.get("completed_at"),
+        )
+    ]
+    foreign_actor_material_evidence = sum(
+        row in actor_missing_rows for row in local_material_rows
+    )
+    foreign_actor_upload_evidence = sum(
+        row in upload_actor_missing_rows for row in upload_local_video_rows
+    )
     return {
         "total": len(values),
         "completed": sum(row.get("status") == "completed" for row in values),
@@ -55,6 +122,22 @@ def summarize_publisher_rows(rows):
             else 0
             for row in values
         ),
+        "processing_orphan_closed": len(processing_orphan_rows),
+        "processing_orphan_actor_missing": len(
+            processing_orphan_actor_missing_rows
+        ),
+        "material_unavailable": len(material_unavailable_rows),
+        "material_unavailable_actor_missing": len(actor_missing_rows),
+        "material_unavailable_local_paths_exist": len(local_material_rows),
+        "upload_video_unavailable": len(upload_video_unavailable_rows),
+        "upload_video_unavailable_actor_missing": len(upload_actor_missing_rows),
+        "upload_video_unavailable_local_path_existed_before_close": len(
+            upload_local_video_rows
+        ),
+        "foreign_actor_upload_evidence": foreign_actor_upload_evidence,
+        "foreign_actor_evidence": (
+            foreign_actor_material_evidence + foreign_actor_upload_evidence
+        ),
         "total_s": round(sum(durations), 3),
         "p50_s": round(_percentile(durations, 0.5), 3),
         "p95_s": round(_percentile(durations, 0.95), 3),
@@ -68,6 +151,7 @@ def summarize_task_roots(rows):
         "total": 0,
         "old_root": 0,
         "current_root": 0,
+        "mixed_root_reference": 0,
         "unclassified": 0,
     })
     for raw_row in rows:
@@ -76,8 +160,9 @@ def summarize_task_roots(rows):
         summary["total"] += 1
         old_root = bool(row.get("old_root"))
         current_root = bool(row.get("current_root"))
-        summary["old_root"] += old_root
-        summary["current_root"] += current_root
+        summary["old_root"] += old_root and not current_root
+        summary["current_root"] += current_root and not old_root
+        summary["mixed_root_reference"] += old_root and current_root
         summary["unclassified"] += not old_root and not current_root
     return [
         {"feature": feature, **grouped[feature]}
@@ -168,20 +253,49 @@ def main():
             print(value)
         _print(
             "old-root publication task rows",
-            (row for row in task_root_rows if row["old_root"]),
+            (
+                row
+                for row in task_root_rows
+                if row["old_root"] and not row["current_root"]
+            ),
+        )
+        _print(
+            "mixed-root reference publication task rows",
+            (
+                row
+                for row in task_root_rows
+                if row["old_root"] and row["current_root"]
+            ),
         )
         publisher_rows = _rows(
             conn,
             """
-            SELECT id, status, current_step, created_at, completed_at,
-                   round(extract(epoch FROM (coalesce(completed_at, updated_at) - created_at))::numeric, 3) AS duration_s,
-                   (CAST(params AS text) LIKE :old_root OR CAST(result AS text) LIKE :old_root OR coalesce(task_video_path, '') LIKE :old_root) AS old_root,
-                   result -> 'queue_repair' ->> 'reason' AS repair_reason,
-                   result -> 'queue_repair_history' AS repair_history,
-                   left(coalesce(error_message, ''), 180) AS error
+            SELECT publication_tasks.id, publication_tasks.status,
+                   publication_tasks.current_step, publication_tasks.created_at,
+                   publication_tasks.completed_at,
+                   round(extract(epoch FROM (
+                       coalesce(publication_tasks.completed_at, publication_tasks.updated_at)
+                       - publication_tasks.created_at
+                   ))::numeric, 3) AS duration_s,
+                   (CAST(publication_tasks.params AS text) LIKE :old_root
+                    OR CAST(publication_tasks.result AS text) LIKE :old_root
+                    OR coalesce(publication_tasks.task_video_path, '') LIKE :old_root) AS old_root,
+                   publication_tasks.result -> 'queue_repair' ->> 'reason' AS repair_reason,
+                   publication_tasks.result -> 'queue_repair_history' AS repair_history,
+                   publication_tasks.result -> 'queue_repair' -> 'actor' AS repair_actor,
+                   publication_tasks.result -> 'queue_repair' -> 'unavailable_materials' AS unavailable_materials,
+                   publication_tasks.result -> 'processing_orphan_repair' ->> 'reason' AS processing_repair_reason,
+                   publication_tasks.result -> 'processing_orphan_repair' -> 'actor' AS processing_repair_actor,
+                   publication_tasks.result -> 'upload_failure' -> 'actor' AS upload_failure_actor,
+                   upload.video_path AS upload_video_path,
+                   left(coalesce(publication_tasks.error_message, ''), 180) AS error
             FROM publication_tasks
-            WHERE feature = 'publisher' AND created_at >= :since AND created_at < :until
-            ORDER BY created_at
+            LEFT JOIN publication_task_bilibili_uploads AS upload
+              ON upload.task_id = publication_tasks.id
+            WHERE publication_tasks.feature = 'publisher'
+              AND publication_tasks.created_at >= :since
+              AND publication_tasks.created_at < :until
+            ORDER BY publication_tasks.created_at
             """,
             params,
         )

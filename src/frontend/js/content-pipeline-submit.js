@@ -504,11 +504,19 @@
             const successCount = Math.max(0, Number(task?.success_count || 0));
             const failedCount = Math.max(0, Number(task?.failed_count || 0));
             const countLabel = filesCount || failedCount
-                ? `<div class="mt-0.5 text-[10px] font-medium text-slate-400">成功 ${successCount} · 失败 ${failedCount}</div>`
+                ? `<div class="mt-0.5 text-[10px] font-medium text-slate-400">清洗成功 ${successCount} · 清洗失败 ${failedCount}</div>`
+                : '';
+            const cleanStatus = historyStatusMeta(task?.clean_status);
+            const publishStatus = task?.publish_status ? historyStatusMeta(task.publish_status) : null;
+            const stageLabel = publishStatus
+                ? `<div class="mt-0.5 text-[10px] font-medium text-slate-500">清洗${cleanStatus.label} · 知识星球发布${publishStatus.label}</div>`
+                : '';
+            const errorLabel = task?.error && ['failed', 'partial_failed'].includes(task?.status)
+                ? `<div class="mt-1 break-words text-[10px] leading-4 text-red-700">${escapeHtml(task.error)}</div>`
                 : '';
             return `<div class="flex items-start gap-2 text-[11px]">
                 <span class="inline-flex min-w-10 justify-center rounded-md border px-1.5 py-0.5 font-black ${kindTone}">${kind}</span>
-                <span class="min-w-0 flex-1"><span class="block truncate font-bold ${taskStatus.textClass}">${taskStatus.label}</span>${countLabel}</span>
+                <span class="min-w-0 flex-1"><span class="block truncate font-bold ${taskStatus.textClass}">${taskStatus.label}</span>${stageLabel}${countLabel}${errorLabel}</span>
                 <span class="font-bold tabular-nums text-slate-500">${Math.max(0, Math.min(100, Number(task?.progress || 0)))}%</span>
             </div>`;
         }).join('');

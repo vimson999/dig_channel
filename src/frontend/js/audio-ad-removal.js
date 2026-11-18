@@ -11,13 +11,23 @@
     let job, duration, selection, previewEnd, sampleUrl;
     let ranges = [];
     let busy = false;
+    let batch = [];
+    let active;
+    let batchMode = false;
 
     const format = seconds => Number(seconds).toFixed(2);
     const notice = message => { el('status').textContent = message; };
     function updateActions() {
         el('upload').disabled = busy || !el('audio-file').files.length;
         el('detect').disabled = busy || !job;
-        el('export').disabled = busy || !ranges.some(range => range.confirmed);
+        el('export').disabled = busy || (batchMode
+            ? !batch.length || batch.some(item => !item.detected)
+            : !ranges.some(range => range.confirmed));
+        for (const id of ['audio-file', 'sample', 'threshold', 'reset-sample', 'add']) {
+            el(id).disabled = busy;
+        }
+        el('editor').inert = busy;
+        el('batch-files').inert = busy;
     }
 
     async function request(path, options) {
@@ -129,13 +139,14 @@
                     paint();
                 }),
                 button('删除', 'text-slate-500 hover:bg-slate-100', () => {
-                    ranges = ranges.filter(item => item !== range);
+                    ranges.splice(ranges.indexOf(range), 1);
                     paint();
                 })
             );
             card.append(heading, controls);
             list.append(card);
         }
+        renderBatch();
         updateActions();
     }
 
@@ -147,34 +158,105 @@
     };
     player.onpause = () => { previewEnd = null; };
     el('audio-file').onchange = updateActions;
-    el('upload').onclick = () => run('正在上传并准备音频…', async () => {
-        const body = new FormData();
-        body.append('audio', el('audio-file').files[0]);
-        const data = await (await request('/upload', {method: 'POST', body})).json();
-        ({job, duration} = data);
-        ranges = [];
-        player.src = origin + data.audio_url;
+    function renderBatch() {
+        const list = el('batch-files');
+        list.replaceChildren();
+        if (!batchMode) return;
+        const hint = document.createElement('p');
+        hint.className = 'text-xs text-slate-600';
+        hint.textContent = `共 ${batch.length} 个文件 · 点击文件名查看该文件的广告区间`;
+        list.append(hint);
+        for (const item of batch) {
+            const count = item.ranges?.filter(range => range.confirmed).length || 0;
+            const status = item.error || (item.detected
+                ? (count ? `待剪除 ${count} 段` : '不剪切')
+                : '等待识别');
+            const selected = item === active;
+            const control = button(`${selected ? '正在查看 · ' : ''}${item.file.name} · ${status}`,
+                'block w-full break-all border text-left ' + (selected
+                    ? 'border-indigo-400 bg-indigo-50 text-indigo-800'
+                    : 'border-transparent bg-slate-100 text-slate-700 hover:bg-slate-200'),
+                () => { showFile(item); });
+            control.disabled = !item.job;
+            control.setAttribute('aria-pressed', String(item === active));
+            list.append(control);
+        }
+    }
+
+    function showFile(item) {
+        active = item;
+        const label = el('active-audio');
+        label.textContent = `当前查看 ${batch.indexOf(item) + 1}/${batch.length}：${item.file.name}`;
+        label.hidden = !batchMode;
+        ({job, duration, ranges} = item);
+        previewEnd = null;
+        player.src = origin + item.audio_url;
         el('editor').hidden = false;
         el('audio-placeholder').hidden = true;
         el('start').value = el('end').value = '';
         paint();
-        notice(`音频已就绪，时长 ${format(duration)} 秒。`);
-    });
+    }
+
+    async function detectFile(item) {
+        const body = new FormData();
+        const sample = el('sample').files[0];
+        if (sample) body.append('sample', sample);
+        body.append('threshold', el('threshold').value);
+        const data = await (await request(`/${item.job}/detect`, {method: 'POST', body})).json();
+        for (const match of data.matches) {
+            if (!item.ranges.some(range => Math.abs(range.start - match.start) < 0.05 &&
+                Math.abs(range.end - match.end) < 0.05)) {
+                item.ranges.push({...match, confirmed: batchMode});
+            }
+        }
+        item.detected = true;
+        item.error = '';
+        return data.matches.length;
+    }
+
+    el('upload').onclick = () => {
+        const files = Array.from(el('audio-file').files);
+        if (files.length > 30) return notice('每批最多选择 30 个音频。');
+        if (files.length > 1 && !el('threshold').reportValidity()) return;
+        run('正在准备音频…', async () => {
+            job = active = null;
+            el('active-audio').hidden = true;
+            player.removeAttribute('src');
+            player.load();
+            ranges = [];
+            el('editor').hidden = true;
+            el('audio-placeholder').hidden = false;
+            batchMode = files.length > 1;
+            el('export').textContent = batchMode ? '剪除所选区间并下载 ZIP' : '导出 MP3';
+            batch = files.map(file => ({file, ranges: []}));
+            renderBatch();
+            for (const [index, item] of batch.entries()) {
+                notice(`正在处理 ${index + 1}/${batch.length}：${item.file.name}`);
+                try {
+                    const body = new FormData();
+                    body.append('audio', item.file);
+                    Object.assign(item, await (await request('/upload', {method: 'POST', body})).json());
+                    if (batchMode) await detectFile(item);
+                } catch (error) { item.error = error.message; }
+                renderBatch();
+            }
+            const first = batch.find(item => item.job);
+            if (first) showFile(first);
+            const failed = batch.filter(item => item.error).length;
+            notice(failed ? (batchMode
+                ? `${failed} 个文件处理失败，请查看列表。识别失败可选中文件重试，上传失败请重新选择文件。`
+                : batch[0].error)
+                : batchMode ? '全部音频已识别。点左侧文件名逐个核对；下载 ZIP 会处理整批文件。'
+                : `音频已就绪，时长 ${format(duration)} 秒。`);
+        });
+    };
 
     el('detect').onclick = () => {
         if (!el('threshold').reportValidity()) return;
         run('正在查找广告…', async () => {
-            const body = new FormData();
-            const file = el('sample').files[0];
-            if (file) body.append('sample', file);
-            body.append('threshold', el('threshold').value);
-            const data = await (await request(`/${job}/detect`, {method: 'POST', body})).json();
-            for (const match of data.matches) {
-                if (!ranges.some(range => Math.abs(range.start - match.start) < 0.05 &&
-                    Math.abs(range.end - match.end) < 0.05)) ranges.push(match);
-            }
+            const count = await detectFile(active);
             paint();
-            notice(`找到 ${data.matches.length} 个候选区间。`);
+            notice(`找到 ${count} 个候选区间。`);
         });
     };
 
@@ -204,20 +286,23 @@
     };
     timeline.onpointercancel = () => { selection = null; };
 
-    el('export').onclick = () => run('正在生成去广告的 MP3…', async () => {
-        const selected = ranges.filter(range => range.confirmed).map(({start, end}) => ({start, end}));
-        const response = await request(`/${job}/export`, {
+    el('export').onclick = () => run(batchMode ? '正在剪切并打包 ZIP…' : '正在生成去广告的 MP3…', async () => {
+        const selected = list => list.filter(range => range.confirmed).map(({start, end}) => ({start, end}));
+        const payload = batchMode ? {
+            files: batch.map(item => ({job: item.job, name: item.file.name, ranges: selected(item.ranges)})),
+        } : {ranges: selected(ranges)};
+        const response = await request(batchMode ? '/export-zip' : `/${job}/export`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ranges: selected}),
+            body: JSON.stringify(payload),
         });
         const url = URL.createObjectURL(await response.blob());
         const link = document.createElement('a');
         link.href = url;
-        link.download = '讲课音频-已去广告.mp3';
+        link.download = batchMode ? '批量去广告.zip' : '讲课音频-已去广告.mp3';
         link.click();
         setTimeout(() => URL.revokeObjectURL(url), 60000);
-        notice('MP3 已生成。');
+        notice(batchMode ? 'ZIP 已生成。' : 'MP3 已生成。');
     });
 
     updateActions();

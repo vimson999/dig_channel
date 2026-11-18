@@ -683,7 +683,7 @@ class BilibiliPublishPanel {
         const checkbox = this.field('schedule-enabled');
         const input = this.field('schedule-time');
         if (!checkbox || !input) return;
-        const minDate = new Date(Date.now() + 6 * 60 * 1000);
+        const minDate = new Date(Date.now() + 16 * 60 * 1000);
         const maxDate = new Date(Date.now() + 15 * 24 * 60 * 60 * 1000);
         minDate.setSeconds(0, 0);
         maxDate.setSeconds(0, 0);
@@ -700,10 +700,10 @@ class BilibiliPublishPanel {
         const value = formData.get('schedule_time');
         if (!value) throw new Error('请选择 B站定时发布时间');
         const timestamp = Math.floor(new Date(value).getTime() / 1000);
-        const minTimestamp = Math.floor((Date.now() + 5 * 60 * 1000) / 1000);
+        const minTimestamp = Math.floor((Date.now() + 15 * 60 * 1000) / 1000);
         const maxTimestamp = Math.floor((Date.now() + 15 * 24 * 60 * 60 * 1000) / 1000);
         if (!Number.isFinite(timestamp) || timestamp < minTimestamp || timestamp > maxTimestamp) {
-            throw new Error('B站定时发布时间需在 5 分钟后、15 天内');
+            throw new Error('B站定时发布时间需在 15 分钟后、15 天内');
         }
         return timestamp;
     }
@@ -950,7 +950,7 @@ class BilibiliPublishPanel {
 
     videoLabel(key) {
         const item = this.videoOptions().find((option) => option.key === key);
-        return item?.label || (key === 'vertical' ? '竖屏视频' : '横屏视频');
+        return item?.label || (key === 'vertical' ? '竖屏视频' : (key === 'wsj' ? 'WSJ 4:3 视频' : '横屏视频'));
     }
 
     statusMeta(status) {

@@ -66,9 +66,13 @@ def _task_segments(task):
 def _task_to_list_item(task):
     segments = _task_segments(task)
     successful_segments = [
-        _segment_to_public(task.id, segment)
-        for segment in segments
+        segment for segment in segments
         if segment.get('status') == 'success' and segment.get('audio_path')
+    ]
+    available_segments = [
+        _segment_to_public(task.id, segment)
+        for segment in successful_segments
+        if os.path.isfile(str(segment.get('audio_path') or ''))
     ]
     return {
         'id': task.id,
@@ -79,16 +83,16 @@ def _task_to_list_item(task):
         'updated_at': task.updated_at.isoformat() if task.updated_at else None,
         'segment_count': len((task.params or {}).get('tts', {}).get('segments') or []),
         'success_count': len(successful_segments),
-        'first_audio_segment': successful_segments[0] if successful_segments else None,
+        'first_audio_segment': available_segments[0] if available_segments else None,
     }
 
 
 def _segment_to_public(task_id, segment):
     item = dict(segment)
     sequence = item.get('sequence')
-    if item.get('audio_path'):
+    if item.get('audio_path') and os.path.isfile(str(item['audio_path'])):
         item['audio_url'] = f'/api/v2/tts/task/{task_id}/segment/{sequence}/audio'
-    if item.get('subtitle_path'):
+    if item.get('subtitle_path') and os.path.isfile(str(item['subtitle_path'])):
         item['subtitle_url'] = f'/api/v2/tts/task/{task_id}/segment/{sequence}/subtitle'
     item.pop('audio_path', None)
     item.pop('subtitle_path', None)
@@ -216,13 +220,19 @@ def get_history(current_user):
         ).order_by(PublicationTask.created_at.desc())
         pagination = query.options(load_only(*TASK_PAYLOAD_COLUMNS)).paginate(page=page, per_page=per_page, error_out=False)
 
+        items = list(pagination.items)
+        total = pagination.total
+        pages = pagination.pages
+        current_page = pagination.page
+        db.session.remove()
+
         return jsonify({
             'success': True,
             'data': {
-                'items': [_task_to_list_item(task) for task in pagination.items],
-                'total': pagination.total,
-                'pages': pagination.pages,
-                'current_page': pagination.page
+                'items': [_task_to_list_item(task) for task in items],
+                'total': total,
+                'pages': pages,
+                'current_page': current_page
             }
         })
     except Exception as exc:
@@ -238,6 +248,7 @@ def get_article_detail(current_user, task_id):
         if not task or str(task.user_id or (task.params or {}).get('user_id')) != str(current_user.id):
             return jsonify({'success': False, 'message': '未找到该任务'}), 404
 
+        db.session.remove()
         data = _task_to_list_item(task)
         data['segments'] = [_segment_to_public(task.id, segment) for segment in _task_segments(task)]
         return jsonify({'success': True, 'data': data})

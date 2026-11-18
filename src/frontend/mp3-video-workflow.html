@@ -112,15 +112,16 @@
                         <select id="input-source-select" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 focus:border-slate-500 focus:outline-none">
                             <option value="gemini_audio">Gemini 解析音频</option>
                             <option value="ima_transcript">IMA 转录全文 + DS Prompt</option>
-                            <option value="ds_response">直接粘贴 DS 返回值</option>
+                            <option value="ds_response" selected>直接粘贴 DS 返回值</option>
                         </select>
                     </label>
                     <label class="mt-4 block">
                         <span class="mb-1 block text-xs font-bold text-slate-500">输出模式</span>
                         <select id="render-mode-select" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 focus:border-slate-500 focus:outline-none">
-                            <option value="keyframes" selected>关键帧预览（不合成完整视频）</option>
-                            <option value="full_video">完整横竖屏视频</option>
+                            <option value="keyframes" selected>先生成封皮和关键帧（确认后手动合成）</option>
+                            <option value="full_video">立即合成完整横竖屏视频（跳过封皮确认）</option>
                         </select>
+                        <p class="mt-1 text-xs text-slate-500">默认先检查并可重做封皮；确认后到任务详情页手动投递完整视频。</p>
                     </label>
                     <label class="mt-4 flex items-start gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5">
                         <input id="generate-subtitles-checkbox" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-500">
@@ -152,7 +153,7 @@
                     <div id="ds-response-config-panel" class="hidden">
                     <label class="mt-4 block">
                         <span class="mb-1 block text-xs font-bold text-slate-500">DS 返回值</span>
-                        <textarea id="ds-response-input" rows="12" class="w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm leading-6 focus:border-slate-500 focus:outline-none" placeholder="直接粘贴 DS v4 flash 已返回的 1-7 条结果"></textarea>
+                        <textarea id="ds-response-input" rows="12" class="w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm leading-6 focus:border-slate-500 focus:outline-none" placeholder="粘贴新版 1–9 项结果（兼容旧版 1–7 项）；第 8 项为 WSJ 视频标题，第 9 项为封面三行文案"></textarea>
                     </label>
                     </div>
                     <div class="mt-4 grid grid-cols-2 gap-2">

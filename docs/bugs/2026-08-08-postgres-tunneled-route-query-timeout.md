@@ -499,3 +499,105 @@ PgBouncer 错误、statement/lock timeout、waiting lock 与持久 idle-in-trans
 notification due-provider 应用 1.28–2.24 秒而 executor 0.730ms。根因继续位于 PostgreSQL executor 外的
 driver/PgBouncer/私网 fetch 边界。状态保持 **OPEN / REPEATED / OBSERVING**，不增加索引或 timeout；下一
 尖峰必须保存同秒 pool/socket/route/activity。
+
+### 2026-10-20 query-wait 再次复发，audio catalog 尾部升至 9.808 秒
+
+15:42:03 Publisher repair scan 建连后等待 PgBouncer server，15 秒 `query_wait_timeout` 到达时客户端关闭；
+应用 SQL 指纹 `c014bff91db5d2af` 用时 15.296 秒并报 `OperationalError`。该 Session 共持有 15.304 秒，
+非 SQL 仅 7.74ms；同分钟 PgBouncer wait 指标升高，之后客户端恢复。没有 server crash、TLS/connect/
+statement/lock timeout，也没有 PostgreSQL 锁或 executor 慢证据。
+
+同窗 audio catalog 3 条累计 26.178 秒、P95/max 9.808 秒，而 executor 5.182ms。实时 pool 快照的
+`cl_waiting=0/sv_idle=1` 只证明巡检时已恢复，不能抹掉窗口故障。状态保持 **OPEN / REPEATED /
+OBSERVING**；不靠放宽 timeout、重试或索引掩盖。下一次尖峰必须同秒保存 pool acquire、socket/route、
+fetch bytes、PgBouncer pool/server 和 PostgreSQL activity/executor，完整后窗 query-wait=0 才能继续观察。
+
+### 2026-10-21 无 timeout 窗口但 fetch 高尾仍在
+
+固定窗 PgBouncer 八类错误、应用 SQL error、statement/lock timeout、deadlock 与 idle-in-transaction
+均为 0；慢 SQL 从 30 条/62.847 秒降至 13 条/37.683 秒，P95/max 从 8.421/9.808 秒降至
+8.041/8.181 秒。错误计数改善，但 audio catalog 3 条仍累计 24.138 秒，而同形 executor 5.182ms；三次
+hold 非 SQL 合计仅 916.57ms。共同尾部仍在 executor 外，不能用一个无错误窗口关闭物理链路根因。
+
+状态保持 **OPEN / REPEATED / OBSERVING**。不增加索引、timeout 或无界重试；下一尖峰必须同秒采集
+pool/server socket、route、远端 activity、fetch bytes/deserialize，连续完整绿窗后才可继续推进验收。
+
+### 2026-10-22 错误面继续为零，但 audio catalog 最大值轻微恶化
+
+固定窗慢 SQL 16 条/41.431 秒，P50/P95/max 为 1.322/8.006/8.269 秒；相较上窗数量 +23.1%、累计
++9.9%、P95 -0.4%、max +1.1%。PgBouncer 八类错误、应用 SQL error、statement/lock/connection
+timeout、deadlock 和持续 idle-in-transaction 全为 0。
+
+audio catalog 3 条累计 24.109 秒，三次 hold 的 SQL 累计 24.250 秒、非 SQL 仅 352ms；同形生产
+executor 仍只有 5.182ms。零错误第二窗没有消除 driver/fetch/PgBouncer/私网高尾，状态保持
+**OPEN / REPEATED / OBSERVING**。不增加索引、timeout 或无界重试；下一自然尖峰必须同秒采集 pool/server
+socket、route、远端 activity、fetch bytes/deserialize 与 response bytes。
+
+### 2026-10-23 错误面第三窗为零，单次 fetch 高尾继续恶化
+
+固定窗慢 SQL 26 条/51.023 秒，P50/P95/max 为 1.151/8.271/8.380 秒；相较上窗数量 +62.5%、累计
++23.2%、P50 -12.9%，但 P95/max +3.3%/+1.3%。PgBouncer 八类错误、应用 SQL error、statement/lock/
+connection timeout、deadlock、waiting lock 和持续 idle-in-transaction 全为 0。PgBouncer wait/query P95
+为 52.05/80.96ms，但 max 达 510.44/449.93ms，说明平均面绿色仍不能排除孤立链路尖峰。
+
+audio catalog 2 条累计 16.652 秒、P95/max 8.271/8.380 秒；两次 hold 匹配 SQL 16.652 秒、非 SQL
+558ms，同形 executor 仍只有 5.182ms。次数和累计下降但单次尾部继续恶化，状态保持 **OPEN / REPEATED /
+OBSERVING**。不增加索引、timeout 或无界重试；下一自然尖峰必须同秒采集 pool acquire/server socket、route、
+远端 activity、fetch bytes/deserialize 与 response bytes。
+
+### 2026-10-25 低流量窗尾部回落，但 audio catalog 无自然样本
+
+固定窗慢 SQL 14 条/19.638 秒，P50/P95/max 1.117/2.106/2.157 秒；较上窗数量 -50.0%、累计 -71.3%、
+P95/max -76.3%/-76.8%。PgBouncer 八类错误、应用 SQL error、statement/lock/connection timeout、
+waiting lock 与持续 idle-in-transaction 均为 0，wait/query P95 为 42.62/74.14ms。
+
+但 HTTP 样本从 887 降至 23，且本窗没有 audio-assets 自然请求，所以上述改善不能验收 audio catalog 根因。
+Insights 应用 2.059 秒而生产 executor 40.705ms，说明 executor 外 driver/PgBouncer/私网 fetch 尾部仍可见。
+状态保持 **OPEN / REPEATED / OBSERVING**；下一轮必须取得 audio catalog 冷/暖自然请求的 pool acquire、
+fetch bytes/deserialize、socket/route 与 response bytes 分段，不能以未捕获冒充未复发。
+
+### 2026-10-27 timeout 仍为零，但 audio catalog 尾部升至 11.341 秒
+
+完整窗应用 SQL error、statement/lock/connection timeout、server close、waiting lock、PgBouncer 八类错误均为
+0；但慢 SQL 从 14 条/17.700 秒恶化为 19 条/43.958 秒，P95/max 升至 8.692/11.341 秒。audio catalog
+两条累计 20.033 秒，两个 hold 内非 SQL 合计仅 141.27ms，而同形生产 executor 2.869ms；PgBouncer
+wait/query P95 为 51.65/82.76ms。零错误没有消除 driver/fetch/PgBouncer/私网尾部。
+
+状态保持 **OPEN / REPEATED / OBSERVING**，不增加索引、timeout、TTL 或无界重试。下一尖峰必须同秒采
+pool acquire/server socket、route、远端 activity、fetch bytes/deserialize 与 response bytes，补齐 executor 外
+物理断点。
+
+### 2026-10-29 executor 外接收阶段被进一步收窄
+
+完整窗 29 条应用慢 SQL/67.720 秒，P50/P95/max 1.222/11.133/12.993 秒；SQL error、statement/lock/
+connection timeout、server close、waiting lock 和 PgBouncer 八类错误仍全为 0。audio catalog 3 次累计
+33.761 秒，3 个 hold 中 SQL 33.882 秒、非 SQL 仅 675.04ms。
+
+同形生产查询 1,541 行/881,038 bytes，executor 6.527ms；同一 psycopg2 连接三次 execute/fetch 却需
+8.967/9.365/9.411 秒，Python materialize 仅 8.95/7.48/9.17ms。慢点位由笼统“executor 外”进一步收窄到
+驱动/PgBouncer/私网结果接收阶段，但尚无自然尖峰同秒 socket/route 证据。状态保持 **OPEN / REPEATED /
+OBSERVING**；本轮无 DDL、timeout 或 retry 掩盖。
+
+### 2026-10-30 PgBouncer/直连 A/B 排除 pooler
+
+完整窗应用慢 SQL 15 条/27.651 秒，较上窗数量、累计、P95/max 分别改善 48.3%、59.2%、81.9%/28.5%；
+SQL error、statement/lock/connection timeout、server close、waiting lock 和 PgBouncer 八类错误仍全为 0。
+但自然 audio catalog 仍为 9.288 秒、executor 约 6ms，证明总体下降没有消除代表性复发。
+
+同一只读 audio 查询经 PgBouncer 与 `DIRECT_DATABASE_URL` 的 execute/fetch 分别为 9.105/9.067 秒，
+返回相同 1,558 行/891,354 bytes；executor 6.029/5.139ms，Python materialize 4.61/6.52ms。直连没有
+消除尾部，故 PgBouncer 不是本样本的主要断点；两条路径共同经 Tailscale 路由
+`100.96.3.12 -> 100.92.99.39`、MTU 1280。状态保持 **OPEN / REPEATED / WAITING_INFRASTRUCTURE**；
+不以一窗总体改善、无 timeout 或放宽配置代替公共网络/驱动接收链路的物理修复与后窗验收。
+
+### 2026-11-01 低流量窗仍复发毫秒 executor / 秒级应用差距
+
+固定窗应用慢 SQL 10 条/13.170 秒，P50/P95/max 1.144/2.213/2.213 秒，较上窗数量和累计分别下降
+74.4%/81.6%，但自然 HTTP 只有 16 条、publication task 为 0，不能解释为全链路根治。慢点集中在
+Watchdog 的 report-audio recovery、notification、Publisher repair/finalization 与 Insights。
+
+五个真实 Watchdog SQL 形状的 `EXPLAIN (ANALYZE, BUFFERS)` executor 仅 0.014–0.243ms，Insights 为
+32.663ms；应用同形却为 1.050–2.213 秒。PgBouncer 1,440 个样本八类错误为 0、来源 288/288 为
+`100.96.3.12`、proxy TUN fallback 为 0，wait/query P95 37.54/63.94ms。audio catalog 本窗未触发，故既不能
+说其改善，也不能关闭共同 Tailscale/driver 接收边界。状态保持 **OPEN / REPEATED /
+WAITING_INFRASTRUCTURE**，无 DDL、timeout 或 retry 掩盖。

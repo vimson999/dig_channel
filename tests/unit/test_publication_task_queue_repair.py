@@ -1519,9 +1519,16 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
             with self.subTest(feature=feature, step=step):
                 task = self._processing_business_task(feature=feature, step=step)
                 dummy = DummyCeleryTask()
+                repair_actor = {
+                    "deployment_root": "/srv/current",
+                    "hostname": "repair-host",
+                    "pid": 4242,
+                    "code_identity": "test-code-identity",
+                }
 
                 with patch.object(publisher_queue_repair, "_message_visible_in_workers", return_value=(False, True)), \
                      patch.object(publisher_queue_repair, "_message_visible_in_queue", return_value=(False, True)), \
+                     patch.object(publisher_queue_repair, "_repair_actor_identity", return_value=repair_actor), \
                      patch.object(publisher_queue_repair, "_repair_target_for_feature", return_value=dummy):
                     updated, repaired, action = publisher_queue_repair.maybe_repair_stale_business_processing_task(task)
 
@@ -1535,6 +1542,7 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
                 repair = updated.result["processing_orphan_repair"]
                 self.assertEqual(repair["previous_celery_id"], "old-business-celery-id")
                 self.assertEqual(repair["previous_step"], step)
+                self.assertEqual(repair["actor"], repair_actor)
 
     def test_requeues_stale_processing_report_audio_parent_when_message_is_missing(self):
         cases = (
@@ -1556,6 +1564,64 @@ class PublicationTaskQueueRepairTest(unittest.TestCase):
                 self.assertEqual(updated.status, "pending")
                 self.assertEqual(updated.current_step, "queued")
                 self.assertEqual(dummy.calls[0]["queue"], "report_audio_workflow")
+
+    def test_keeps_mp3_parent_waiting_while_publisher_child_is_active(self):
+        parent = self._processing_business_task(
+            feature="mp3_video_workflow",
+            step="landscape_video_waiting",
+        )
+        child = PublicationTask(
+            feature="publisher",
+            status="pending",
+            current_step="queued",
+            progress=0,
+            params={"feature": "publisher", "video": {"enabled": True}},
+            result={},
+            celery_task_id="publisher-child-celery-id",
+            created_at=datetime.utcnow() - timedelta(minutes=15),
+            updated_at=datetime.utcnow() - timedelta(minutes=15),
+        )
+        db.session.add(child)
+        db.session.flush()
+        parent.waiting_child_label = "landscape_video"
+        parent.waiting_child_id = child.id
+        parent.waiting_child_status = "pending"
+        parent.waiting_child_step = "queued"
+        parent.waiting_child_updated_at = "2026-10-27T07:40:04.882090Z"
+        parent.updated_at = datetime.utcnow() - timedelta(minutes=20)
+        db.session.commit()
+        parent_id = str(parent.id)
+        child_id = str(child.id)
+        dummy = DummyCeleryTask()
+
+        with patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_workers",
+            return_value=(False, True),
+        ), patch.object(
+            publisher_queue_repair,
+            "_message_visible_in_queue",
+            return_value=(False, True),
+        ), patch.object(
+            publisher_queue_repair,
+            "_repair_target_for_feature",
+            return_value=dummy,
+        ):
+            updated, repaired, action = (
+                publisher_queue_repair.maybe_repair_stale_business_processing_task(
+                    parent
+                )
+            )
+
+        self.assertFalse(repaired)
+        self.assertEqual(action, "waiting_child_active")
+        self.assertEqual(updated.status, "processing")
+        self.assertEqual(updated.current_step, "landscape_video_waiting")
+        self.assertEqual(str(updated.waiting_child_id), child_id)
+        persisted = db.session.get(PublicationTask, parent_id)
+        self.assertEqual(persisted.status, "processing")
+        self.assertEqual(persisted.current_step, "landscape_video_waiting")
+        self.assertEqual(str(persisted.waiting_child_id), child_id)
 
     def test_age_seconds_normalizes_naive_database_local_time(self):
         now_utc = datetime(2026, 8, 5, 8, 12, 0)

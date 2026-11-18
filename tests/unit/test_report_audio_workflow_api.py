@@ -6,7 +6,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from flask import Flask
 from sqlalchemy import event, update
@@ -31,6 +31,7 @@ from services.bilibili_publish import (  # noqa: E402
     create_bilibili_upload_task,
     enqueue_bilibili_upload_task,
     retry_bilibili_upload_child,
+    upload_delay_time,
 )
 from services.browser_publish_jobs import (  # noqa: E402
     BrowserPublishJobSpec,
@@ -2327,7 +2328,7 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
                     "space_hidden": 0,
                     "creation_statement_id": 2,
                     "schedule_enabled": True,
-                    "delay_time": 1_800_000_600,
+                    "delay_time": 1_800_000_900,
                     "season_id": 9988,
                     "charging_pay": {
                         "enabled": True,
@@ -2366,7 +2367,7 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(context.is_only_self, 1)
         self.assertEqual(context.space_hidden, 0)
         self.assertEqual(context.creation_statement_id, 2)
-        self.assertEqual(context.delay_time, 1_800_000_600)
+        self.assertEqual(context.delay_time, 1_800_000_900)
         self.assertEqual(context.season_id, 9988)
         self.assertEqual(context.charging_pay["preview"]["start_time"], 2)
         self.assertEqual(context.charging_pay["preview"]["end_time"], 8)
@@ -2436,6 +2437,12 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
                 statements.append(statement.lower())
 
         class FakeUploader:
+            def validate_charging_pay_selection(self, charging_pay):
+                self.charging_pay = charging_pay
+
+            def validate_scheduled_upload_margin(self, delay_time):
+                self.delay_time = delay_time
+
             async def upload_single(self, **kwargs):
                 upload_kwargs.update(kwargs)
                 PublicationTask.query.filter_by(id=child.id).update({
@@ -2514,6 +2521,228 @@ class ReportAudioWorkflowApiTest(unittest.TestCase):
         self.assertEqual(projection.aid, "123")
         self.assertEqual(projection.bvid, "BV1FULLWORKER")
         self.assertEqual(projection.credential_name, "主账号")
+
+    def test_bilibili_worker_rejects_stale_charging_tier_before_media_upload(self):
+        from tasks import publisher as publisher_tasks
+
+        video_path = Path(self.tmpdir.name) / "stale-charging-tier.mp4"
+        video_path.write_bytes(b"video")
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={"feature": FEATURE_NAME, "user_id": "user-1"},
+            result={},
+        )
+        db.session.add(parent)
+        db.session.commit()
+        child = create_bilibili_upload_task(
+            parent,
+            parent_feature=FEATURE_NAME,
+            source_label=report_audio_api.BILIBILI_UPLOAD_SOURCE,
+            video_path=str(video_path),
+            video_key="landscape",
+            title="失效充电档位投稿",
+            data={
+                "charging_pay": {
+                    "enabled": True,
+                    "upower_level_id": "retired-level",
+                    "upower_unit_price": 30,
+                },
+            },
+        )
+        upload_single = AsyncMock(return_value={"aid": 123, "bvid": "BVSTALE"})
+        transaction_state = []
+
+        def current_options(_uploader):
+            transaction_state.append(db.session().in_transaction())
+            return {
+                "upower_auth": True,
+                "levels": [{"id": "active-level", "label": "当前档位"}],
+                "default_level_id": "active-level",
+            }
+
+        auth = {
+            "credential_id": "credential-1",
+            "credential_name": "主账号",
+            "sessdata": "sessdata",
+            "bili_jct": "csrf",
+            "buvid3": "buvid",
+            "dedeuserid": "123",
+        }
+        with patch("app.create_app", return_value=self.app), patch.object(
+            publisher_tasks,
+            "guard_publication_task_start",
+            return_value=None,
+        ), patch.object(
+            publisher_tasks,
+            "resolve_bilibili_auth",
+            return_value=auth,
+        ), patch.object(
+            publisher_tasks.BiliUploader,
+            "charging_pay_options",
+            autospec=True,
+            side_effect=current_options,
+        ), patch.object(
+            publisher_tasks.BiliUploader,
+            "upload_single",
+            upload_single,
+        ), patch(
+            "services.platform_credential_service.mark_credential_error",
+            return_value=None,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "充电档位已失效"):
+                publisher_tasks.run_bilibili_upload_only.run(child.id)
+
+        db.session.expire_all()
+        task = PublicationTask.query.filter_by(id=child.id).one()
+        self.assertEqual(transaction_state, [False])
+        self.assertEqual(task.status, "failed")
+        self.assertEqual(task.current_step, "waiting_user_reselect")
+        self.assertTrue(task.result["bilibili_reselect_required"])
+        self.assertEqual(task.result["bilibili_error_code"], "stale_upower_level")
+        upload_single.assert_not_awaited()
+
+    def test_bilibili_worker_rejects_schedule_without_upload_budget(self):
+        from tasks import publisher as publisher_tasks
+
+        video_path = Path(self.tmpdir.name) / "scheduled-margin.mp4"
+        video_path.write_bytes(b"video")
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={"feature": FEATURE_NAME, "user_id": "user-1"},
+            result={},
+        )
+        db.session.add(parent)
+        db.session.commit()
+        with patch("services.bilibili_publish.time.time", return_value=1000):
+            child = create_bilibili_upload_task(
+                parent,
+                parent_feature=FEATURE_NAME,
+                source_label=report_audio_api.BILIBILI_UPLOAD_SOURCE,
+                video_path=str(video_path),
+                video_key="landscape",
+                title="定时余量不足投稿",
+                data={
+                    "schedule_enabled": True,
+                    "delay_time": 1900,
+                    "charging_pay": {
+                        "enabled": True,
+                        "upower_level_id": "level-1",
+                    },
+                },
+            )
+        upload_single = AsyncMock(return_value={"aid": 123, "bvid": "BVLATE"})
+        auth = {
+            "credential_id": "credential-1",
+            "credential_name": "主账号",
+            "sessdata": "sessdata",
+            "bili_jct": "csrf",
+            "buvid3": "buvid",
+            "dedeuserid": "123",
+        }
+
+        with patch("app.create_app", return_value=self.app), patch.object(
+            publisher_tasks,
+            "guard_publication_task_start",
+            return_value=None,
+        ), patch.object(
+            publisher_tasks,
+            "resolve_bilibili_auth",
+            return_value=auth,
+        ), patch.object(
+            publisher_tasks.BiliUploader,
+            "upload_single",
+            upload_single,
+        ), patch.object(
+            publisher_tasks.BiliUploader,
+            "validate_charging_pay_selection",
+        ) as validate_charging, patch(
+            "time.time",
+            return_value=1301,
+        ), patch(
+            "services.platform_credential_service.mark_credential_error",
+            return_value=None,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "至少保留 15 分钟"):
+                publisher_tasks.run_bilibili_upload_only.run(child.id)
+
+        db.session.expire_all()
+        task = PublicationTask.query.filter_by(id=child.id).one()
+        self.assertEqual(task.status, "failed")
+        self.assertEqual(task.current_step, "waiting_user_reselect")
+        self.assertTrue(task.result["bilibili_reselect_required"])
+        self.assertEqual(task.result["bilibili_error_code"], "schedule_margin_expired")
+        self.assertEqual(task.result["bilibili_delay_time"], 1900)
+        validate_charging.assert_not_called()
+        upload_single.assert_not_awaited()
+
+    def test_bilibili_task_admission_requires_upload_budget(self):
+        with patch("services.bilibili_publish.time.time", return_value=1000):
+            self.assertEqual(
+                upload_delay_time({"schedule_enabled": True, "delay_time": 1900}),
+                1900,
+            )
+            with self.assertRaisesRegex(ValueError, "15 分钟后"):
+                upload_delay_time({"schedule_enabled": True, "delay_time": 1600})
+
+    def test_bilibili_worker_persists_actor_when_rendered_video_is_missing(self):
+        from tasks import publisher as publisher_tasks
+
+        missing_video = Path(self.tmpdir.name) / "missing-render.mp4"
+        parent = PublicationTask(
+            status="completed",
+            current_step="done",
+            progress=100,
+            params={"feature": FEATURE_NAME, "user_id": "user-1"},
+            result={},
+        )
+        db.session.add(parent)
+        db.session.commit()
+        child = create_bilibili_upload_task(
+            parent,
+            parent_feature=FEATURE_NAME,
+            source_label=report_audio_api.BILIBILI_UPLOAD_SOURCE,
+            video_path=str(missing_video),
+            video_key="landscape",
+            title="缺失文件投稿",
+            data={},
+        )
+
+        with patch("app.create_app", return_value=self.app), patch.object(
+            publisher_tasks,
+            "guard_publication_task_start",
+            return_value=None,
+        ), patch.dict(
+            os.environ,
+            {"DIG_YTB_CODE_IDENTITY": "test-code"},
+        ), patch(
+            "services.runtime_guard.socket.gethostname",
+            return_value="upload-host",
+        ), patch(
+            "services.runtime_guard.os.getpid",
+            return_value=5151,
+        ), self.assertLogs("tasks.publisher", level="ERROR") as captured:
+            with self.assertRaises(FileNotFoundError):
+                publisher_tasks.run_bilibili_upload_only.run(child.id)
+
+        task = PublicationTask.query.filter_by(id=child.id).one()
+        failure = task.result["upload_failure"]
+        self.assertEqual(task.status, "failed")
+        self.assertEqual(failure["reason"], "video_path_unavailable")
+        self.assertEqual(failure["video_path"], str(missing_video))
+        self.assertEqual(
+            failure["actor"],
+            {
+                "deployment_root": str(Path(publisher_tasks.PROJECT_ROOT)),
+                "hostname": "upload-host",
+                "pid": 5151,
+                "code_identity": "test-code",
+            },
+        )
+        self.assertTrue(any("upload-host" in line for line in captured.output))
 
     def test_bilibili_worker_terminal_update_syncs_structured_result(self):
         from tasks.publisher import update_task_record

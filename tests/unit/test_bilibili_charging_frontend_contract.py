@@ -20,7 +20,50 @@ class _ChargingRankingMarkupParser(HTMLParser):
             self.elements.append((tag, attributes))
 
 
+class _ChargingSummaryHeaderParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.in_summary_table = False
+        self.in_header = False
+        self.headers = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "table" and attributes.get("aria-label") == "B站充电人数汇总":
+            self.in_summary_table = True
+        elif self.in_summary_table and tag == "th":
+            self.in_header = True
+            self.headers.append("")
+
+    def handle_data(self, data):
+        if self.in_header:
+            self.headers[-1] += data
+
+    def handle_endtag(self, tag):
+        if tag == "th" and self.in_header:
+            self.in_header = False
+        elif tag == "table" and self.in_summary_table:
+            self.in_summary_table = False
+
+
 class BilibiliChargingFrontendContractTest(unittest.TestCase):
+    def test_homepage_charging_summary_exposes_renewal_adjusted_income_columns(self):
+        parser = _ChargingSummaryHeaderParser()
+        parser.feed((PROJECT_ROOT / "src" / "frontend" / "index.html").read_text("utf-8"))
+
+        self.assertEqual(
+            [header.strip() for header in parser.headers],
+            [
+                "UP 主",
+                "最新充电人数",
+                "快照日净增",
+                "净增估算金额（CNY）",
+                "净增估算分成（CNY）",
+                "续费率",
+                "按续费率估算月收入（CNY）",
+            ],
+        )
+
     def test_homepage_exposes_accessible_growth_ranking_tabs_and_panel(self):
         parser = _ChargingRankingMarkupParser()
         parser.feed((PROJECT_ROOT / "src" / "frontend" / "index.html").read_text("utf-8"))

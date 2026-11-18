@@ -76,7 +76,7 @@
         <form id="regenerate-video-form" method="dialog" class="overflow-hidden rounded-2xl">
             <div class="border-b border-slate-200 px-5 py-4">
                 <h2 class="text-base font-black text-slate-900">重新生成完整视频</h2>
-                <p class="mt-1 text-xs leading-5 text-slate-500">请重新确认本次音频的截取范围和播放倍速。默认带入上一次的设置，你可以直接修改。</p>
+                <p class="mt-1 text-xs leading-5 text-slate-500">请重新确认本次音频的截取范围和播放倍速。可沿用上一次的截取范围。</p>
             </div>
             <div class="space-y-4 px-5 py-5">
                 <div class="grid grid-cols-2 gap-3">
@@ -91,11 +91,11 @@
                 </div>
                 <label class="flex items-center justify-between gap-3 rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2.5">
                     <span>
-                        <span class="block text-xs font-black text-indigo-900">播放倍速</span>
-                        <span class="mt-0.5 block text-[11px] text-indigo-600">可设置 0.5×–2.0×，仅影响本次重新生成的视频</span>
+                        <span class="block text-xs font-black text-indigo-900">统一播放倍速（选填）</span>
+                        <span class="mt-0.5 block text-[11px] text-indigo-600">留空时：小君君 1.18×、此刻此声 1.20×、WSJ 1.22×。</span>
                     </span>
                     <span class="flex shrink-0 items-center gap-1 rounded-md bg-white px-2 py-1 shadow-sm">
-                        <input id="regenerate-video-speed" name="speed" type="number" required min="0.5" max="2" step="any" inputmode="decimal" class="w-16 bg-transparent text-right text-sm font-black text-indigo-700 outline-none" value="1.2">
+                        <input id="regenerate-video-speed" name="speed" type="number" min="0.5" max="2" step="any" inputmode="decimal" class="w-16 bg-transparent text-right text-sm font-black text-indigo-700 outline-none" placeholder="默认">
                         <span class="text-sm font-black text-indigo-700">×</span>
                     </span>
                 </label>
@@ -116,6 +116,6 @@
     <script src="js/upload-success-sound.js?v=20260905-upload-success-sound"></script>
     <script src="js/bilibili-publish-panel.js?v=20260905-upload-sound-consumer"></script>
     <script src="js/platform-browser-publish-panel.js?v=20260905-upload-sound-consumer"></script>
-    <script src="js/mp3-video-workflow-detail.js?v=20260826-publish-credential-single-owner-v2"></script>
+    <script src="js/mp3-video-workflow-detail.js?v=20261118-ds-nine-sections"></script>
 </body>
 </html>

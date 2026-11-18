@@ -95,13 +95,15 @@ class BilibiliChargingDashboardTest(unittest.TestCase):
         self.assertEqual(standard_latest["daily_growth"], 5)
         self.assertEqual(standard_latest["daily_revenue"], 150)
         self.assertEqual(standard_latest["daily_cash"], 60)
-        self.assertEqual(standard_latest["monthly_income"], 1050)
+        self.assertEqual(by_uid["100"]["pricing"]["renewal_rate"], 0.6)
+        self.assertEqual(standard_latest["monthly_income"], 630)
 
         us_stock_latest = by_uid["3546604889967195"]["latest"]
         self.assertEqual(us_stock_latest["daily_growth"], 3)
         self.assertEqual(us_stock_latest["daily_revenue"], 150)
         self.assertEqual(us_stock_latest["daily_cash"], 60)
-        self.assertEqual(us_stock_latest["monthly_income"], 2060)
+        self.assertEqual(by_uid["3546604889967195"]["pricing"]["renewal_rate"], 0.6)
+        self.assertEqual(us_stock_latest["monthly_income"], 1236)
 
     def test_first_snapshot_and_nonconsecutive_snapshot_do_not_invent_daily_growth(self):
         account = self._add_account("baseline", "999", "新账号")
@@ -114,7 +116,7 @@ class BilibiliChargingDashboardTest(unittest.TestCase):
             self.assertIsNone(point["daily_growth"])
             self.assertIsNone(point["daily_revenue"])
             self.assertIsNone(point["daily_cash"])
-        self.assertEqual(points[-1]["monthly_income"], 1200)
+        self.assertEqual(points[-1]["monthly_income"], 720)
 
     def test_dashboard_returns_rankings_for_rolling_day_week_and_month(self):
         alpha = self._add_account("alpha", "100", "甲账号")
@@ -218,6 +220,7 @@ class BilibiliChargingDashboardTest(unittest.TestCase):
                         "revenue_per_new": 25,
                         "cash_rate": 0.5,
                         "monthly_per_charger": 8,
+                        "renewal_rate": 0.75,
                     },
                     "overrides": {},
                 }),
@@ -242,6 +245,7 @@ class BilibiliChargingDashboardTest(unittest.TestCase):
 
         self.assertEqual(pricing["default"]["revenue_per_new"], 25.0)
         self.assertEqual(pricing["default"]["cash_rate"], 0.5)
+        self.assertEqual(pricing["default"]["renewal_rate"], 0.75)
         self.assertEqual(
             schedule,
             {

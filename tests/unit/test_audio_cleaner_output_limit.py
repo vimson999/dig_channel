@@ -74,3 +74,9 @@ def test_retry_reuses_completed_audio_manifest_without_runtime_dependencies(tmp_
 
     assert resumed["resumed_from_checkpoint"] is True
     assert resumed["cleaned_files"][0]["output_path"] == str(cleaned.resolve())
+
+
+def test_runtime_default_ad_sample_is_available():
+    from services.audio_ad_detection import DEFAULT_AD_SAMPLE
+    assert DEFAULT_AD_SAMPLE.is_file()
+    assert DEFAULT_AD_SAMPLE.stat().st_size > 44

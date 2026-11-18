@@ -374,6 +374,53 @@ class ContentPipelineWebSubmitApiTest(unittest.TestCase):
                 db.session.remove()
                 db.drop_all()
 
+    def test_history_explains_failed_publish_without_overwriting_clean_counts(self):
+        submitted_at = datetime(2026, 11, 13, 6, 43)
+        with self.app.app_context():
+            db.create_all()
+            try:
+                db.session.add_all([
+                    PublicationTask(
+                        id="cleaned-28", status="completed", current_step="done",
+                        progress=100, created_at=submitted_at,
+                        params={
+                            "feature": "content_audio_clean", "user_id": "42",
+                            "content_pipeline": {"metadata": {
+                                "submission_channel": "content_pipeline_web",
+                                "web_submission_id": "submission-28", "input_mode": "folder",
+                            }},
+                        },
+                        result={"files_count": 28, "success_count": 28, "failed_count": 0},
+                    ),
+                    PublicationTask(
+                        id="publish-401", status="failed", current_step="failed",
+                        progress=100, error_message="本轮失败：失败规则 1。",
+                        created_at=submitted_at + timedelta(minutes=9),
+                        params={
+                            "feature": "zsxq_clean_output_publish", "user_id": "42",
+                            "source_task_id": "cleaned-28",
+                        },
+                        result={"rounds": [{"rules": [{
+                            "status": "failed", "message": "两个账号认证失败/401",
+                        }]}]},
+                    ),
+                ])
+                db.session.commit()
+
+                history = self.client.get(
+                    "/api/v1/content-pipeline/web-submissions"
+                ).get_json()["data"]["items"]
+                task = history[0]["tasks"][0]
+                self.assertEqual(history[0]["status"], "failed")
+                self.assertEqual(task["clean_status"], "completed")
+                self.assertEqual(task["publish_status"], "failed")
+                self.assertEqual(task["success_count"], 28)
+                self.assertEqual(task["failed_count"], 0)
+                self.assertEqual(task["error"], "两个账号认证失败/401")
+            finally:
+                db.session.remove()
+                db.drop_all()
+
     def test_history_does_not_mix_another_users_task_with_the_same_submission_id(self):
         submitted_at = datetime(2026, 9, 12, 7, 0, 0)
 

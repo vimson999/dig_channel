@@ -1,9 +1,11 @@
 """Reviewable repeated-audio removal workspace."""
+import math
 import shutil
 import subprocess
 import tempfile
 import uuid
 from pathlib import Path
+from zipfile import ZIP_STORED, ZipFile
 
 from flask import Blueprint, abort, jsonify, request, send_file
 from services.audio_ad_detection import DEFAULT_AD_SAMPLE as SAMPLE, matches
@@ -94,7 +96,7 @@ def detect(user, job):
 
 def normalize_ranges(raw, total):
     ranges = sorted((float(r['start']), float(r['end'])) for r in raw)
-    if not ranges or any(a < 0 or b > total + .01 or b - a < .05 for a, b in ranges):
+    if not ranges or any(not math.isfinite(a) or not math.isfinite(b) or a < 0 or b > total + .01 or b - a < .05 for a, b in ranges):
         raise ValueError('请选择有效的广告区间')
     if any(ranges[i][0] < ranges[i - 1][1] for i in range(1, len(ranges))):
         raise ValueError('广告区间不能重叠')
@@ -115,6 +117,19 @@ def render(source, intervals, destination):
                     '-map', '[out]', '-c:a', 'libmp3lame', '-q:a', '2', str(destination)], check=True)
 
 
+def kept_ranges(cuts, total):
+    kept, cursor = [], 0.
+    for a, b in cuts:
+        if a > cursor + .01:
+            kept.append((cursor, a))
+        cursor = b
+    if total > cursor + .01:
+        kept.append((cursor, total))
+    if not kept:
+        raise ValueError('不能剪掉整段讲课音频')
+    return kept
+
+
 @bp.post('/<job>/export')
 @require_login
 def export(user, job):
@@ -124,15 +139,10 @@ def export(user, job):
         cuts = normalize_ranges(request.get_json()['ranges'], total)
     except (ValueError, KeyError, TypeError):
         return jsonify(error='请先确认有效的广告区间'), 400
-    kept, cursor = [], 0.
-    for a, b in cuts:
-        if a > cursor + .01:
-            kept.append((cursor, a))
-        cursor = b
-    if total > cursor + .01:
-        kept.append((cursor, total))
-    if not kept:
-        return jsonify(error='不能剪掉整段讲课音频'), 400
+    try:
+        kept = kept_ranges(cuts, total)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
     filename = '讲课音频-已去广告.mp3'
     output = tempfile.TemporaryFile()
     try:
@@ -146,6 +156,47 @@ def export(user, job):
     except subprocess.CalledProcessError:
         output.close()
         return jsonify(error='音频导出失败'), 500
+    except Exception:
+        output.close()
+        raise
+
+
+@bp.post('/export-zip')
+@require_login
+def export_zip(user):
+    payload = request.get_json(silent=True)
+    items = payload.get('files') if isinstance(payload, dict) else None
+    if not isinstance(items, list) or not 1 <= len(items) <= 30:
+        return jsonify(error='请选择 1–30 个音频'), 400
+    output = tempfile.TemporaryFile()
+    try:
+        with ZipFile(output, 'w', compression=ZIP_STORED) as archive:
+            with tempfile.TemporaryDirectory() as temp:
+                for index, item in enumerate(items, 1):
+                    name = '音频'
+                    try:
+                        name = Path(str(item['name']).replace(chr(92), '/')).stem[:100] or name
+                        name = ''.join(c if c.isprintable() else '_' for c in name)
+                        source = workspace(user, item['job']) / 'source.mp3'
+                        ranges = item['ranges']
+                        if not isinstance(ranges, list):
+                            raise ValueError('区间格式错误')
+                        if ranges:
+                            total = duration(source)
+                            kept = kept_ranges(normalize_ranges(ranges, total), total)
+                            clean = Path(temp) / 'clean.mp3'
+                            render(source, kept, clean)
+                            suffix = '已去广告'
+                        else:
+                            clean, suffix = source, '未剪切'
+                        archive.write(clean, f'{index:02d}-{name}-{suffix}.mp3')
+                    except (ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
+                        raise ValueError(f'第 {index} 个文件（{name}）无法导出：请检查音频及剪切区间。') from exc
+        output.seek(0)
+        return send_file(output, mimetype='application/zip', as_attachment=True, download_name='批量去广告.zip')
+    except ValueError as exc:
+        output.close()
+        return jsonify(error=str(exc)), 400
     except Exception:
         output.close()
         raise

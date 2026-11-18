@@ -289,10 +289,10 @@ def upload_delay_time(data):
             raise ValueError("B站定时发布时间必须是秒级时间戳") from exc
 
     now_ts = int(time.time())
-    min_ts = now_ts + 5 * 60
+    min_ts = now_ts + 15 * 60
     max_ts = now_ts + 15 * 24 * 60 * 60
     if timestamp < min_ts or timestamp > max_ts:
-        raise ValueError("B站定时发布时间需在 5 分钟后、15 天内")
+        raise ValueError("B站定时发布时间需在 15 分钟后、15 天内")
     return timestamp
 
 

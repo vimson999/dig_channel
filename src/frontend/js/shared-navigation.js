@@ -314,6 +314,13 @@ class SharedNavigation {
                         "group": "发现机会"
                     },
                     {
+                        "id": "bilibili-upower-archive",
+                        "name": "B站稿件充电数据",
+                        "icon": "fas fa-chart-bar",
+                        "href": "bilibili-upower-archive.html",
+                        "group": "发现机会"
+                    },
+                    {
                         "id": "zsxq-insights",
                         "name": "生财情报台",
                         "icon": "fas fa-chart-simple",
@@ -501,6 +508,13 @@ class SharedNavigation {
                         "name": "闭门会封面",
                         "icon": "fas fa-chart-line",
                         "href": "closed-door-card-cover-generator.html",
+                        "group": "封面设计"
+                    },
+                    {
+                        "id": "wsj-cover-preview",
+                        "name": "WSJ 封面预览",
+                        "icon": "fas fa-image",
+                        "href": "wsj-cover-preview.html",
                         "group": "封面设计"
                     }
                 ]

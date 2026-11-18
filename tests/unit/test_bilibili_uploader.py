@@ -141,20 +141,75 @@ class BiliUploaderTest(unittest.IsolatedAsyncioTestCase):
                     sdk_uploader.on.return_value = lambda handler: handler
 
                     uploader = BiliUploader(sessdata="sess", bili_jct="csrf")
-                    await uploader.upload_single(
-                        video_path=video.name,
-                        title="定时测试",
-                        desc="测试简介",
-                        tid=36,
-                        tags=["测试"],
-                        cover_path="/tmp/cover.jpg",
-                        delay_time=1782000000,
-                    )
+                    with patch("time.time", return_value=1_782_000_000 - 3600):
+                        await uploader.upload_single(
+                            video_path=video.name,
+                            title="定时测试",
+                            desc="测试简介",
+                            tid=36,
+                            tags=["测试"],
+                            cover_path="/tmp/cover.jpg",
+                            delay_time=1782000000,
+                        )
 
         self.assertFalse(meta_cls.called)
         meta = sdk_uploader_cls.call_args.kwargs["meta"]
         self.assertEqual(meta["dtime"], 1782000000)
         self.assertEqual(meta["creation_statement"], {"id": 4})
+
+    async def test_upload_single_rejects_schedule_without_upload_budget(self):
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
+            with patch("services.bilibili.uploader.BoundedVideoUploader") as sdk_uploader_cls:
+                sdk_uploader = sdk_uploader_cls.return_value
+                sdk_uploader.start = AsyncMock(return_value={"aid": 4, "bvid": "BVlate"})
+                sdk_uploader.on.return_value = lambda handler: handler
+                uploader = BiliUploader(sessdata="sess", bili_jct="csrf")
+
+                with patch("time.time", return_value=1000):
+                    with self.assertRaisesRegex(RuntimeError, "至少保留 15 分钟"):
+                        await uploader.upload_single(
+                            video_path=video.name,
+                            title="余量不足",
+                            cover_path="/tmp/cover.jpg",
+                            delay_time=1600,
+                        )
+
+    async def test_upload_single_revalidates_margin_before_retry_attempt(self):
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
+            with patch("services.bilibili.uploader.BoundedVideoUploader") as sdk_uploader_cls:
+                sdk_uploader = sdk_uploader_cls.return_value
+                sdk_uploader.start = AsyncMock(side_effect=[
+                    RuntimeError("temporary network failure"),
+                    {"aid": 4, "bvid": "BVlate-retry"},
+                ])
+                sdk_uploader.on.return_value = lambda handler: handler
+                uploader = BiliUploader(sessdata="sess", bili_jct="csrf")
+
+                with patch("services.bilibili.uploader.time") as clock, patch(
+                    "services.bilibili.uploader.asyncio.sleep",
+                    new=AsyncMock(),
+                ):
+                    clock.time.side_effect = [1000, 1000, 1001]
+                    with self.assertRaisesRegex(RuntimeError, "至少保留 15 分钟"):
+                        await uploader.upload_single(
+                            video_path=video.name,
+                            title="重试前余量不足",
+                            cover_path="/tmp/cover.jpg",
+                            delay_time=1900,
+                        )
+
+        sdk_uploader.start.assert_awaited_once()
+
+    async def test_bounded_uploader_rechecks_five_minute_margin_before_submit(self):
+        uploader = object.__new__(BoundedVideoUploader)
+        uploader.meta = {"dtime": 1300}
+
+        with patch("time.time", return_value=1001), patch(
+            "services.bilibili.uploader.VideoUploader._submit",
+            new=AsyncMock(return_value={"aid": 4, "bvid": "BVlate"}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "发布时间已不足 5 分钟"):
+                await uploader._submit([], "cover-url")
 
     async def test_upload_single_builds_season_meta_dict(self):
         with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
@@ -171,16 +226,17 @@ class BiliUploaderTest(unittest.IsolatedAsyncioTestCase):
                             sdk_uploader.on.return_value = lambda handler: handler
 
                             uploader = BiliUploader(sessdata="sess", bili_jct="csrf")
-                            result = await uploader.upload_single(
-                                video_path=video.name,
-                                title="合集测试",
-                                desc="测试简介",
-                                tid=36,
-                                tags=["测试"],
-                                cover_path="/tmp/cover.jpg",
-                                season_id=12345,
-                                delay_time=1782000000,
-                            )
+                            with patch("time.time", return_value=1_782_000_000 - 3600):
+                                result = await uploader.upload_single(
+                                    video_path=video.name,
+                                    title="合集测试",
+                                    desc="测试简介",
+                                    tid=36,
+                                    tags=["测试"],
+                                    cover_path="/tmp/cover.jpg",
+                                    season_id=12345,
+                                    delay_time=1782000000,
+                                )
 
         self.assertFalse(meta_cls.called)
         meta = sdk_uploader_cls.call_args.kwargs["meta"]

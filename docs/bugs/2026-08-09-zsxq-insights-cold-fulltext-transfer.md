@@ -79,3 +79,24 @@
 因此本记录继续 `RUNTIME_REPLACED/OBSERVING`，网络复发键保持 OPEN；不得通过删正文、扩大超时或
 新增索引掩盖。下一轮需用不同真实缓存键做至少 5 次冷/热配对，冷 P95 小于 5 秒且 executor/应用
 差值不再出现十秒级长尾后，才可继续推进关闭。
+
+## 2026-10-26 固定窗复核
+
+固定窗只有一次巡检自测 overview：HTTP 3.612 秒，匹配 Insights 指纹 `674016d39deab3f5` 1.960 秒；同形生产
+`EXPLAIN (ANALYZE, BUFFERS)` executor 为 40.551ms，应用约为 executor 的 48 倍。窗后暖态真实请求为
+200/0.150 秒。查询仍保持轻摘要加当前页详情，没有恢复把全集正文搬回应用，也没有锁或顺序扫描证据。
+
+状态保持 **RUNTIME_REPLACED / OPEN / REPEATED / OBSERVING**。固定窗样本是自测而非自然页面流量，暖态快速
+不能替代冷态分段；下一轮仍须采 pool acquire、结果 bytes、driver fetch/deserialize 与同秒 PgBouncer/route，
+不得以索引、删正文或延长超时掩盖 executor 外尾部。
+
+## 2026-10-27 冷态尾延迟继续复发
+
+固定窗 Insights 指纹 `674016d39deab3f5` 1 次/2.070 秒；同形生产 `EXPLAIN (ANALYZE, BUFFERS)` executor
+41.623ms，应用约为 executor 的 50 倍。窗后真实 overview 冷请求 200/4.228 秒，其中相同 SQL 1.962 秒；
+topics/local、tabs、sync runs 分别 200/0.663、0.221、0.326 秒。查询仍是轻摘要与当前页详情，没有恢复全量正文
+跨网络，也没有锁或缺索引证据。
+
+状态保持 **RUNTIME_REPLACED / OPEN / REPEATED / OBSERVING**。下一轮继续要求多个自然冷/暖 cache key 的
+pool acquire、结果 bytes、driver fetch/deserialize 与同秒 PgBouncer/socket/route；不得删原始正文/JSON、盲目
+加索引或放宽 timeout。

@@ -165,6 +165,16 @@ sync 处理 49 个来源、新增 21、更新 58、`errors=2`、耗时 39.20 秒
 `docs/sql/disable_unavailable_youtube_channels_20260920.sql`，随后以 channel 49/49、video errors=0 连续
 两个自然周期验收。
 
+## 2026-11-01 第二十九个巡检窗口复核
+
+人工停用脚本仍未执行。00:03 自然 channel sync 仍为 51 个来源、49 成功/2 失败，失败固定为
+`id=21 Smartpet Video AI` 与 `id=56 数字指南针`；01:00 video sync 处理 49 个来源、新增 25、更新 54、
+`errors=2`，失败仍精确为 21/56，耗时 67.32 秒且没有匹配慢 SQL或 Session 长持有。
+
+状态继续 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。只允许人工在 DBeaver 复核后执行
+`docs/sql/disable_unavailable_youtube_channels_20260920.sql`；验收仍是连续两个自然周期 channel 49/49、
+video errors=0，不能把第 29 个同形窗口视为瞬时网络问题。
+
 ## 2026-10-18 第十五个巡检窗口复核
 
 人工停用脚本仍未执行。00:03 自然 channel sync 为 51 个来源、49 成功/2 失败，耗时约 20.77 秒；
@@ -184,3 +194,141 @@ sync 处理 49 个来源、新增 21、更新 58、`errors=2`、耗时 39.20 秒
 状态保持 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。责任动作仍是在 DBeaver 审核并执行
 `docs/sql/disable_unavailable_youtube_channels_20260920.sql`，随后以 channel 49/49、video errors=0 的连续
 两个自然周期验收。
+
+## 2026-10-20 第十七个巡检窗口复核
+
+人工停用脚本仍未执行。00:03 自然 channel sync 处理 51 个来源，仅 43 成功、8 失败，失败率 15.69%、
+耗时 68.73 秒；固定 `id=21/56` 仍在，并新增 64/31/34/24/2/20 六个瞬时失败。01:00 video sync 仍处理
+49 个来源、`errors=2`、耗时 36.54 秒，失败精确为 21/56。固定永久失败与瞬时外部链路失败必须分开统计，
+不得把新增六源一并停用。
+
+状态继续 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**，且 channel 链路较上一窗 49/51 明显恶化。
+责任动作仍是人工在 DBeaver 只读复核后执行
+`docs/sql/disable_unavailable_youtube_channels_20260920.sql`；随后要求连续两个自然周期 channel 49/49、
+video errors=0。六个瞬时源若再次出现，应单独采 Google API 错误类型、目标与网络现场。
+
+## 2026-10-21 第十八个巡检窗口复核
+
+人工停用脚本仍未执行。00:03 自然 channel sync 为 51 个来源、45 成功/6 失败、业务耗时 43.28 秒；固定
+`id=21 Smartpet Video AI` 与 `id=56 数字指南针` 仍在，另有 49/48/55/57 四个瞬时失败。01:00 video
+sync 处理 49 个来源、新增 31、更新 56、`errors=2`，失败仍精确为 21/56。相较上一窗 channel 43/51
+有所恢复，但永久两源第 18 窗复发，不能标改善闭环。
+
+状态继续 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。责任动作仍是在 DBeaver 只读复核后仅对 21/56
+执行受保护脚本；随后要求连续两个自然周期 channel 49/49、video errors=0。四个瞬时源不得扩大停用范围。
+
+## 2026-10-22 第十九个巡检窗口复核
+
+人工停用脚本仍未执行。00:03 自然 channel sync 为 51 个来源、49 成功/2 失败、耗时 14.84 秒；01:00
+video sync 处理 49 个来源、新增 26、更新 65、`errors=2`、耗时 40.23 秒。失败仍精确为
+`id=21 Smartpet Video AI` 与 `id=56 数字指南针`，本窗没有上一窗额外四个瞬时失败，链路有所改善，但
+永久两源第 19 窗复发。
+
+状态继续 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。仍只允许人工在 DBeaver 复核后对 21/56 执行
+`docs/sql/disable_unavailable_youtube_channels_20260920.sql`；随后要求连续两个自然周期 channel 49/49、
+video errors=0。
+
+## 2026-10-23 第二十个巡检窗口复核
+
+人工停用脚本仍未执行。00:03 自然 channel sync 为 51 个来源、49 成功/2 失败，耗时约 18.23 秒；01:00
+video sync 处理 49 个来源、`errors=2`、耗时约 43.02 秒。失败继续精确为
+`id=21 Smartpet Video AI` 与 `id=56 数字指南针`，且没有匹配慢 SQL、长 Session 或失败重试风暴。
+
+状态继续 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。只允许人工在 DBeaver 复核后对 21/56 执行
+`docs/sql/disable_unavailable_youtube_channels_20260920.sql`；随后要求连续两个自然周期 channel 49/49、
+video errors=0。
+
+## 2026-10-24 第二十一个巡检窗口复核
+
+人工停用脚本仍未执行。自然 channel sync 处理 51 个来源、49 成功/2 失败，业务耗时 22.51 秒；自然
+video sync 处理 49 个可枚举来源、新增 24、更新 65、`errors=2`，耗时 49.08 秒。失败继续精确为
+`id=21 Smartpet Video AI` 与 `id=56 数字指南针`，没有匹配慢 SQL、长 Session 或任务重试风暴。
+
+状态继续 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。只允许人工在 DBeaver 复核后对 21/56 执行
+`docs/sql/disable_unavailable_youtube_channels_20260920.sql`；验收仍是连续两个自然周期 channel 49/49、
+video errors=0，不能把第 21 次同形失败当作瞬时网络问题。
+
+## 2026-10-25 第二十二个巡检窗口复核
+
+人工停用脚本仍未执行。自然 channel sync 处理 51 个来源、49 成功/2 失败，耗时 21.940 秒；自然 video sync
+处理 49 个来源、新增 31、更新 54、`errors=2`。失败继续精确为 `id=21 Smartpet Video AI` 与
+`id=56 数字指南针`，没有匹配慢 SQL、长 Session 或重试风暴。
+
+状态继续 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。只允许人工在 DBeaver 复核后对 21/56 执行
+`docs/sql/disable_unavailable_youtube_channels_20260920.sql`；验收仍是连续两个自然周期 channel 49/49、
+video errors=0，不能把第 22 次同形失败归入瞬时网络问题。
+
+## 2026-10-26 第二十三个巡检窗口复核
+
+人工停用脚本仍未执行。自然 channel sync 处理 51 个来源、49 成功/2 失败，业务耗时 21.410 秒；自然 video sync
+处理 49 个来源、新增 14、更新 70、`errors=2`，约 52.460 秒完成。失败继续精确为
+`id=21 Smartpet Video AI` 与 `id=56 数字指南针`，没有匹配慢 SQL、长 Session 或任务重试风暴。
+
+状态继续 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。只允许人工在 DBeaver 复核后对 21/56 执行
+`docs/sql/disable_unavailable_youtube_channels_20260920.sql`；验收仍是连续两个自然周期 channel 49/49、
+video errors=0，不能把第 23 次同形失败归入瞬时网络问题。
+
+## 2026-10-27 第二十四个巡检窗口复核
+
+人工停用脚本仍未执行。自然 channel sync 处理 51 个来源、49 成功/2 失败，业务耗时 24.32 秒；自然 video
+sync 处理 49 个可枚举来源、新增 28、更新 57、`errors=2`。失败继续精确为 `id=21 Smartpet Video AI`
+与 `id=56 数字指南针`，没有匹配慢 SQL、长 Session 或任务重试风暴。
+
+状态继续 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。只允许人工在 DBeaver 复核后对 21/56 执行
+`docs/sql/disable_unavailable_youtube_channels_20260920.sql`；验收仍是连续两个自然周期 channel 49/49、
+video errors=0，不能把第 24 次同形失败归入瞬时网络问题。
+
+## 2026-10-28 第二十五个巡检窗口复核
+
+本窗不是固定两源的普通复发：00:03 channel sync 由 49/51 恶化为 **0/51**，业务耗时 12.83 秒；01:00
+video sync 同样 **0/51**，耗时 21.92 秒。全部来源分别只留下“无法获取频道统计数据”和“无法获取频道上传
+播放列表”，旧实现没有保留 HTTP status/provider reason，因此不能把这次全量失败归因到 21/56，也不能据此
+扩大停用范围。08:33 当前凭据只读探测恢复成功，说明不是持续性不可用；历史精确上游原因保持 UNKNOWN。
+
+已新增安全错误分类与密钥脱敏合同并标准运行替换，下一自然周期可直接观测 endpoint/status/reason 或网络异常
+类型。固定 21/56 的人工停用动作仍不变；全量瞬时故障另保持 **OPEN / RUNTIME_REPLACED / OBSERVING**，要求
+00:03/01:00 自然周期和随后后窗验证，不能以当前探测成功写成已解决。
+
+## 2026-10-29 第二十六个巡检窗口复核
+
+人工停用 21/56 的脚本仍未执行。本窗 00:03 channel 再次 0/51，业务耗时 57.16 秒；01:00 video 同样
+0/51，业务耗时 96.63 秒。上一轮安全错误合同已在两条自然任务中运行：全部样本精确为
+`API network failure endpoint=channels type=SSLError`，且未输出 API key。由此可以接受“诊断合同已替换”，
+但业务根因已明确转为全来源的间歇 TLS/代理/网络路径，而不是 21/56 的永久失效。
+
+窗后经本机代理和绕过代理的 TLS 请求均得到预期无 key 403，项目真实凭据 `test_api_connection()` 也成功；
+这只证明当前恢复，不能在没有故障同秒 A/B 的情况下判断本地代理、Google edge、证书路径或调度时网络谁是根因。
+状态保持 **OPEN / REPEATED / OBSERVING / WAITING_NETWORK_TRACE**。下一次 SSL 复发必须同秒保留 proxy/direct
+TLS 阶段、运行体 PID 与代理环境；不得用无界 retry 掩盖。21/56 的人工脚本范围不扩大。
+
+## 2026-10-30 第二十七个巡检窗口复核
+
+上一窗全来源 `channels/SSLError` 本窗未复发：00:03 channel 处理 51 个来源、49 成功/2 失败，业务耗时
+15.72 秒；01:00 video 处理 49 个可枚举来源、新增 22、更新 56、`errors=2`。失败又精确回到
+`id=21 Smartpet Video AI` 与 `id=56 数字指南针` 的永久不可枚举形态；没有匹配慢 SQL、长 Session 或
+失败重试风暴。
+
+这只构成全来源 TLS 故障的一个恢复窗口，不能标为根治；固定 21/56 则是第 27 窗复发。状态分别保持
+**OPEN / OBSERVING / WAITING_NETWORK_TRACE** 与 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。人工动作仍仅限
+DBeaver 复核并执行 `docs/sql/disable_unavailable_youtube_channels_20260920.sql`；随后需连续两个自然周期
+channel 49/49、video errors=0，同时继续观察全来源 SSL 不复发。
+
+## 2026-10-31 第二十八个巡检窗口复核
+
+00:03 channel 仍为 49/51，01:00 video 处理 49 个可枚举来源、新增 26、更新 56、`errors=2`；失败继续
+精确为 `id=21 Smartpet Video AI` 与 `id=56 数字指南针`。上一窗全来源 SSL 故障未复发，但固定两源已连续
+第 28 个窗口复发，且无匹配慢 SQL、长 Session 或任务重试风暴。
+
+状态保持 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。人工动作仍仅限 DBeaver 复核并执行
+`docs/sql/disable_unavailable_youtube_channels_20260920.sql`；验收为连续两个自然周期 channel 49/49、video
+errors=0。未执行脚本前不能把稳定的 2 个失败当成可接受基线。
+
+## 2026-11-02 第二十九个巡检窗口复核
+
+00:03 channel 仍为 49/51、业务耗时 10.75 秒；01:00 video 处理 49 个可枚举来源、新增 20、更新 58、
+`errors=2`、耗时 32.55 秒。失败继续精确为 `id=21 Smartpet Video AI` 与 `id=56 数字指南针`，没有匹配
+慢 SQL、长 Session 或任务重试风暴。
+
+状态保持 **OPEN / REPEATED / WAITING_MANUAL_CONFIG**。人工动作仍仅限 DBeaver 逐条复核后执行
+`docs/sql/disable_unavailable_youtube_channels_20260920.sql`；验收仍为连续两个自然周期 channel 49/49、
+video errors=0。本轮不无人值守修改生产数据。

@@ -339,6 +339,11 @@ PUBLISHER_REPAIR_SCAN_COLUMNS = (
     PublicationTask.feature,
     PublicationTask.parent_task_id,
     PublicationTask.source_task_id,
+    PublicationTask.waiting_child_label,
+    PublicationTask.waiting_child_id,
+    PublicationTask.waiting_child_status,
+    PublicationTask.waiting_child_step,
+    PublicationTask.waiting_child_updated_at,
     PublicationTask.created_at,
     PublicationTask.updated_at,
     PublicationTask.completed_at,
@@ -401,10 +406,34 @@ def _detached_repair_task_snapshot(task):
         feature=task.feature,
         parent_task_id=task.parent_task_id,
         source_task_id=task.source_task_id,
+        waiting_child_label=task.waiting_child_label,
+        waiting_child_id=task.waiting_child_id,
+        waiting_child_status=task.waiting_child_status,
+        waiting_child_step=task.waiting_child_step,
+        waiting_child_updated_at=task.waiting_child_updated_at,
         created_at=task.created_at,
         updated_at=task.updated_at,
         completed_at=task.completed_at,
     )
+
+
+def _mp3_waiting_child_is_active(task) -> bool:
+    if str(getattr(task, "feature", "") or "") != "mp3_video_workflow":
+        return False
+    if str(getattr(task, "current_step", "") or "") not in {
+        "landscape_video_waiting",
+        "vertical_video_waiting",
+    }:
+        return False
+    child_id = str(getattr(task, "waiting_child_id", "") or "").strip()
+    if not child_id:
+        return False
+    child = _load_repair_task(
+        child_id,
+        PublicationTask.id,
+        PublicationTask.status,
+    )
+    return bool(child and str(child.status or "").lower() in ACTIVE_TASK_STATUSES)
 
 
 def _publisher_required_material_paths(params: Dict[str, Any]) -> Tuple[str, ...]:
@@ -1756,6 +1785,17 @@ def maybe_repair_stale_business_processing_task(
     if step not in requeueable_steps and not step.startswith(requeueable_prefixes):
         return snapshot, False, "step_not_requeueable"
 
+    if _mp3_waiting_child_is_active(snapshot):
+        _release_repair_db_session()
+        active_logger.info(
+            "Keep MP3 parent waiting because its publisher child is active: parent=%s child=%s step=%s child_status=%s",
+            snapshot.id,
+            snapshot.waiting_child_id,
+            snapshot.current_step,
+            snapshot.waiting_child_status,
+        )
+        return snapshot, False, "waiting_child_active"
+
     result = dict(snapshot.result or {})
     repair_state = dict(result.get(PROCESSING_REPAIR_RESULT_KEY) or {})
     requeue_limit = _int_env(
@@ -1887,6 +1927,7 @@ def maybe_repair_stale_business_processing_task(
         "feature": feature,
         "reason": "processing_not_visible_in_worker",
         "previous_message_visible_in_queue": bool(queue_visible),
+        "actor": _repair_actor_identity(),
         "admission": submit_result.get("admission"),
         "deferred": bool(submit_result.get("deferred")),
         "countdown": submit_result.get("countdown"),

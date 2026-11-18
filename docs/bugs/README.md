@@ -6,6 +6,117 @@
 
 复发根因登记表：[`recurrence-registry.json`](recurrence-registry.json)。正式回顾归档在 [`reviews/`](reviews/)。
 
+2026-11-12 修正：[MP3 新任务默认跳过封皮确认](2026-11-12-mp3-workflow-default-bypassed-cover-review.md)。上一轮误将完整视频设为默认，导致 `c50f86fc...` 自动合成；现已恢复关键帧预览默认、明示手动确认步骤，线上 HTML 和定向测试通过，待新任务后窗验收。
+
+2026-11-11 MP3 现场跟进：[跨运行体素材路径误判与视频续跑](2026-10-27-mp3-waiting-parent-processing-orphan-requeued.md)。两条任务已产出横竖屏 H.264/AAC 成片并通过 ffprobe；同一缺文件指纹再次出现，旧运行体隔离仍 OPEN。
+
+2026-11-02 每日复核：[数据库性能巡检](reviews/2026-11-02-db-performance-audit.md)。
+慢 SQL 恶化为 22 条/59.248 秒，audio catalog 四次累计 38.203 秒且 executor 仍仅毫秒级，继续定位为
+Tailscale/driver 结果接收而非索引；旧 Mac 6 个生产会话和 3 条 actor-missing 缺文件失败复发。B站三次 21173
+已按真实 510.7 秒上传 P95 落地 15 分钟准入、worker 再检和提交前 5 分钟硬门槛，并标准运行替换；尚缺自然投稿
+与后续完整窗，只记 OBSERVING。ZSXQ 1059、YouTube 21/56 仍 OPEN，本轮无 DDL。
+
+2026-11-01 每日复核：[数据库性能巡检](reviews/2026-11-01-db-performance-audit.md)。
+应用慢 SQL 10 条/13.170 秒，较上窗下降但自然 HTTP 仅 16 条且无 publication task，不能据此宣称全链路恢复；
+真实 Watchdog SQL executor 0.014–0.243ms、Insights 32.663ms，应用却为 1.05–2.21 秒，Tailscale/driver 接收尾部
+继续 OPEN。B站显式代理修复后 23/23 自然周期、161/161 请求成功，`BILIBILI-DNS-TUN` 根因达到
+CLOSED/RUNTIME_ACCEPTED；YouTube 21/56 第 29 窗复发。TTS 风暴未复发但缺自然任务暴露，仍 OBSERVING。
+
+2026-10-31 新增：[豆包 TTS 历史轮询触发音频请求风暴](2026-10-31-doubao-tts-history-audio-polling-fanout.md)。
+固定窗 history 52 次触发 25 条同形慢 SQL，并扇出 890 次音频请求、862 次 404；根因为终态页无条件 5 秒
+轮询、宽 JSON 传输、媒体预加载及失效资源投影。已用活动/可见/single-flight 轮询、`preload=none`、资源存在性
+投影和提前释放 Session 修复并运行替换，保持 OBSERVING 等待完整后窗。
+
+2026-10-31 每日复核：[数据库性能巡检](reviews/2026-10-31-db-performance-audit.md)。
+慢 SQL 恶化到 39 条/71.738 秒，TTS 轮询为新增首要指纹；B站情报末 30/30 请求因 TUN DNS 失败，已显式接入
+进程代理并运行替换。audio catalog 网络接收尾部、YouTube 21/56、ZSXQ 1059 与分布式隔离仍未闭环，无 DDL。
+
+2026-10-30 新增：[ZSXQ 发布上传 1059 反复触发有界重试](2026-10-30-zsxq-publish-upload-1059-recurrence.md)。
+单个发布任务最终完成，但仍发生 3 次 upload failure、1 次 publish retry；较上一窗 10/6/1 改善不等于根治，
+有界重试只作容错，保持 OPEN/REPEATED，待 provider 现场分类与后续完整零失败窗口。
+
+2026-10-30 每日复核：[数据库性能巡检](reviews/2026-10-30-db-performance-audit.md)。
+应用慢 SQL 改善为 15 条/27.651 秒、P95 2.018 秒，但 audio catalog 仍单次 9.288 秒；同形 PgBouncer/
+直连 execute/fetch 都约 9.1 秒而 executor 仅 5–6ms，根因收窄到公共 Tailscale/驱动接收链路，不支持 DDL。
+YouTube 固定 21/56 第 27 窗复发，远端 MacBook 生产会话仍有 6 个；整体保持 OPEN/REPEATED。
+
+2026-10-29 每日复核：[数据库性能巡检](reviews/2026-10-29-db-performance-audit.md)。
+应用慢 SQL 29 条/67.720 秒，P95/max 恶化到 11.133/12.993 秒；audio catalog 3 次/33.761 秒，同形
+executor 6.527ms，而同连接 execute/fetch 约 9 秒，根因继续位于 driver/PgBouncer/私网结果接收。YouTube
+两条自然任务均 0/51，首次精确定位为 `channels/SSLError`；远端 MacBook 会话增至 7 个。无业务代码或 DDL，
+整体保持 OPEN/REPEATED。
+
+2026-10-28 新增：[YouTube 全量同步失败被泛化且异常文本可能泄露 API key](2026-10-28-youtube-api-error-reason-redaction.md)。
+两条自然任务同时从局部失败恶化为 0/51，旧实现吞掉 HTTP/provider 原因；已用安全错误分类、线程隔离传播和
+密钥脱敏合同修复并标准运行替换，当前只读探测恢复，仍待 00:03/01:00 自然周期和后窗验收。
+
+2026-10-28 新增：[durable root 快照把历史去重引用误判为旧 actor](2026-10-28-db-runtime-snapshot-historical-root-false-positive.md)。
+历史 dedupe 审计路径与当前实际路径共存时，旧口径同时累计 old/current；已改为互斥的 old/current/mixed/
+unclassified，生产只读重放确认旧 actor 误报归零且原始 JSON 完整保留。
+
+2026-10-28 每日复核：[数据库性能巡检](reviews/2026-10-28-db-performance-audit.md)。
+应用慢 SQL 18 条/58.064 秒，数量略降但累计 +32.1%；audio catalog 4 次/37.591 秒而 executor 仅
+5.864ms，继续排除索引。YouTube channel/video 同窗各 0/51 是新增 P0 外部链路故障；诊断与错误分类修复已
+运行替换。远端 MacBook 生产会话仍在，整体根因不能标闭环。
+
+2026-10-27 新增：[MP3 等待子任务被 processing orphan 修复器误重投](2026-10-27-mp3-waiting-parent-processing-orphan-requeued.md)。
+三个父任务在真实 publisher 子任务仍 active 时被 Watchdog 当作 orphan 重投，随后由不同文件系统视角误报
+“音频文件不存在”。已增加父子生命周期联合门禁与 repair actor 审计并安全运行替换；三条任务均完成横竖版视频，
+API 与页面 3/3 成功。状态 RUNTIME_REPLACED/OBSERVING，仍待后窗复核和分布式旧运行体隔离。
+
+2026-10-27 每日复核：[数据库性能巡检](reviews/2026-10-27-db-performance-audit.md)。
+慢 SQL 恶化到 19 条/43.958 秒，P95/max 8.692/11.341 秒；audio catalog 两次自然冷建累计 20.033 秒，
+同形生产 executor 仅 2.869ms，继续定位为 driver/PgBouncer/私网 fetch 而非索引。28/28 目标 durable task
+均 current-root、Publisher 16/16 成功，但在线 MacBook Pro 仍有 6 个生产 DB 会话，分布式隔离保持 OPEN。
+B站 upload-only 8/8 成功但一条上传有 32 个分片首试失败；YouTube 21/56 第 24 窗复发。无业务代码、DDL 或重启。
+
+2026-10-26 每日复核：[数据库性能巡检](reviews/2026-10-26-db-performance-audit.md)。
+慢 SQL 14 条/17.700 秒，数量持平、累计 -9.9%，但固定窗 HTTP 仅 15 个且主要为巡检自测。12/12 个目标
+durable task 全部 old-root；Publisher 9 条中 3 失败，当前 Watchdog 重投旧根 MP3 后旧 actor 又完成原任务，
+直接证明共享 DB/Redis/broker 竞态，根因继续 OPEN/REPEATED。已 TDD 修正 processing orphan actor 诊断口径并
+生产只读重放，未改业务运行代码、无 DDL/重启。YouTube 21/56 第 23 窗复发；B站情报 24/24 周期全绿。
+
+2026-10-25 每日复核：[数据库性能巡检](reviews/2026-10-25-db-performance-audit.md)。
+慢 SQL 14 条/19.638 秒，较上窗数量 -50.0%、累计 -71.3%，但 HTTP 样本由 887 降至 23，audio-assets、
+Publisher 和完整 ZSXQ 自然链路未捕获，不能判系统性根治。唯一目标 durable task 为 old-root MP3 workflow，
+1/1 完成且旧 Mac 在任务后仍在线约 4 小时 38 分，分布式旧运行体再次自然复发。YouTube 21/56 第 22 窗失败；
+B站情报 23/23 周期、161/161 请求成功。无生产代码、DDL 或重启，根因均保持 OPEN/OBSERVING。
+
+2026-10-24 每日复核：[数据库性能巡检](reviews/2026-10-24-db-performance-audit.md)。
+慢 SQL 28 条/68.434 秒，较上窗数量 +7.7%、累计 +34.1%；audio catalog 4 条/35.271 秒，次数与累计
++100%/+111.8%，executor 仍为毫秒级，故无索引 DDL。Publisher 20 条中 4 失败，日志外 actor 证据由
+12/30 改善为 2/20 但仍复发。已 TDD 修复[B站失效充电档位](2026-10-23-bilibili-stale-charging-tier.md)：
+在 Session 释放后、媒体上传前权威复核，失效项进入 `waiting_user_reselect`；另新增
+[B站媒体分片上传耗尽有界重试](2026-10-24-bilibili-chunk-upload-retry-exhausted.md)。YouTube 21/56 第 21 窗
+复发；根因项均保持 OPEN/OBSERVING，待安全运行替换、自然任务及后窗验收。
+
+2026-10-23 每日复核：[数据库性能巡检](reviews/2026-10-23-db-performance-audit.md)。
+慢 SQL 26 条/51.023 秒、数量和累计较上窗 +62.5%/+23.2%；audio catalog 2 条/16.652 秒，次数下降但
+P95/max 升至 8.271/8.380 秒，executor 毫秒级，仍不支持索引。Publisher 30 条中 14 失败，日志外 actor
+证据从 1/9 恶化为 12/30；旧机当前离线不能抵消固定窗复发。新增
+[B站投稿复用已失效充电档位](2026-10-23-bilibili-stale-charging-tier.md)：两条 21523 的保存档位 ID 已不在
+账号当前权威集合，需用户重选和执行前复核合同。YouTube 21/56 第 20 窗复发；无 DDL、无生产代码或重启。
+
+2026-10-22 每日复核：[数据库性能巡检](reviews/2026-10-22-db-performance-audit.md)。
+慢 SQL 16 条/41.431 秒，数量和累计较上窗 +23.1%/+9.9%；audio catalog 3 条/24.109 秒、P95/max
+8.006/8.269 秒，而同形 executor 仅 5.182ms，继续排除盲目索引。固定窗直接捕获旧 Mac watchdog 从
+`100.117.177.98` 连接生产库，Publisher 仍有 1/9 被日志外 actor 误关且素材在当前节点存在；虽较上窗
+17/36 改善，根因继续 OPEN/REPEATED。YouTube 21/56 第 19 窗复发；无 DDL、无代码改动和重启。
+
+2026-10-21 每日复核：[数据库性能巡检](reviews/2026-10-21-db-performance-audit.md)。
+慢 SQL 改善为 13 条/37.683 秒，但 audio catalog P95/max 仍为 8.181 秒、executor 仅 5.182ms，网络/
+driver 尾部未闭环。Publisher 20/36 失败，其中 10 条素材门禁和 7 条补传缺视频均缺 actor，文件在当前节点
+17/17 存在；修正口径后 `foreign_actor_evidence=17`，较上窗 8/24 恶化。已 TDD 补齐 upload-only 终态 actor
+审计并安全重启，1,740 项 unit、health、17/17 worker、Watchdog、6/6 scheduler 与重点只读 E2E 通过；
+物理隔离根因仍 OPEN/REPEATED。YouTube 21/56 第 18 窗复发，B站 21173 本窗两次复发，无 DDL。
+
+2026-10-20 每日复核：[数据库性能巡检](reviews/2026-10-20-db-performance-audit.md)。
+慢 SQL 恶化为 30 条/62.847 秒、P95/max 8.421/9.808 秒，另有 1 个 PgBouncer 15 秒 query-wait；
+audio catalog executor 仅 5.182ms，排除索引，本轮无 DDL。Publisher 8/24 被日志外 actor 误关：8/8 actor
+缺失且所列素材在当前节点存在，新增诊断门禁生产重放 `foreign_actor_evidence=8`，分布式隔离根因继续
+OPEN/REPEATED。自然 HTTP 782 个；B站 168/168 成功且尾延迟改善；YouTube channel 恶化至 43/51，固定
+21/56 第 17 窗复发。
+
 2026-10-19 每日复核：[数据库性能巡检](reviews/2026-10-19-db-performance-audit.md)。
 慢 SQL 恶化为 16 条/23.116 秒、P95/max 2.170/2.292 秒，但代表 executor 仅 0.025–35.100ms，
 SQL/PgBouncer 错误、锁和长 Session 均为 0，无 DDL。旧 Mac 再次完整执行 1 个 Web PDF 清洗和 1 个 ZSXQ
@@ -137,6 +248,9 @@ executor、锁和 Session 证据继续排除缺索引，既有网络簇保持 OP
 
 | 日期 | Bug | 模块 | 状态 |
 | --- | --- | --- | --- |
+| 2026-10-24 | [每日数据库性能与错误巡检](reviews/2026-10-24-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 外部调度 / 分布式运行拓扑 | 慢 SQL 28 条/68.434 秒；audio catalog 与 foreign actor 复发；无 DDL |
+| 2026-10-24 | [B站媒体分片上传耗尽有界重试](2026-10-24-bilibili-chunk-upload-retry-exhausted.md) | Publisher upload-only / B站 SDK / 网络分片 | OPEN/REPEATED；4 次有界重试生效，幂等恢复缺失 |
+| 2026-10-20 | [每日数据库性能与错误巡检](reviews/2026-10-20-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 外部调度 / 分布式运行拓扑 | 慢 SQL 30 条/62.847 秒；1 个 query-wait；Publisher 8/24 foreign actor 误关；无 DDL |
 | 2026-10-17 | [每日数据库性能与错误巡检](reviews/2026-10-17-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 外部调度 / 分布式运行拓扑 | 慢 SQL 16 条/39.521 秒；统计专项关闭；Publisher 3/19 假失败；无 DDL |
 | 2026-10-17 | [日巡检数据库快照把本地时间误作 UTC](2026-10-17-db-runtime-snapshot-timezone-window.md) | 日巡检器 / UTC-naive 时间窗 / 验收完整性 | P0 CODE_VERIFIED/PRODUCTION_REPLAY_ACCEPTED；显式时区转换并打印 DB 边界 |
 | 2026-10-16 | [每日数据库性能与错误巡检](reviews/2026-10-16-db-performance-audit.md) | 全站 DB / PgBouncer / 页面 API / Celery / 外部调度 / 分布式运行拓扑 | 慢 SQL 48 条/214.443 秒；统计 6 次 query timeout；轮询放大已运行替换待后窗；无 DDL |
@@ -326,7 +440,7 @@ executor、锁和 Session 证据继续排除缺索引，既有网络簇保持 OP
 | 2026-07-10 | [研报音频 Gemini 等待续跑读取 detached 子任务 ID](2026-07-10-report-audio-gemini-defer-detached-id.md) | report audio workflow / Gemini wait / SQLAlchemy session | 已修复 |
 | 2026-07-09 | [Report Audio TTS 文案混入分段结构标签](2026-07-09-report-audio-tts-section-outline-labels.md) | report_audio_workflow / report_script_material_workflow / DeepSeek normalizer / 详情页 | 已修复 |
 | 2026-07-09 | [Report Script Material 结构化器超时且无重试](2026-07-09-report-script-material-normalizer-timeout-no-retry.md) | report_script_material_workflow / DeepSeek normalizer / Gemini 子任务续跑 | 已修复 |
-| 2026-07-07 | [MP3 封面后台渲染被外部 CDN 阻塞超时](2026-07-07-mp3-cover-render-cdn-timeout.md) | MP3 视频编排 / 四张封皮背景图生成 / Playwright 后台渲染 | 已修复 |
+| 2026-07-07 | [MP3 封面后台渲染被外部 CDN 阻塞超时](2026-07-07-mp3-cover-render-cdn-timeout.md) | MP3 视频编排 / 四张封皮背景图生成 / Playwright 后台渲染 | RUNTIME_REPLACED/OBSERVING；11-10 真实重做成功，待后续窗口确认未复发 |
 | 2026-07-07 | [MP3 视频合成 1.2 倍速未真正生效](2026-07-07-mp3-video-audio-speed-not-applied.md) | MP3 视频编排 / publisher 音频预处理 / 横竖屏视频合成 | 已修复 |
 | 2026-07-07 | [平台上传 worker 重启导致 B站上传任务假运行](2026-07-07-platform-upload-worker-restart-orphan.md) | MP3 详情页 B站上传 / platform_upload / publisher queue repair | 已修复 |
 | 2026-07-07 | [平台上传误用 render 合成队列](2026-07-07-platform-upload-used-render-queue.md) | B站/YouTube 上传 / publisher / Celery 队列 | 已修复 |

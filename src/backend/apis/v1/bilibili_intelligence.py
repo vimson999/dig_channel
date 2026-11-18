@@ -5,6 +5,7 @@ from sqlalchemy import func, or_
 
 from models import db
 from models.bilibili_intelligence import BilibiliCompetitor, BilibiliCompetitorVideo
+from models.bilibili_upower_archive import BilibiliUpowerArchiveStat, BilibiliUpowerTopicReport, BilibiliUpowerTopic
 from services.bilibili_intelligence_service import (
     BilibiliIntelligenceError,
     CONTENT_TYPES,
@@ -143,6 +144,80 @@ def charging_dashboard(_current_user):
         return jsonify({"success": True, "data": charging_dashboard_payload(days=days)})
     except Exception as exc:
         return _error(f"读取 B站充电看板失败: {exc}", 500)
+
+
+@bp.get("/upower-archive-stats")
+@require_login
+def upower_archive_stats(_current_user):
+    """Read imported own-account UPower archive statistics."""
+    try:
+        page = _bounded_int(request.args.get("page"), 1, 1, 100000)
+        page_size = _bounded_int(request.args.get("page_size"), 20, 1, 100)
+        keyword = str(request.args.get("keyword") or "").strip()[:100]
+        sort_by = str(request.args.get("sort_by") or "pub_time").strip()
+        sort_dir = str(request.args.get("sort_dir") or "desc").strip().lower()
+        sort_columns = {
+            "pub_time": BilibiliUpowerArchiveStat.pub_time,
+            "play_count": BilibiliUpowerArchiveStat.play_count,
+            "income": BilibiliUpowerArchiveStat.income,
+        }
+        if sort_by not in sort_columns or sort_dir not in {"asc", "desc"}:
+            return _error("排序参数无效")
+        query = BilibiliUpowerArchiveStat.query.filter_by(period_days=90)
+        overall_count, overall_income = db.session.query(
+            func.count(BilibiliUpowerArchiveStat.id), func.coalesce(func.sum(BilibiliUpowerArchiveStat.income), 0)
+        ).filter(BilibiliUpowerArchiveStat.period_days == 90).one()
+        topic_id = request.args.get("topic_id", type=int)
+        if request.args.get("topic_id") and not topic_id:
+            return _error("话题参数无效")
+        if topic_id:
+            topic = db.session.get(BilibiliUpowerTopic, topic_id)
+            if not topic:
+                return _error("话题不存在", 404)
+            report = db.session.get(BilibiliUpowerTopicReport, topic.report_id)
+            query = query.filter(BilibiliUpowerArchiveStat.account_uid == report.account_uid,
+                BilibiliUpowerArchiveStat.aid.in_(topic.archive_aids))
+        if keyword:
+            query = query.filter(BilibiliUpowerArchiveStat.title.ilike(f"%{keyword}%"))
+        total = query.count()
+        sort_column = sort_columns[sort_by]
+        order = sort_column.asc().nullslast() if sort_dir == "asc" else sort_column.desc().nullslast()
+        rows = query.order_by(order, BilibiliUpowerArchiveStat.aid.desc()).offset((page - 1) * page_size).limit(page_size).all()
+        items = [{
+            "aid": row.aid, "title": row.title, "cover_url": row.cover_url,
+            "video_url": row.video_url, "pub_time": _row_time(row.pub_time),
+            "duration_seconds": row.duration_seconds, "play_count": row.play_count,
+            "income": row.income, "level_price": row.level_price,
+            "level_name": row.level_name, "badge_text": row.badge_text,
+        } for row in rows]
+        latest = db.session.query(func.max(BilibiliUpowerArchiveStat.fetched_at)).filter_by(period_days=90).scalar()
+        result = {"items": items, "total": total, "page": page, "page_size": page_size,
+                  "sort_by": sort_by, "sort_dir": sort_dir,
+                  "overall_count": overall_count, "overall_income_cents": int(overall_income),
+                  "period_days": 90, "last_fetched_at": _row_time(latest)}
+        release_db_session_quietly()
+        return jsonify({"success": True, "data": result})
+    except Exception as exc:
+        return _error(f"读取 B站稿件充电数据失败: {exc}", 500)
+
+
+@bp.get("/upower-topic-analysis")
+@require_login
+def upower_topic_analysis(_current_user):
+    try:
+        report = BilibiliUpowerTopicReport.query.filter_by(period_days=90).order_by(BilibiliUpowerTopicReport.created_at.desc()).first()
+        if not report:
+            return jsonify({"success": True, "data": None})
+        topics = BilibiliUpowerTopic.query.filter_by(report_id=report.id).all()
+        latest = db.session.query(func.max(BilibiliUpowerArchiveStat.fetched_at)).filter_by(account_uid=report.account_uid, period_days=90).scalar()
+        payload = {"id": report.id, "created_at": _row_time(report.created_at),
+            "source_fetched_at": _row_time(report.source_fetched_at), "summary": report.summary,
+            "is_stale": bool(latest and latest > report.source_fetched_at),
+            "topics": sorted([{"id": t.id, "name": t.name, "metrics": t.metrics, "conclusion": t.conclusion} for t in topics], key=lambda t:t["metrics"]["income_cents"], reverse=True)}
+        release_db_session_quietly()
+        return jsonify({"success": True, "data": payload})
+    except Exception:
+        return _error("读取话题分析失败", 500)
 
 
 @bp.post("/charging-dashboard/sync")

@@ -55,6 +55,8 @@ from services.mp3_video_workflow import (
     _child_inline_wait_seconds,
     _child_id_from_result,
     _cover_browser_launch_kwargs,
+    _closed_door_payload,
+    _render_canvas_artifact,
     _db_retry,
     _direct_ds_numbered_sections,
     _emit,
@@ -117,6 +119,33 @@ class Mp3CoverBrowserLaunchTests(unittest.TestCase):
 
         self.assertFalse(kwargs["headless"])
         self.assertIn("--headless=new", kwargs["args"])
+
+    def test_fallback_uses_fresh_page_after_navigation_failure(self):
+        import io
+
+        image = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(image, format="PNG")
+        data_url = "data:image/png;base64," + base64.b64encode(image.getvalue()).decode()
+        failed_page = MagicMock()
+        failed_page.goto.side_effect = RuntimeError("net::ERR_CONNECTION_REFUSED")
+        working_page = MagicMock()
+        working_page.evaluate.return_value = {"dataUrl": data_url, "width": 2, "height": 2}
+        context = MagicMock()
+        context.new_page.side_effect = [failed_page, working_page]
+
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "services.mp3_video_workflow._frontend_page_urls",
+            return_value=["http://localhost:8888/cover.html", "file:///cover.html"],
+        ):
+            output = Path(directory) / "cover.png"
+            _render_canvas_artifact(
+                context, page_name="cover.html", function_name="renderCover",
+                payload={}, output_path=str(output), expected_size=(2, 2),
+            )
+            with Image.open(output) as result:
+                self.assertEqual(result.size, (2, 2))
+        failed_page.close.assert_called_once()
+        working_page.close.assert_called_once()
 
 
 class Mp3VideoWorkflowServiceTest(unittest.TestCase):
@@ -598,12 +627,12 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
     def test_api_bilibili_upload_parses_schedule_and_season(self):
         with patch("api.mp3_video_workflow.time.time", return_value=1000):
             self.assertEqual(
-                _api_bilibili_upload_delay_time({"schedule_enabled": 1, "delay_time": "1600"}),
-                1600,
+                _api_bilibili_upload_delay_time({"schedule_enabled": 1, "delay_time": "1900"}),
+                1900,
             )
             self.assertIsNone(_api_bilibili_upload_delay_time({"schedule_enabled": 0}))
-            with self.assertRaises(ValueError):
-                _api_bilibili_upload_delay_time({"schedule_enabled": 1, "delay_time": "1200"})
+            with self.assertRaisesRegex(ValueError, "15 分钟后"):
+                _api_bilibili_upload_delay_time({"schedule_enabled": 1, "delay_time": "1600"})
 
         self.assertEqual(_api_bilibili_upload_season_id({"season_id": "12345"}), 12345)
         self.assertIsNone(_api_bilibili_upload_season_id({"season_id": ""}))
@@ -1502,6 +1531,26 @@ class Mp3VideoWorkflowServiceTest(unittest.TestCase):
             "市场恐慌暴跌抓紧布局\n化工供给东升西落\n超跌黄金坑补库拿好",
         )
         self.assertTrue(all(len(line) <= 13 for line in result.split("\n")))
+
+    def test_closed_door_cover_and_background_use_dedicated_subtitle(self):
+        subtitle = "Muse Spark＋思维压缩\n容器化环境＋令牌提权\n国内暂无对标产品"
+        plan = {
+            "xiaojunjun_title": "西部证券电话会议",
+            "xiaojunjun_subtitle": subtitle,
+            "xiaojunjun_video_title": (
+                "内资闭门会 / 西部证券电话会议 / AI agent 专场 / "
+                "Muse 上线两个月：D14 留存 23% 优于 ChatGPT 的 16% / 2026-11-10"
+            ),
+            "date_text": "2026.11.10",
+        }
+
+        cover = _closed_door_payload(plan, include_date=True)
+        background = _closed_door_payload(plan, include_date=False)
+
+        self.assertEqual(cover["subTitle"], subtitle)
+        self.assertEqual(background["subTitle"], subtitle)
+        self.assertEqual(cover["dateText"], "2026.11.10")
+        self.assertEqual(background["dateText"], "")
 
     def test_visual_artifacts_ready_requires_all_non_empty_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:

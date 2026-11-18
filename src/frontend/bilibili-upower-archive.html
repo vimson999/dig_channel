@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>B站稿件充电数据 - Shioa</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+    <link rel="stylesheet" href="css/bilibili-upower-archive.css?v=20261112-topics">
+</head>
+<body>
+    <main class="archive-page" id="bilibili-upower-archive">
+        <section class="archive-hero">
+            <div><span class="archive-eyebrow"><i class="fab fa-bilibili"></i> 创作中心数据</span><h1>B站稿件充电数据</h1><p>最近 90 天的稿件表现与充电收益</p></div>
+            <div class="archive-hero-metrics"><div class="archive-count"><strong id="bilibili-upower-income">—</strong><span>近 90 天累计收益</span></div><div class="archive-count"><strong id="bilibili-upower-total">—</strong><span>条稿件</span></div></div>
+        </section>
+        <section class="archive-panel topic-panel" aria-labelledby="topic-heading">
+            <div class="topic-heading"><div><h2 id="topic-heading">哪些话题带来收益</h2><p>标签越大，收益贡献越高 · 点击话题筛选稿件</p></div><button id="topic-reset" type="button">全部话题</button></div>
+            <p id="topic-status" role="status">正在读取分析快照...</p>
+            <div id="topic-cloud" class="topic-cloud" aria-label="收益话题标签云"></div>
+            <div id="topic-detail" class="topic-detail" aria-live="polite"></div>
+            <details class="topic-method"><summary>选题建议与分析口径</summary><p id="topic-recommendations"></p><p id="topic-method"></p><p id="topic-caveat"></p></details>
+        </section>
+        <section class="archive-panel">
+            <div class="archive-toolbar">
+                <label class="archive-search"><i class="fas fa-magnifying-glass"></i><input id="bilibili-upower-search" type="search" placeholder="搜索稿件标题" aria-label="搜索稿件标题"></label>
+                <div class="archive-controls">
+                    <label>排序依据 <select id="bilibili-upower-sort"><option value="pub_time">发布时间</option><option value="income">收益</option><option value="play_count">播放量</option></select></label>
+                    <button id="bilibili-upower-direction" type="button" aria-label="切换为升序"><i class="fas fa-arrow-down-wide-short"></i><span>降序</span></button>
+                    <label>每页 <select id="bilibili-upower-size"><option value="10">10 条</option><option value="20" selected>20 条</option><option value="50">50 条</option><option value="100">100 条</option></select></label>
+                </div>
+            </div>
+            <div class="archive-meta"><span id="bilibili-upower-status" role="status">正在加载...</span><span>收益按分换算为元</span></div>
+            <div class="archive-head"><span>稿件信息</span><span>所属档位</span><span>播放量</span><span>收益</span></div>
+            <div id="bilibili-upower-rows" class="archive-rows" aria-live="polite"></div>
+            <div class="archive-footer"><span id="bilibili-upower-page-info"></span><div class="archive-pager"><button id="bilibili-upower-prev" type="button">上一页</button><button id="bilibili-upower-next" type="button">下一页</button></div></div>
+        </section>
+    </main>
+    <script src="js/env.js"></script>
+    <script src="js/config.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/shared-navigation.js?v=20261112-upower"></script>
+    <script src="js/bilibili-upower-archive.js?v=20261112-topics"></script>
+</body>
+</html>

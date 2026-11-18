@@ -17,6 +17,17 @@ logger = logging.getLogger(__name__)
 
 VIDEO_MEDIA_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'}
 
+def _video_output_size(export_params, *, is_vertical=False):
+    params = export_params or {}
+    resolution = str(params.get("resolution") or "1080p").lower()
+    if is_vertical:
+        sizes = {"480p": (480, 854), "720p": (720, 1280), "1080p": (1080, 1920)}
+    elif params.get("aspect_ratio") == "4:3":
+        sizes = {"480p": (640, 480), "720p": (960, 720), "1080p": (1440, 1080)}
+    else:
+        sizes = {"480p": (854, 480), "720p": (1280, 720), "1080p": (1920, 1080)}
+    return sizes.get(resolution, sizes["1080p"])
+
 
 def _scheme3_frame_geometry(target_w, target_h):
     """让方案三的 16:9 画面铺满模板内容槽，所有尺寸保持偶数。"""
@@ -425,15 +436,7 @@ class VideoEditorService:
         try:
             # 1. 解析导出参数
             export_params = export_params or {}
-            res_key = export_params.get('resolution', '1080p').lower()
-            
-            # 分辨率配置
-            if is_vertical:
-                res_map = {'480p': (480, 854), '720p': (720, 1280), '1080p': (1080, 1920)}
-            else:
-                res_map = {'480p': (854, 480), '720p': (1280, 720), '1080p': (1920, 1080)}
-            
-            target_w, target_h = res_map.get(res_key, (1080, 1920) if is_vertical else (1920, 1080))
+            target_w, target_h = _video_output_size(export_params, is_vertical=is_vertical)
             target_res = f"{target_w}:{target_h}"
             
             # 码率配置
@@ -529,7 +532,7 @@ class VideoEditorService:
 
             inputs = [media_input, f"{audio_args} -i \"{audio_file}\""]
             
-            aspect_ratio = "9:16" if is_vertical else "16:9"
+            aspect_ratio = "9:16" if is_vertical else export_params.get("aspect_ratio", "16:9")
             res_flag = f"-video_size {target_w}x{target_h} -r {fps}"
             
             if cta_image_path:
@@ -1046,11 +1049,7 @@ class VideoEditorService:
         logger.info(f"🎥 [VIDEO_EDITOR] Starting Horizontal Production: {os.path.basename(image_file)}")
         
         # 默认分辨率用于预览和 CTA 计算，实际合成会参考 export_params
-        target_w, target_h = 1920, 1080
-        if export_params and export_params.get('resolution') == '480p':
-            target_w, target_h = 854, 480
-        elif export_params and export_params.get('resolution') == '720p':
-            target_w, target_h = 1280, 720
+        target_w, target_h = _video_output_size(export_params)
 
         temp_audio = os.path.join(self.upload_folder, f"temp_h_a_{uuid.uuid4().hex[:6]}.mp3")
         temp_body = os.path.join(self.upload_folder, f"temp_h_body_{uuid.uuid4().hex[:6]}.mp4")

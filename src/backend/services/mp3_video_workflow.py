@@ -71,6 +71,7 @@ DEFAULT_TRANSCRIPT_DEEPSEEK_PROMPT = (
     "7：尝试优化下标题，并给我另外一个版本，使用 内资闭门会 | xxxx | xxxx | xxxx | 当日日期 ，这样的格式来写"
 )
 DEFAULT_SPEED = 1.2
+DEFAULT_VIDEO_SPEEDS = {"xiaojunjun_landscape": 1.18, "ciketc_vertical": DEFAULT_SPEED, "wsj_4_3": 1.22}
 DEFAULT_CHILD_TIMEOUT_SECONDS = 2400
 DEFAULT_PUBLISHER_INLINE_WAIT_SECONDS = 5
 DEFAULT_PARENT_RETRY_DELAY_SECONDS = 300
@@ -95,6 +96,9 @@ VISUAL_ARTIFACT_KEYS = (
     "xiaojunjun_background",
 )
 VISUAL_ARTIFACT_VERSION = "mp3_video_visuals_20260719_v12"
+WSJ_ARTIFACT_KEY = "wsj_cover"
+WSJ_ARTIFACT_SIZE = (2048, 1536)
+WSJ_ARTIFACT_VERSION = "mp3_video_wsj_20261117_v2"
 KEYFRAME_ARTIFACT_VERSION = "mp3_video_keyframes_20260706_v6"
 TRANSCRIPT_DEEPSEEK_CACHE_VERSION = "mp3_transcript_deepseek_cache_20260706_v1"
 VISUAL_ARTIFACT_EXPECTED_SIZES = {
@@ -1125,6 +1129,10 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
                 else:
                     plan = plan_from_first_response(first_response, audio=audio)
             _update_result(task_key, {"plan": plan, "audio": audio})
+        wsj_fields = _wsj_fields_from_response(first_response)
+        if wsj_fields:
+            plan = {**plan, **wsj_fields}
+            _update_result(task_key, {"plan": plan})
         plan = _apply_workflow_audio_range_override(plan, workflow)
         if workflow.get("audio_range_override"):
             _update_result(task_key, {"plan": plan})
@@ -1158,27 +1166,51 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
         existing = _fresh_result(task_key)
         artifacts = existing.get("artifacts") if isinstance(existing.get("artifacts"), dict) else {}
         if _visual_artifacts_ready(artifacts):
-            _emit(task_key, "generate_visual_assets_reused", 68, "复用已生成的四张封皮/背景图")
+            _emit(task_key, "generate_visual_assets_reused", 68, "复用已生成的封皮/背景图")
         else:
-            _emit(task_key, "generate_visual_assets", 68, "生成四张封皮/背景图")
-            artifacts = generate_visual_artifacts(
+            _emit(task_key, "generate_visual_assets", 68, "生成封皮/背景图")
+            artifacts = {**artifacts, **generate_visual_artifacts(
                 task_key,
                 plan=plan,
                 infographic_path=infographic.get("path") or image_path,
                 created_at=created_at,
-            )
+            )}
             _update_result(task_key, {"artifacts": artifacts})
-        _queue_notification(task_key, "mp3_video_visuals_completed", "四张封皮/背景图已生成")
+        wsj_cover = artifacts.get(WSJ_ARTIFACT_KEY) or {}
+        wsj_copy_changed = (
+            bool(plan.get("wsj_title_lines"))
+            and not wsj_cover.get("manual_title_text")
+            and wsj_cover.get("title_lines") != plan["wsj_title_lines"]
+        )
+        if wsj_copy_changed or wsj_cover.get("template_version") != WSJ_ARTIFACT_VERSION or not _image_file_ready(
+            wsj_cover.get("path"), expected_size=WSJ_ARTIFACT_SIZE,
+        ):
+            manual = {key: wsj_cover[key] for key in (
+                "manual_title_lines", "manual_title_text", "manual_regenerated_at",
+            ) if key in wsj_cover}
+            wsj_cover = {
+                **generate_wsj_visual(
+                    task_key, plan, lines=manual.get("manual_title_lines") or _manual_visual_title_lines(manual.get("manual_title_text")),
+                    created_at=created_at,
+                ),
+                **manual,
+            }
+            artifacts = {**artifacts, WSJ_ARTIFACT_KEY: wsj_cover}
+            _update_result(task_key, {"artifacts": artifacts})
+        _queue_notification(task_key, "mp3_video_visuals_completed", "三组封皮/背景图已就绪")
         _raise_if_parent_canceled(task_key)
 
         render_mode = _workflow_render_mode(workflow)
         if render_mode == "keyframes":
             existing = _fresh_result(task_key)
             keyframes = existing.get("keyframes") if isinstance(existing.get("keyframes"), dict) else {}
-            if _keyframe_artifacts_ready(keyframes):
+            if _keyframe_artifacts_ready(keyframes) and all(
+                (keyframes.get(f"keyframe_wsj_{i:02d}") or {}).get("background_path") == wsj_cover["path"]
+                for i in range(1, 4)
+            ):
                 _emit(task_key, "video_keyframes_reused", 96, "复用已生成的视频关键帧预览")
             else:
-                _emit(task_key, "generate_video_keyframes", 90, "生成横屏/竖屏视频关键帧预览")
+                _emit(task_key, "generate_video_keyframes", 90, "生成三组视频关键帧预览")
                 keyframes = generate_video_keyframes(
                     task_key,
                     plan=plan,
@@ -1195,6 +1227,7 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
                 "keyframes": keyframes,
                 "landscape_video": {"status": "skipped", "reason": "keyframes_preview"},
                 "vertical_video": {"status": "skipped", "reason": "keyframes_preview"},
+                "wsj_video": {"status": "skipped", "reason": "keyframes_preview"},
             })
             _raise_if_parent_canceled(task_key)
             output_path = storage_path_for_job(task_key, created_at)
@@ -1234,8 +1267,10 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
 
         _raise_if_parent_canceled(task_key)
         existing = _fresh_result(task_key)
-        audio_segment = audio_segment_from_plan(audio, plan)
-        audio_signature = _audio_segment_signature(audio_segment)
+        audio_signatures = {
+            role: _audio_segment_signature(audio_segment_from_plan(audio, plan, role=role))
+            for role in DEFAULT_VIDEO_SPEEDS
+        }
         force_video_regenerate_at = _workflow_force_video_regenerate_at(
             workflow,
             existing,
@@ -1246,7 +1281,7 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
             "landscape_video",
             parent_id=task_key,
             generate_subtitles=generate_subtitles,
-            audio_signature=audio_signature,
+            audio_signature=audio_signatures["xiaojunjun_landscape"],
             created_not_before=force_video_regenerate_at,
         )
         if landscape_summary:
@@ -1260,7 +1295,7 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
                 existing,
                 "landscape_video",
                 generate_subtitles=generate_subtitles,
-                audio_signature=audio_signature,
+                audio_signature=audio_signatures["xiaojunjun_landscape"],
                 created_not_before=force_video_regenerate_at,
             )
             if landscape_task:
@@ -1301,7 +1336,7 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
             "vertical_video",
             parent_id=task_key,
             generate_subtitles=generate_subtitles,
-            audio_signature=audio_signature,
+            audio_signature=audio_signatures["ciketc_vertical"],
             created_not_before=force_video_regenerate_at,
         )
         if vertical_summary:
@@ -1315,7 +1350,7 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
                 existing,
                 "vertical_video",
                 generate_subtitles=generate_subtitles,
-                audio_signature=audio_signature,
+                audio_signature=audio_signatures["ciketc_vertical"],
                 created_not_before=force_video_regenerate_at,
             )
             if vertical_task:
@@ -1350,6 +1385,12 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
         _queue_notification(task_key, "mp3_video_vertical_completed", "此刻此声竖屏视频已完成")
 
         _raise_if_parent_canceled(task_key)
+        wsj_summary = _run_wsj_video(
+            task_key, user_id=user_id, audio=audio, plan=plan, cover=wsj_cover,
+            generate_subtitles=generate_subtitles, audio_signature=audio_signatures["wsj_4_3"],
+            force_video_regenerate_at=force_video_regenerate_at,
+        )
+        _raise_if_parent_canceled(task_key)
         output_path = storage_path_for_job(task_key, created_at)
         fresh = _load_task(task_key, *TASK_STATUS_COLUMNS)
         if not fresh or fresh.status == "canceled":
@@ -1371,6 +1412,7 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
             "artifacts": artifacts,
             "landscape_video": landscape_summary,
             "vertical_video": vertical_summary,
+            "wsj_video": wsj_summary,
             "completed_at": final_result["completed_at"],
         }, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1383,7 +1425,7 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
         flag_modified(fresh, "result")
         db.session.commit()
         _replace_cached_workflow_result(task_key, final_result)
-        _queue_notification(task_key, "mp3_video_completed", "MP3 视频编排完成，横屏和竖屏视频均已生成")
+        _queue_notification(task_key, "mp3_video_completed", "MP3 视频编排完成，三组视频均已生成")
         return True
     except ParentTaskCanceled:
         logger.info("MP3 video workflow stopped because parent task is canceled: %s", task_id)
@@ -1513,6 +1555,9 @@ def _apply_workflow_audio_range_override(
     audio_plan["end_seconds"] = round(float(end), 3)
     if "speed" in override:
         audio_plan["speed"] = override["speed"]
+        audio_plan["speed_override"] = override["speed"]
+    else:
+        audio_plan.pop("speed_override", None)
     plan["audio"] = audio_plan
     return plan
 
@@ -1983,6 +2028,7 @@ def plan_from_direct_ds_response(first_response: str, *, audio: Dict[str, Any]) 
     else:
         plan = local_plan
     _validate_strict_ds_plan(plan, source_label="手动 DS 返回值")
+    plan.update(_wsj_fields_from_response(first_response))
     return plan
 
 
@@ -2025,6 +2071,7 @@ def _local_plan_from_direct_ds_response(first_response: str, *, audio: Dict[str,
         ),
         "xiaojunjun_video_title": title_6 or fallback.get("xiaojunjun_video_title"),
         "ciketc_video_title": title_7 or fallback.get("ciketc_video_title"),
+        **_wsj_fields_from_response(first_response),
         "date_text": _direct_ds_date(title_7 or title_6 or first_response) or fallback.get("date_text"),
         "emotion": fallback.get("emotion", "bull"),
         "audio": audio_plan,
@@ -2107,6 +2154,24 @@ def _is_invalid_ds_plan_text(value: Any) -> bool:
     ))
 
 
+def _wsj_fields_from_response(text: str) -> Dict[str, Any]:
+    sections = _direct_ds_numbered_sections(text)
+    title = _direct_ds_closed_door_title(sections.get("8", ""), separator="|") if sections.get("8") else ""
+    lines = []
+    for raw in sections.get("9", "").splitlines():
+        clean = re.sub(r"^[\s*#>•-]+|[\s*]+$", "", raw).strip()
+        if not clean or clean.startswith("```") or re.match(r"^WSJ\s*封面", clean, re.I):
+            continue
+        clean = re.sub(r"^(?:0?[123][.、:：)）]?\s+|第[一二三]行[：:]\s*)", "", clean)
+        lines.append(clean)
+    fields = {}
+    if title:
+        fields["wsj_video_title"] = title
+    if lines:
+        fields["wsj_title_lines"] = lines[:3]
+    return fields
+
+
 def _direct_ds_numbered_sections(text: str) -> Dict[str, str]:
     source = str(text or "").replace("\r", "\n")
     if not source.strip():
@@ -2115,14 +2180,14 @@ def _direct_ds_numbered_sections(text: str) -> Dict[str, str]:
     # ``### 6.`` or ``### 6｜``. Prefer those explicit headings when present so
     # numbered quotes inside section 5 cannot be mistaken for new sections.
     markdown_marker_re = re.compile(
-        r"^[ \t]*#{1,6}[ \t]*(?:\*\*)?[ \t]*([1-7])[ \t]*[.．、:：|｜][ \t]*",
+        r"^[ \t]*#{1,6}[ \t]*(?:\*\*)?[ \t]*([1-9])[ \t]*[.．、:：|｜][ \t]*",
         flags=re.M,
     )
     matches = list(markdown_marker_re.finditer(source))
     if not matches:
         marker_re = re.compile(
-            r"(?:(?<=\n)|^)\s*(?:[-*]\s*)?(?:\*\*)?\s*([1-7])\s*[.．、:：]\s*"
-            r"|(?:\*\*)\s*([1-7])\s*[.．、:：]\s*"
+            r"(?:(?<=\n)|^)\s*(?:[-*]\s*)?(?:\*\*)?\s*([1-9])\s*[.．、:：]\s*"
+            r"|(?:\*\*)\s*([1-9])\s*[.．、:：]\s*"
         )
         matches = list(marker_re.finditer(source))
     markers = []
@@ -2130,28 +2195,31 @@ def _direct_ds_numbered_sections(text: str) -> Dict[str, str]:
         number = next((group for group in match.groups() if group), "")
         if number:
             markers.append((number, match.start(), match.end()))
-    if not markers:
-        # Some accepted IMA/DS responses preserve the seven requested
-        # sections but omit their numeric prefixes. Map their descriptive
-        # headings before falling back to generic title extraction so labels
-        # such as "格式）" cannot become production cover copy.
-        descriptive_marker_re = re.compile(
-            r"^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?[ \t]*(?:"
-            r"(?P<section_7>标题优化另(?:一|一个)版本[^\n]*)|"
-            r"(?P<section_6>标题优化[^\n]*)|"
-            r"(?P<section_2>不同角度标题版本[^\n]*)|"
-            r"(?P<section_3>精简短标题[^\n]*)|"
-            r"(?P<section_4>黄金片段[^\n]*)|"
-            r"(?P<section_5>金句[^\n]*)|"
-            r"(?P<section_1>标题(?:[ \t]*[（(][^\n]*[）)])?)"
-            r")[ \t]*(?:\*\*)?[ \t]*$",
-            flags=re.M | re.I,
-        )
-        for match in descriptive_marker_re.finditer(source):
-            group_name = match.lastgroup or ""
-            number = group_name.removeprefix("section_")
-            if number:
-                markers.append((number, match.start(), match.end()))
+    # Some accepted IMA/DS responses omit numeric prefixes and use descriptive
+    # headings instead. Responses can also mix numbered and descriptive
+    # headings, so fill only the missing section numbers from those labels.
+    descriptive_marker_re = re.compile(
+        r"^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?[ \t]*(?:"
+        r"(?P<section_9>WSJ[ \t]*封面[^\n]*(?:三行|3行)[^\n]*)|"
+        r"(?P<section_8>WSJ[ \t]*视频标题[^\n]*)|"
+        r"(?P<section_7>标题优化另(?:一|一个)版本[^\n]*)|"
+        r"(?P<section_6>标题优化[^\n]*)|"
+        r"(?P<section_2>不同角度标题版本[^\n]*)|"
+        r"(?P<section_3>精简短标题[^\n]*)|"
+        r"(?P<section_4>黄金片段[^\n]*)|"
+        r"(?P<section_5>金句[^\n]*)|"
+        r"(?P<section_1>标题(?:[ \t]*[（(][^\n]*[）)])?)"
+        r")[ \t]*(?:\*\*)?[ \t]*$",
+        flags=re.M | re.I,
+    )
+    numbered_sections = {number for number, _, _ in markers}
+    for match in descriptive_marker_re.finditer(source):
+        group_name = match.lastgroup or ""
+        number = group_name.removeprefix("section_")
+        if number and number not in numbered_sections:
+            markers.append((number, match.start(), match.end()))
+            numbered_sections.add(number)
+    markers.sort(key=lambda marker: marker[1])
     sections: Dict[str, str] = {}
     for index, (number, marker_start, start) in enumerate(markers):
         end = markers[index + 1][1] if index + 1 < len(markers) else len(source)
@@ -2568,6 +2636,7 @@ def validate_plan(payload: Dict[str, Any], *, fallback: Dict[str, Any], audio: D
         "xiaojunjun_subtitle": xiaojunjun_subtitle,
         "xiaojunjun_video_title": _clip_text(xiaojunjun_video_title, 180),
         "ciketc_video_title": _clip_text(ciketc_video_title, 180),
+        **{key: payload.get(key) or fallback.get(key) for key in ("wsj_video_title", "wsj_title_lines") if payload.get(key) or fallback.get(key)},
         "infographic_title": infographic_title,
         "infographic_subtitle": infographic_subtitle,
         "infographic_points": infographic_points[:3],
@@ -2653,6 +2722,72 @@ def generate_visual_artifacts_with_browser(
     }
 
 
+def _wsj_title_rows(title: Any, lines: Optional[List[str]] = None) -> List[str]:
+    rows = [line.strip() for line in lines or [] if line.strip()][:3]
+    if not rows:
+        rows = [_clean_line(title) or "本期研判"]
+    while len(rows) < 3:
+        index = max(range(len(rows)), key=lambda i: len(rows[i]))
+        text = rows[index]
+        target = round(len(text) / (4 - len(rows)))
+        if len(text) < 2:
+            break
+        breaks = [
+            i for i in range(1, len(text))
+            if text[i - 1] in "，。；、：？！,.;:!?｜|" and min(i, len(text) - i) >= max(3, target // 2)
+        ]
+        end = min(breaks, key=lambda i: abs(i - target)) if breaks else max(1, min(target, len(text) - 1))
+        rows[index:index + 1] = [text[:end].rstrip(), text[end:].lstrip()]
+    return (rows + ["", ""])[:3]
+
+
+def generate_wsj_visual(
+    job_id: str,
+    plan: Dict[str, Any],
+    *,
+    lines: Optional[List[str]] = None,
+    created_at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Render one canonical image for both the WSJ cover and video background."""
+    generated_at = datetime.utcnow()
+    name = f"wsj_cover_{generated_at:%Y%m%d%H%M%S%f}"
+    path = artifact_path_for_job(job_id, name, "png", created_at)
+    template = project_root() / "src/frontend/assets/images/wsj-closed-door-cover.png"
+    with Image.open(template) as source:
+        image = source.convert("RGB")
+    if image.size != WSJ_ARTIFACT_SIZE:
+        raise Mp3VideoWorkflowError("WSJ 封皮模板尺寸不正确")
+    draw = ImageDraw.Draw(image)
+    paper, ink, accent = "#fcf9f0", "#161b2a", "#a83543"
+
+    # Clear the sample issue/date, topical tag and investment copy.
+    draw.rectangle((914, 106, 1118, 137), fill=paper)
+    draw.text((1020, 122), "SPECIAL EDITION", font=_font(20, bold=True), fill="#46464c", anchor="mm")
+    draw.rectangle((1547, 106, 1690, 137), fill=paper)
+    date = _closed_door_video_date(plan.get("date_text")).replace("-", ".") or "本期"
+    draw.text((1619, 122), date,
+              font=_font(20, bold=True), fill=accent, anchor="mm")
+    draw.rectangle((903, 473, 1160, 514), fill=paper)
+    rows = _wsj_title_rows(plan.get("title"), lines or plan.get("wsj_title_lines"))
+    for size in range(52, 23, -2):
+        font = _font(size, bold=True)
+        if all(draw.textlength(row, font=font) <= 947 for row in rows):
+            break
+    # Replace only the copy in each strip. Keep the number badges and the
+    # entire right-hand panel exactly as drawn in the approved template.
+    for top, row in zip((728, 846, 964), rows):
+        draw.rectangle((175, top, 1149, top + 97), fill="#f8f5ec")
+        draw.text((193, top + 49), _trim_text_to_width(draw, row, font, 947),
+                  font=font, fill=ink, anchor="lm")
+    image.save(path)
+    return {
+        **_artifact_meta(path, "WSJ 封皮 / 背景图", renderer="pil:wsj-cover"),
+        "template_version": WSJ_ARTIFACT_VERSION,
+        "generated_at": generated_at.isoformat() + "Z",
+        "title_lines": rows,
+    }
+
+
 def regenerate_visual_artifact(
     job_id: str,
     artifact_key: str,
@@ -2666,12 +2801,20 @@ def regenerate_visual_artifact(
 ) -> Dict[str, Any]:
     """Regenerate one visual artifact with manually supplied title copy."""
     key = str(artifact_key or "").strip()
-    if key not in VISUAL_ARTIFACT_KEYS:
+    if key not in VISUAL_ARTIFACT_KEYS and key != WSJ_ARTIFACT_KEY:
         raise Mp3VideoWorkflowError(f"不支持重做这个封皮/背景图: {key}")
 
     lines = _manual_visual_title_lines(title_text)
     if not lines:
         raise Mp3VideoWorkflowError("请输入 1-3 行标题文案")
+
+    if key == WSJ_ARTIFACT_KEY:
+        return {
+            **generate_wsj_visual(job_id, plan, lines=lines, created_at=created_at),
+            "manual_regenerated_at": datetime.utcnow().isoformat() + "Z",
+            "manual_title_text": "\n".join(lines),
+            "manual_title_lines": lines,
+        }
 
     render_plan = _visual_artifact_plan_with_manual_title(plan, key, lines)
     structured_infographic = None
@@ -2783,6 +2926,8 @@ def generate_video_keyframes(
         ("landscape", "xiaojunjun_background", (1280, 720), "16:9"),
         ("vertical", "audio_background", (1080, 1920), "9:16"),
     ]
+    if (artifacts.get(WSJ_ARTIFACT_KEY) or {}).get("path"):
+        specs.append(("wsj", WSJ_ARTIFACT_KEY, (1440, 1080), "4:3"))
     for prefix, source_key, size, ratio in specs:
         source_path = (artifacts.get(source_key) or {}).get("path")
         for index, milestone in enumerate(milestones, start=1):
@@ -2800,11 +2945,13 @@ def generate_video_keyframes(
             )
             output[key] = _artifact_meta(
                 output_path,
-                f"{'横屏' if prefix == 'landscape' else '竖屏'}关键帧 {index}",
+                f"{ {'landscape': '横屏', 'vertical': '竖屏', 'wsj': 'WSJ 4:3'}[prefix]}关键帧 {index}",
                 renderer="pil:mp3-video-keyframe",
             )
             output[key]["template_version"] = KEYFRAME_ARTIFACT_VERSION
             output[key]["ratio"] = ratio
+            if prefix == "wsj":
+                output[key]["background_path"] = source_path
             output[key]["timestamp_seconds"] = milestone.get("seconds")
     return output
 
@@ -3009,10 +3156,10 @@ def _render_canvas_artifact(
     output_path: str,
     expected_size: Optional[Tuple[int, int]] = None,
 ) -> None:
-    page = context.new_page()
-    try:
-        last_error: Optional[Exception] = None
-        for url in _frontend_page_urls(page_name):
+    errors = []
+    for url in _frontend_page_urls(page_name):
+        page = context.new_page()
+        try:
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=_int_env("MP3_VIDEO_COVER_PAGE_TIMEOUT_MS", 25000))
                 page.wait_for_function(f"() => typeof window.{function_name} === 'function'")
@@ -3026,10 +3173,13 @@ def _render_canvas_artifact(
                 _write_data_url(data_url, output_path, expected_size=expected_size, label=page_name)
                 return
             except Exception as exc:
-                last_error = exc
-        raise Mp3VideoWorkflowError(f"无法调用前端封面页面 {page_name} / {function_name}: {last_error}")
-    finally:
-        page.close()
+                errors.append(f"{url}: {exc}")
+        finally:
+            page.close()
+    raise Mp3VideoWorkflowError(
+        f"无法调用前端封面页面 {page_name} / {function_name}: "
+        + (" | ".join(errors) or "没有可用的前端页面地址")
+    )
 
 
 def _frontend_page_urls(page_name: str) -> List[str]:
@@ -3104,6 +3254,9 @@ def _highlight_text(plan: Dict[str, Any], *, preferred_key: str) -> str:
         manual = plan.get("manual_xiaojunjun_subtitle")
         if manual:
             return _cover_lines(manual, max_chars=18, max_lines=3)
+        subtitle = plan.get(preferred_key)
+        if subtitle:
+            return _cover_lines(subtitle, max_chars=18, max_lines=3)
         closed_visual = _closed_door_visual_lines(plan.get("xiaojunjun_video_title"), max_units=18, max_lines=3)
         if closed_visual:
             return closed_visual
@@ -3494,6 +3647,48 @@ def _write_data_url(
         raise Mp3VideoWorkflowError(f"{label} 生成的图片不可用或尺寸异常{expected}: {output_path}")
 
 
+def _run_wsj_video(
+    parent_id, *, user_id, audio, plan, cover, generate_subtitles, audio_signature,
+    force_video_regenerate_at,
+):
+    label = "wsj_video"
+    spec = _publisher_video_spec_for_label(label)
+    existing = _fresh_result(parent_id)
+    cover_at = _workflow_force_video_regenerate_at({
+        "force_video_regenerate_at": cover.get("generated_at") or cover.get("manual_regenerated_at"),
+    })
+    # Current summaries name the exact background; older children can only be
+    # reused if they were queued after the latest cover was rendered.
+    current = (existing.get(label) or {}).get("cover_path") == cover["path"]
+    cutoff = max(
+        (value for value in (force_video_regenerate_at, cover_at if not current else None) if value),
+        default=None,
+    )
+    matching = dict(
+        generate_subtitles=generate_subtitles, audio_signature=audio_signature,
+        created_not_before=cutoff,
+    )
+    summary, child = _reusable_video_summary(existing, label, parent_id=parent_id, **matching)
+    if not summary:
+        child = _active_child_from_result(existing, label, **matching)
+        if not child:
+            _raise_if_parent_canceled(parent_id)
+            _emit(parent_id, "submit_wsj_video", 99, "提交 WSJ 4:3 视频合成任务")
+            child = create_publisher_video_task(
+                parent_id=parent_id, user_id=user_id, audio=audio, plan=plan,
+                image_path=cover["path"], **spec, generate_subtitles=generate_subtitles,
+                force_new=cutoff is not None, created_not_before=cutoff,
+            )
+        _record_child(parent_id, label, _task_public_summary(child))
+        child = _wait_child(parent_id, str(child.id), label, start_progress=99, end_progress=99)
+        if child.status != "completed":
+            raise RuntimeError(f"WSJ 视频子任务失败: {child.error_message}")
+        summary = _publisher_result_summary(child)
+    summary = {**summary, "cover_path": cover["path"]}
+    _update_result(parent_id, {label: summary})
+    return summary
+
+
 def create_publisher_video_task(
     *,
     parent_id: str,
@@ -3509,7 +3704,7 @@ def create_publisher_video_task(
 ) -> PublicationTask:
     title = _publisher_video_title(plan, role=role)
     generate_subtitles = bool(generate_subtitles)
-    audio_segment = audio_segment_from_plan(audio, plan)
+    audio_segment = audio_segment_from_plan(audio, plan, role=role)
     audio_signature = _audio_segment_signature(audio_segment)
     existing = None
     if not force_new or created_not_before is not None:
@@ -3568,6 +3763,8 @@ def create_publisher_video_task(
             "audio_signature": audio_signature,
         },
     }
+    if role == "wsj_4_3":
+        params["export_params"] = {"aspect_ratio": "4:3"}
     child = PublicationTask(
         status="pending",
         current_step="queued",
@@ -3601,6 +3798,8 @@ def create_publisher_video_task(
 
 
 def _publisher_video_title(plan: Dict[str, Any], *, role: str) -> str:
+    if role == "wsj_4_3" and plan.get("wsj_video_title"):
+        return str(plan["wsj_video_title"]).strip()
     if role == "xiaojunjun_landscape":
         return _clean_closed_door_video_title(plan.get("xiaojunjun_video_title"), expected_separator="/") or _format_closed_door_video_title(
             plan.get("title") or plan.get("xiaojunjun_subtitle"),
@@ -3835,7 +4034,7 @@ def _revoke_celery_task(task: PublicationTask) -> None:
     )
 
 
-def audio_segment_from_plan(audio: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+def audio_segment_from_plan(audio: Dict[str, Any], plan: Dict[str, Any], *, role: Optional[str] = None) -> Dict[str, Any]:
     duration = float(audio.get("duration_seconds") or 0)
     plan_audio = plan.get("audio") if isinstance(plan.get("audio"), dict) else {}
     start = max(0.0, _parse_seconds(plan_audio.get("start_seconds"), default=0.0) or 0.0)
@@ -3847,7 +4046,10 @@ def audio_segment_from_plan(audio: Dict[str, Any], plan: Dict[str, Any]) -> Dict
         end = min(duration, max(start + 0.1, end))
         end_offset = max(0.0, duration - end)
     try:
-        speed = float(plan_audio.get("speed") or DEFAULT_SPEED)
+        if role in DEFAULT_VIDEO_SPEEDS:
+            speed = float(plan_audio.get("speed_override", DEFAULT_VIDEO_SPEEDS[role]))
+        else:
+            speed = float(plan_audio.get("speed") or DEFAULT_SPEED)
     except (TypeError, ValueError) as exc:
         raise Mp3VideoWorkflowError("视频音频倍速无效") from exc
     if not math.isfinite(speed) or not 0.5 <= speed <= 2.0:
@@ -4089,7 +4291,7 @@ def extract_closed_door_video_titles(text: str) -> Dict[str, str]:
     # Section-aware extraction is safest for explicit Markdown headings. For
     # legacy one-line responses ("6. ... 7. ..."), retain the date-bounded
     # full-text extractor below so the section 6 value cannot absorb section 7.
-    has_markdown_sections = bool(re.search(r"^[ \t]*#{1,6}[ \t]*[1-7][ \t]*[.．、:：|｜]", str(text or ""), flags=re.M))
+    has_markdown_sections = bool(re.search(r"^[ \t]*#{1,6}[ \t]*[1-9][ \t]*[.．、:：|｜]", str(text or ""), flags=re.M))
     sections = _direct_ds_numbered_sections(text) if has_markdown_sections else {}
     slash_title = _direct_ds_closed_door_title(sections.get("6", ""), separator="/")
     pipe_title = _direct_ds_closed_door_title(sections.get("7", ""), separator="|")
@@ -4674,6 +4876,8 @@ def _publisher_video_spec_for_label(label: str) -> Optional[Dict[str, str]]:
         return {"role": "xiaojunjun_landscape", "aspect_ratio": "16:9"}
     if label == "vertical_video":
         return {"role": "ciketc_vertical", "aspect_ratio": "9:16"}
+    if label == "wsj_video":
+        return {"role": "wsj_4_3", "aspect_ratio": "4:3"}
     return None
 
 
@@ -5123,7 +5327,7 @@ def _defer_parent_retry(parent_id: str, exc: ChildTaskStillRunning) -> None:
 
 
 def _is_publisher_video_label(label: str) -> bool:
-    return str(label or "").strip() in {"landscape_video", "vertical_video"}
+    return str(label or "").strip() in {"landscape_video", "vertical_video", "wsj_video"}
 
 
 def _child_inline_wait_seconds(label: str) -> int:

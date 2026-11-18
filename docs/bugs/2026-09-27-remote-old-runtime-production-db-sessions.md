@@ -3,7 +3,7 @@
 ## 基本信息
 
 - 日期：2026-09-27
-- 状态：OPEN / REPEATED / ROOT_HOST_LOCATED / REMOTE_SESSIONS_ZERO_OBSERVED / WAITING_DISTRIBUTED_ISOLATION
+- 状态：OPEN / REPEATED / ROOT_HOST_LOCATED / OBSERVING / WAITING_DISTRIBUTED_ISOLATION
 - 严重级别：P0
 - 影响模块：内容清洗、ZSXQ 发布、Publisher、PostgreSQL、Redis/Celery 分布式运行拓扑
 - 根因分类：旧部署与当前部署共享生产数据库及 broker 凭据，且任务缺少不可伪造的 deployment identity
@@ -200,3 +200,176 @@ PDF 清洗 36/36、发布 36/36，累计壁钟 1,818.552 秒。当前节点 cont
 **OPEN / REPEATED / WAITING_DISTRIBUTED_ISOLATION**；责任动作仍是人工停旧 Mac 全栈，无法证明全停时轮换
 PostgreSQL/Redis 凭据并隔离 Celery namespace。下一轮要求完整 24 小时所有 feature old-root=0、远端 actor=0、
 当前根 PDF→ZSXQ 与 MP3→Publisher 自然成功，且终态 writer 可归因。
+
+## 2026-10-20 固定窗复核：current-root 字符串假绿，8 条终态确认日志外 writer
+
+固定窗 32 条目标 durable task 的路径字符串均为 current-root，表面上 old-root=0；但 Publisher 24 条仅
+16 completed，8 条被关闭为 `queue_repair_blocked/required_material_unavailable`，失败率 33.3%，失败壁钟
+累计 1,707.053 秒。8/8 终态缺少 10-18 已运行替换的 deployment/host/PID/code actor 字段，当前业务日志也没有
+写入动作；更关键的是，8 条列出的全部 image/audio 路径在当前节点实际存在且 mtime 早于关闭时间。生产只读
+快照新增门禁后稳定输出 `foreign_actor_evidence=8`。
+
+旧 MacBook Pro 的 Tailscale 最后在线时间晚于这些终态写入，当前离线仍不能证明旧服务卸载。由此把复发键从
+“路径是否 old-root”提升为“终态 actor 是否属于当前部署 + 素材在当前节点是否真实存在”；current-root 字符串
+不再作为 actor 归属证据。状态继续 **OPEN / REPEATED / WAITING_DISTRIBUTED_ISOLATION**。责任动作仍是人工
+停用旧 backend/Celery/Watchdog/scheduler/脚本；无法证明全停时轮换 PostgreSQL/Redis 凭据并隔离 Celery
+namespace。下一轮必须完整 24 小时 `foreign_actor_evidence=0`、old-root=0、远端 actor=0，并有当前根
+PDF→ZSXQ、MP3→Publisher 自然成功；否则不得关闭。
+
+## 2026-10-21 固定窗复核：补传缺视频终态暴露第二条 actor 审计盲区
+
+Publisher 36 条仅 16 completed、20 failed。除 10 条 `required_material_unavailable` 外，另有 7 条
+upload-only 被写为“找不到已生成的视频文件”；17/17 都缺 actor，引用文件在当前节点实际存在，且 7 个视频
+mtime 早于失败时刻。两类 foreign actor 合计 17/36（47.2%），累计壁钟 3,830.170 秒，较上一窗 8/24
+（33.3%）明确恶化。旧 `old-root=0` 与当前远端会话 0 再次不能作为隔离证据。
+
+已按 TDD 为 upload-only 缺视频终态增加 deployment/hostname/PID/code identity、原路径、关闭时间的 durable
+审计和同 actor 错误日志；日快照增加关联表与 mtime-before-close 门禁，生产同窗重放正确把旧口径 10 修正为
+17。1,740 项 unit 通过，双重安全门后标准重启，backend、17/17 worker、Watchdog、6/6 scheduler 均正常。
+该防线已 RUNTIME_REPLACED，但重启后无自然同类终态；共享旧栈未物理隔离，状态继续 **OPEN / REPEATED /
+OBSERVING / WAITING_DISTRIBUTED_ISOLATION**。
+
+## 2026-10-22 固定窗复核：旧 Mac watchdog 获得直接数据库连接证据
+
+本窗 Publisher 9 条为 8 completed/1 failed；失败 task
+`054f52a6-ef58-4d00-9194-9f504c276c1e` 被写成
+`queue_repair_blocked/required_material_unavailable`，但所列当前根 image/audio 在当前节点均存在。
+本地 mp3 worker 只记录消息可见与 active，render worker 收到时任务已是终态，本地没有失败写入；快照按
+actor 缺失和 mtime-before-close 计为 `foreign_actor_evidence=1`。
+
+更直接的是 15:30:40 生产守卫日志从 PostgreSQL 捕获
+`application_name=dig_ytb_scheduler_celery_watchdog_loop_py_92458`、
+`client_addr=100.117.177.98/32`；Tailscale 将该地址映射到旧 MacBook Pro，且其最后在线时间晚于误关任务。
+这把“日志外 actor”从间接推断推进为固定窗内真实生产库连接证据。相较上窗 17/36 已明显改善，但 1/9 仍属
+自然复发。状态保持 **OPEN / REPEATED / OBSERVING / WAITING_DISTRIBUTED_ISOLATION**；必须人工停旧 Mac
+全栈，或轮换 PostgreSQL/Redis 凭据并隔离 broker namespace。下一完整窗要求 remote/foreign/old-root 全 0，
+并有当前根 PDF→ZSXQ、MP3→Publisher 自然成功。
+
+## 2026-10-23 固定窗复核：日志外终态写入大幅反弹
+
+固定窗 Publisher 共 30 条：15 completed、14 failed、1 canceled，失败率 46.7%。其中 9 条
+`required_material_unavailable` 和 3 条 upload-only“缺视频”终态均缺少已运行防线要求的 actor identity，
+但其引用的当前根 image/audio/video 在本机均存在且 mtime 不晚于关闭时间；生产快照因此计
+`foreign_actor_evidence=12/30`。本地 MP3/Watchdog 只看见排队或队列可见，本地没有对应失败写入，证明
+终态来自日志外/旧代码 writer。相较上一窗 1/9 明显恶化。
+
+巡检时 Tailscale 显示旧 MacBook Pro 当前 offline、last seen 约 8 小时，时间恰晚于 16:49–17:36 的失败段；
+当前 `pg_stat_activity` 也只有本机与当前 Mac mini。它们都只是窗后快照，不能抵消同窗 12 条缺 actor 的 durable
+终态证据。状态继续 **OPEN / REPEATED / WAITING_DISTRIBUTED_ISOLATION**。责任动作仍是人工停用旧 Mac 的
+backend/Celery/Watchdog/scheduler/脚本；无法证明全停时轮换 PostgreSQL/Redis 凭据并隔离 broker namespace。
+下一轮必须完整 24 小时 `foreign_actor_evidence=0`、old-root=0、远端 actor=0，并有当前根 PDF→ZSXQ、
+MP3→Publisher 自然成功。
+
+## 2026-10-24 固定窗复核：数量改善但日志外 writer 仍复发
+
+固定窗 Publisher 20 条：16 completed、4 failed，失败率从 46.7% 降至 20.0%。其中两条
+`required_material_unavailable` 终态仍缺 actor，列出的当前根素材全部存在；本地 MP3 日志只记录排队/
+message-visible，render 收到时任务已经终态，本地没有失败写入。快照因此仍计
+`foreign_actor_evidence=2/20`，虽较上一窗 12/30 改善，但同一复发键未归零。
+
+固定窗目标任务各 feature 均为 current-root，巡检时只见本机与 `100.96.3.12` 当前部署连接，没有旧私网地址；
+这些仍是路径和窗后快照，不能推翻 durable actor 缺失与本地无写入日志。状态继续
+**OPEN / REPEATED / OBSERVING / WAITING_DISTRIBUTED_ISOLATION**。必须人工停旧 Mac 全栈，或轮换 PostgreSQL/
+Redis 凭据并隔离 broker namespace；下一完整窗仍要求 old-root=0、foreign actor=0、远端 actor=0，并有
+当前根自然任务成功。
+
+## 2026-10-25 固定窗复核：旧根 MP3 任务再次由日志外运行体完成
+
+固定窗唯一目标 durable task 为 `mp3_video_workflow`
+`46fa834c-a887-4cdc-be3a-6a394f972388`，状态 completed、壁钟 21.660 秒；输入、结果、信息图、封面、关键帧与
+背景路径全部来自 `/Users/v9/Documents/workspace/v9/code/dig_ytb_data_claude_v1/`。当前 MP3 worker 日志没有
+该 task id，仅当前 notification worker 消费了共享 outbox，证明执行 actor 不在当前日志集合。
+
+Tailscale 显示旧 MacBook Pro 最后在线时间约为 21:30，本任务约 16:52 完成，旧主机在写入后仍在线约
+4 小时 38 分；当前 `pg_stat_activity` 仅见本机和 `100.96.3.12` 是窗后快照，不能抵消 durable old-root 证据。
+状态保持 **OPEN / REPEATED / WAITING_DISTRIBUTED_ISOLATION**。责任动作仍是人工停止旧机 backend/Celery/
+Watchdog/scheduler/脚本；无法证明全停时轮换 PostgreSQL/Redis 凭据并隔离 broker namespace。下一轮必须完整
+24 小时 old-root/foreign/remote actor 全 0，并有当前根自然 PDF→ZSXQ、MP3→Publisher 成功。
+
+## 2026-10-26 固定窗复核：旧运行体完成整条内容发布链并与当前 Watchdog 竞态
+
+固定窗内 12/12 个目标 durable task 全部引用旧根
+`/Users/v9/Documents/workspace/v9/code/dig_ytb_data_claude_v1/`：audio clean 1、ZSXQ publish 1、MP3 workflow 1、
+Publisher 9。Publisher 为 6 completed/3 failed，失败率 33.3%，累计壁钟 6,951.350 秒，P50/P95/max
+336.170/2,191.850/2,790.105 秒；三类父子任务累计壁钟不能相加解释为独立用户时间，但足以证明旧部署完整执行了
+PDF→发布与 MP3→Publisher 链路。
+
+当前 Watchdog 对旧根 MP3 task 做了重投，本机 MP3 worker 在 4.737 秒内读取宽 `publication_tasks` 行、写入失败
+尝试并返回 `False`；同一原任务随后又被旧 actor 完成，形成共享 DB/Redis/broker 下的直接竞态。当前 Watchdog 对一条
+Publisher 正确按素材不可达 fail closed，并为一条 processing orphan 写入当前 Mac mini actor；另一条
+`orphaned_processing` 终态缺少 `processing_orphan_repair.actor`，只能归为旧/未知代码 writer，不能臆断具体主机。
+
+已按 TDD 修正日快照：processing orphan 必须读取自己的 repair 子树，并只统计当前仍为
+`orphaned_processing` 的终态，避免历史已恢复任务误计；生产只读重放得到 closed=2、actor_missing=1，6 项定向测试
+和独立评审通过。该诊断修复已运行验收，但不能替代物理隔离。巡检时两个旧 Mac 均 offline，last seen 约 8/12 小时，
+时间晚于固定窗任务；当前远端会话 0 仍只是窗后快照。状态继续 **OPEN / REPEATED /
+WAITING_DISTRIBUTED_ISOLATION**。必须人工停旧栈，或轮换 PostgreSQL/Redis 凭据并隔离 broker namespace；下一轮
+要求完整 24 小时 old-root/foreign/remote actor 全 0，且当前根自然 PDF→ZSXQ、MP3→Publisher 成功。
+
+## 2026-10-27 业务任务全绿，但在线 MacBook Pro 生产会话仍存在
+
+固定窗 28/28 个目标 durable task 全部 current-root：audio clean 4、ZSXQ publish 4、MP3 workflow 4、
+Publisher 16；Publisher 16/16 completed，old-root、foreign actor、processing orphan、素材不可达和补传缺视频均
+为 0。当前本地业务日志覆盖这些 task，证明上轮 12/12 old-root 与 33.3% Publisher 失败在本窗没有复发，并为
+当前根 PDF→ZSXQ、MP3→Publisher 提供自然正向样本。
+
+但巡检时生产 `pg_stat_activity` 仍见 `100.119.238.48` 的 6 个空 `application_name` 会话，Tailscale 映射为
+在线 `v9的MacBook Pro`；当前 Mac mini 为 `100.96.3.12`。相同 checkout 绝对路径不能证明 writer actor 相同，
+空 application name 又无法归因具体进程，故一个绿窗不能证明旧部署已失去写权限。状态改为
+**OPEN / REPEATED / OBSERVING / WAITING_DISTRIBUTED_ISOLATION**。必须人工停并卸载远端旧栈；无法证明全停时
+轮换 PostgreSQL/Redis 凭据、隔离 broker namespace，并强制 deployment identity/application_name。下一轮要求
+完整 24 小时 remote/old/foreign actor 全 0，且两条当前根自然链继续成功。
+
+## 2026-10-29 current-root 全绿，但远端生产会话增至 7 个
+
+固定窗 23/23 个目标 durable task 全部 current-root：audio clean 1、ZSXQ publish 1、MP3 workflow 5、
+Publisher 16；Publisher 16/16 completed，old/mixed/unclassified、replacement/orphan、素材不可达和 foreign actor
+均为 0。该自然窗证明当前 Mac mini 业务链可完整运行。
+
+但巡检时 `100.119.238.48` 的空 `application_name` 生产会话由上一窗 5 个增至 7 个，最长已空闲约 1 小时
+36 分；当前 Mac mini 为 `100.96.3.12`。绿窗仍不能证明远端旧栈失去写权限，且缺少 deployment identity 使
+会话无法归因进程。状态保持 **OPEN / REPEATED / OBSERVING / WAITING_DISTRIBUTED_ISOLATION**。责任动作仍是
+人工停旧栈，或轮换 PostgreSQL/Redis 凭据、隔离 broker namespace 并强制 application_name；下一轮要求完整
+24 小时 remote/old/foreign actor 全 0。
+
+## 2026-10-30 current-root 继续全绿，但远端生产会话仍有 6 个
+
+固定窗 23/23 个目标 durable task 均为 current-root：audio clean 1、ZSXQ publish 1、MP3 workflow 5、
+Publisher 16；Publisher 16/16 completed，old/mixed/unclassified、foreign actor、replacement/orphan、素材
+不可达与缺视频均为 0。相较上窗，远端 `100.119.238.48` 空 `application_name` 会话由 7 降至 6，但仍未归零。
+
+一个继续全绿的业务窗和会话减少都不能证明旧运行体失去写权限。状态保持 **OPEN / REPEATED /
+WAITING_DISTRIBUTED_ISOLATION**。责任动作仍是人工停止并卸载远端 backend/Celery/Watchdog/scheduler；若无法
+证明全停，则轮换 PostgreSQL/Redis 凭据、隔离 broker namespace，并强制 deployment identity/
+`application_name`。验收条件仍是完整 24 小时 remote/old/foreign actor 全 0，且两条当前根自然链成功。
+
+## 2026-10-31 current-root 全绿且快照远端会话为 0
+
+固定窗 14/14 个目标 durable task 均为 current-root：audio clean 1、豆包 TTS 2、MP3 workflow 2、
+Publisher 8、ZSXQ publish 1；Publisher 8/8 completed，old/mixed/unclassified 与 foreign actor 均为 0。
+巡检快照只见当前 Mac mini `100.96.3.12` 和本地 backend，会话中旧 MacBook 地址由上窗 6 降至 0。
+
+这是明确改善，但单次窗后 `pg_stat_activity` 快照不能证明旧运行体在整个固定窗都失去数据库/Redis/broker 写权限。
+状态保持 **OPEN / OBSERVING / WAITING_DISTRIBUTED_ISOLATION**；下一轮仍要求完整 24 小时 remote/old/foreign
+actor 全 0，并有当前根自然任务成功，或取得旧栈已卸载/凭据已隔离的物理证据。
+
+## 2026-11-01 无自然任务暴露，远端会话快照继续为 0
+
+固定窗数据库中没有新增 `publication_tasks`，因此 old/current root、Publisher foreign actor 与自然链路均为
+未暴露，不是业务绿窗。巡检快照只见当前 `100.96.3.12` 与本地 gunicorn，旧 MacBook 地址继续为 0；但仍无
+旧栈卸载、凭据轮换或 broker namespace 隔离证据。
+
+状态保持 **OPEN / OBSERVING / WAITING_DISTRIBUTED_ISOLATION**。下一轮仍需有自然 PDF→ZSXQ、
+MP3→Publisher 任务且 remote/old/foreign actor 为 0，或取得物理隔离记录；低流量零样本不能关闭。
+
+## 2026-11-02 远端会话与日志外 writer 再次复发
+
+固定窗 30/30 个目标 durable task 路径均为 current-root：audio clean 2、MP3 workflow 4、Publisher 22、
+ZSXQ publish 2。但 Publisher 仍有 3 条“视频文件不存在”失败，素材在当前节点实际存在、终态 actor 缺失，
+说明相同 checkout 路径不能证明执行主机相同。巡检快照同时再次看到旧 MacBook 地址 `100.119.238.48`
+的 6 个空 `application_name` 生产会话，最长空闲约 27 分钟。
+
+这推翻上一窗“远端会话快照为 0”的暂时改善。状态恢复为 **OPEN / REPEATED /
+WAITING_DISTRIBUTED_ISOLATION**。不得无人值守断连接；责任动作仍是人工停止并卸载旧机 backend/Celery/
+Watchdog/scheduler，或轮换 PostgreSQL/Redis 凭据并隔离 broker namespace、强制 deployment identity 与
+`application_name`。下一轮必须完整 24 小时 remote/old/foreign/actor-missing 全 0，并有当前节点自然链成功。

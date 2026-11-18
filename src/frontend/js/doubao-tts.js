@@ -1,11 +1,17 @@
 class DoubaoTTSPage {
     constructor() {
         this.apiBase = this.resolveApiBase();
-        this.pollTimer = null;
+        this.pollingActive = false;
+        this.polling = window.VisibilityPolling.create({
+            documentRef: document,
+            windowRef: window,
+            intervalMs: 5000,
+            poll: () => this.loadHistory(false),
+            onError: (error) => console.warn('[TTS] history polling failed:', error),
+        });
         this.bind();
         this.checkStatus();
         this.loadHistory();
-        this.pollTimer = window.setInterval(() => this.loadHistory(false), 5000);
     }
 
     resolveApiBase() {
@@ -175,6 +181,7 @@ class DoubaoTTSPage {
         try {
             const result = await this.request('/history?per_page=20');
             const items = result.data.items || [];
+            this.updatePolling(items);
             if (!items.length) {
                 list.innerHTML = '<div class="py-12 text-center text-slate-400 border border-dashed border-slate-200 rounded-xl">暂无任务</div>';
                 return;
@@ -185,6 +192,17 @@ class DoubaoTTSPage {
             });
         } catch (error) {
             if (showLoading) list.innerHTML = `<div class="py-12 text-center text-red-500">加载失败：${this.escape(error.message)}</div>`;
+        }
+    }
+
+    updatePolling(items) {
+        const hasActiveTask = (items || []).some((item) => ['pending', 'processing'].includes(item.status));
+        if (hasActiveTask === this.pollingActive) return;
+        this.pollingActive = hasActiveTask;
+        if (hasActiveTask) {
+            this.polling.start();
+        } else {
+            this.polling.stop();
         }
     }
 
@@ -205,7 +223,7 @@ class DoubaoTTSPage {
                         ${subtitleUrl ? `<a href="${subtitleUrl}" download class="px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-white">SRT</a>` : ''}
                     </div>
                 </div>
-                <audio controls class="h-9 w-full" src="${audioUrl}"></audio>
+                <audio controls preload="none" class="h-9 w-full" src="${audioUrl}"></audio>
             </div>
         ` : '';
         return `
@@ -249,7 +267,7 @@ class DoubaoTTSPage {
         const subtitleUrl = this.assetUrl(segment.subtitle_url || (segment.subtitle_path ? `/${segment.subtitle_path}` : ''));
         const audio = audioUrl ? `
             <div class="mt-3 flex items-center gap-2">
-                <audio controls class="h-9 flex-1" src="${audioUrl}"></audio>
+                <audio controls preload="none" class="h-9 flex-1" src="${audioUrl}"></audio>
                 <a href="${audioUrl}" download class="px-3 py-2 rounded-lg bg-slate-900 text-white text-xs font-semibold">音频</a>
                 ${subtitleUrl ? `<a href="${subtitleUrl}" download class="px-3 py-2 rounded-lg border border-slate-200 text-xs font-semibold text-slate-700">SRT</a>` : ''}
             </div>
@@ -314,6 +332,12 @@ class DoubaoTTSPage {
     }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-    window.doubaoTTSPage = new DoubaoTTSPage();
-});
+if (typeof module === 'object' && module.exports) {
+    module.exports = DoubaoTTSPage;
+}
+
+if (typeof document !== 'undefined') {
+    document.addEventListener('DOMContentLoaded', () => {
+        window.doubaoTTSPage = new DoubaoTTSPage();
+    });
+}

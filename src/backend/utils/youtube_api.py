@@ -6,6 +6,7 @@ YouTube Data API v3 集成模块
 """
 
 import re
+import threading
 import time
 import requests
 from typing import Optional, Dict, Any, List
@@ -36,6 +37,17 @@ class YouTubeAPI:
         self.quota_limit = 10000  # 每日配额限制
         self.request_count = 0
         self.last_reset = datetime.now().date()
+        self._request_state = threading.local()
+
+    def _set_last_error(self, message: str) -> None:
+        """Keep one sanitized upstream error per worker thread."""
+        self._request_state.last_error = str(message or "")[:1000] or None
+
+    def consume_last_error(self) -> Optional[str]:
+        """Return and clear the current thread's sanitized upstream error."""
+        message = getattr(self._request_state, 'last_error', None)
+        self._request_state.last_error = None
+        return message
     
     def _make_request(self, endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """发起API请求
@@ -73,8 +85,30 @@ class YouTubeAPI:
             
             return data
             
+        except requests.exceptions.HTTPError as e:
+            error_response = getattr(e, 'response', None)
+            status_code = getattr(error_response, 'status_code', None)
+            reason = 'unknown'
+            message = 'YouTube API HTTP error'
+            try:
+                payload = error_response.json() if error_response is not None else {}
+                error_payload = payload.get('error') or {}
+                message = str(error_payload.get('message') or message)[:500]
+                errors = error_payload.get('errors') or []
+                if errors:
+                    reason = str((errors[0] or {}).get('reason') or reason)[:100]
+            except (TypeError, ValueError, AttributeError):
+                pass
+            raise YouTubeAPIError(
+                f"API HTTP failure endpoint={endpoint} status={status_code or 'unknown'} "
+                f"reason={reason}: {message}"
+            ) from None
         except requests.exceptions.RequestException as e:
-            raise YouTubeAPIError(f"网络请求失败: {str(e)}")
+            # requests exception strings may contain the full URL including the
+            # API key, so retain only the exception class and endpoint.
+            raise YouTubeAPIError(
+                f"API network failure endpoint={endpoint} type={type(e).__name__}"
+            ) from None
         except ValueError as e:
             raise YouTubeAPIError(f"JSON解析失败: {str(e)}")
     
@@ -363,6 +397,7 @@ class YouTubeAPI:
             }
             
         except Exception as e:
+            self._set_last_error(str(e))
             print(f"获取频道统计数据失败: {e}")
             return None
     
@@ -508,9 +543,13 @@ class YouTubeAPI:
             # 首先获取频道的上传播放列表ID
             channel_info = self._get_channel_uploads_playlist(channel_id)
             if not channel_info:
+                upstream_error = self.consume_last_error()
+                message = '无法获取频道上传播放列表'
+                if upstream_error:
+                    message = f'{message}: {upstream_error}'
                 return {
                     'success': False,
-                    'message': '无法获取频道上传播放列表',
+                    'message': message,
                     'data': {}
                 }
             
@@ -628,6 +667,7 @@ class YouTubeAPI:
             }
             
         except Exception as e:
+            self._set_last_error(str(e))
             print(f"获取频道上传播放列表失败: {e}")
             return None
     

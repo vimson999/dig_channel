@@ -86,7 +86,7 @@
             const pricing = document.getElementById('bilibili-charging-pricing');
             if (pricing) pricing.innerHTML = accounts.map(account => {
                 const rule = account.pricing || {};
-                return `<p>${this.escape(account.name)}：净增 × ¥${this.number(rule.revenue_per_new)}；估算分成 × ${this.number(Number(rule.cash_rate) * 100)}%；月收入估算 = 人数 × ¥${this.number(rule.monthly_per_charger)}</p>`;
+                return `<p>${this.escape(account.name)}：净增 × ¥${this.number(rule.revenue_per_new)}；估算分成 × ${this.number(Number(rule.cash_rate) * 100)}%；月收入估算 = 人数 × ¥${this.number(rule.monthly_per_charger)} × ${this.number(Number(rule.renewal_rate) * 100)}% 续费率</p>`;
             }).join('');
             this.growthRankings = payload.growth_rankings && typeof payload.growth_rankings === 'object'
                 ? payload.growth_rankings
@@ -252,12 +252,14 @@
             const body = document.getElementById('bilibili-charging-summary');
             if (!body) return;
             if (!accounts.length) {
-                body.innerHTML = '<tr><td colspan="6" class="px-6 py-8 text-center text-gray-400">情报页尚未配置监控 UP 主</td></tr>';
+                body.innerHTML = '<tr><td colspan="7" class="px-6 py-8 text-center text-gray-400">情报页尚未配置监控 UP 主</td></tr>';
                 return;
             }
             body.innerHTML = [...accounts].sort((a, b) => (b.latest?.charger_count ?? -1) - (a.latest?.charger_count ?? -1)).map((account, index) => {
                 const latest = account.latest;
                 const growth = latest?.daily_growth;
+                const configuredRenewalRate = Number(account.pricing?.renewal_rate);
+                const renewalRate = Number.isFinite(configuredRenewalRate) ? configuredRenewalRate : 0.6;
                 const growthClass = growth > 0 ? 'text-emerald-600' : (growth < 0 ? 'text-rose-600' : 'text-gray-500');
                 const sourceUrl = this.profileUrl(account.source_url, account.uid);
                 const snapshotNote = latest ? `快照 ${latest.date}${this.asOfDate && latest.date < this.asOfDate ? ' · 今日待同步' : ''}` : '尚无快照';
@@ -278,6 +280,7 @@
                         <td class="px-4 py-4 text-right font-semibold ${growthClass}">${latest ? this.signed(growth) : '-'}</td>
                         <td class="px-4 py-4 text-right text-gray-700">${latest ? this.currency(latest.daily_revenue) : '-'}</td>
                         <td class="px-4 py-4 text-right text-gray-700">${latest ? this.currency(latest.daily_cash) : '-'}</td>
+                        <td class="px-4 py-4 text-right font-semibold text-gray-700">${this.number(renewalRate * 100)}%</td>
                         <td class="px-6 py-4 text-right font-bold text-pink-600">${latest ? this.currency(latest.monthly_income) : '-'}</td>
                     </tr>
                 `;
@@ -293,7 +296,7 @@
             }
             const body = document.getElementById('bilibili-charging-summary');
             if (body) {
-                body.innerHTML = `<tr><td colspan="6" class="px-6 py-8 text-center text-gray-400">${this.escape(message)}</td></tr>`;
+                body.innerHTML = `<tr><td colspan="7" class="px-6 py-8 text-center text-gray-400">${this.escape(message)}</td></tr>`;
             }
         }
 

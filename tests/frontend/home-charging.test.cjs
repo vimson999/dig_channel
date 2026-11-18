@@ -30,6 +30,26 @@ test('missing growth and estimates are not rendered as zero', () => {
     assert.match(elements['bilibili-charging-summary'].innerHTML, /¥0/);
 });
 
+test('summary shows renewal rate and backend-adjusted monthly income', () => {
+    const { dashboard, elements } = harness();
+    dashboard.renderSummary([{
+        uid: '1',
+        name: 'Renewing',
+        pricing: { renewal_rate: 0.6 },
+        latest: {
+            date: '2026-10-01',
+            charger_count: 100,
+            daily_growth: 0,
+            daily_revenue: 0,
+            daily_cash: 0,
+            monthly_income: 600,
+        },
+    }]);
+    const html = elements['bilibili-charging-summary'].innerHTML;
+    assert.match(html, />60%</);
+    assert.match(html, />¥600</);
+});
+
 test('account line colors are stable across order changes and support seven accounts', () => {
     const { dashboard } = harness();
     const accounts = Array.from({ length: 7 }, (_, i) => ({ uid: String(i), name: `A${i}`, points: [] }));

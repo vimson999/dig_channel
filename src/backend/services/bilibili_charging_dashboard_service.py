@@ -33,12 +33,14 @@ DEFAULT_PRICING = {
         "revenue_per_new": 30,
         "cash_rate": 0.4,
         "monthly_per_charger": 10,
+        "renewal_rate": 0.6,
     },
     "overrides": {
         "3546604889967195": {
             "revenue_per_new": 50,
             "cash_rate": 0.4,
             "monthly_per_charger": 20,
+            "renewal_rate": 0.6,
         },
     },
 }
@@ -95,10 +97,17 @@ def _normalized_rule(value, fallback):
         value.get("monthly_per_charger"),
         fallback.get("monthly_per_charger", 10),
     )
+    renewal_rate = _decimal(
+        value.get("renewal_rate"),
+        fallback.get("renewal_rate", 0.6),
+    )
     return {
         "revenue_per_new": float(max(Decimal("0"), revenue_per_new)),
         "cash_rate": float(max(Decimal("0"), min(Decimal("1"), cash_rate))),
         "monthly_per_charger": float(max(Decimal("0"), monthly_per_charger)),
+        "renewal_rate": float(
+            max(Decimal("0"), min(Decimal("1"), renewal_rate))
+        ),
     }
 
 
@@ -522,7 +531,7 @@ def charging_dashboard_payload(*, days=31) -> Dict[str, Any]:
             monthly_income = Decimal(row.charger_count) * _decimal(
                 rule["monthly_per_charger"],
                 10,
-            )
+            ) * _decimal(rule["renewal_rate"], 0.6)
             latest_fetched_at = row.fetched_at
             points.append({
                 "date": row.snapshot_date.isoformat(),

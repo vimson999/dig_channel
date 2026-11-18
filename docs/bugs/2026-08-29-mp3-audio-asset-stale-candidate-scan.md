@@ -172,3 +172,121 @@ audio-assets 仍须补齐候选/存在/返回行数、response bytes、pool/fetc
 尾延迟明确复发。表规模与选择性不支持为该 3MB 级、返回约三分之一行的查询新增索引。本项继续
 **RUNTIME_REPLACED / OPEN / REPEATED / OBSERVING**；下一自然冷/暖请求必须补 pool acquire、fetch、
 serialize、response bytes 与文件命中计数，暖请求目录 SQL 仍应为 0。
+
+## 2026-10-20 300 秒 TTL 后的真实搜索连续触发远程 fetch 尾部
+
+固定窗 `audio-assets` 10/10 请求成功，但其中 3 个冷建分别由初始加载和两次真实搜索触发，间隔均略超过
+300 秒 TTL；三次都记录 `force_refresh=False/cache_hit=False`，每次重新获取 1,352 行。目录 SQL 指纹
+`be891b5c1af362da` 累计 26.178 秒，P50 8.421 秒、P95/max 9.808 秒，对应 HTTP P95/max 10.777 秒。
+
+同形生产 EXPLAIN 顺扫 4,370 行、返回 1,352 行，shared read 469、quicksort 1,271kB，executor 仅
+5.182ms；应用耗时是 executor 的约 1,500–1,900 倍。查询仍是一次有界投影，未见旧附件 N+1、deferred
+column lazy-load 或文件 I/O 跨 Session；因此不增加索引。状态继续 **RUNTIME_REPLACED / OPEN /
+REPEATED / OBSERVING**。下一自然冷建必须增加 pool acquire、fetch bytes/deserialize 分段；在此证据齐全前
+只能评估版本化或 stale-while-refresh 缓存，不能用任意延长 TTL 掩盖链路根因。
+
+## 2026-10-21 目录尾延迟继续复发
+
+固定窗 `audio-assets` 18/18 成功，其中 3 个冷建再次执行 canonical 指纹 `be891b5c1af362da`，累计
+24.138 秒、P50/P95/max 8.041/8.181/8.181 秒，返回 1,369 行；HTTP P95/max 9.013/9.415 秒。三次
+Session hold 合计 25.055 秒，非 SQL 仅 916.57ms，旧附件 N+1、deferred lazy-load 与文件 I/O 跨 Session
+均未捕获。上轮同形生产 executor 5.182ms，仍排除盲目加索引。
+
+状态保持 **RUNTIME_REPLACED / OPEN / REPEATED / OBSERVING**。下一自然冷建必须补 pool acquire、fetch
+bytes/deserialize 与 response bytes；暖请求目录 SQL 必须为 0，不能用 API 全成功或本窗无 timeout 关闭。
+
+## 2026-10-22 目录尾延迟持平复发
+
+固定窗 `audio-assets` 13/13 成功，3 个冷建再次命中 canonical 指纹 `be891b5c1af362da`，累计
+24.109 秒、P50/P95/max 8.006/8.006/8.269 秒；HTTP P95/max 9.044/9.170 秒。三次 Session hold
+均与慢 SQL 关联，匹配 SQL 合计 24.250 秒、非 SQL 仅 352ms；旧附件 N+1、deferred lazy-load 和文件 I/O
+跨 Session 均未捕获。同形 executor 仅 5.182ms，仍没有索引 DDL 依据。
+
+状态保持 **RUNTIME_REPLACED / OPEN / REPEATED / OBSERVING**。下一自然冷建继续要求 pool acquire、
+fetch bytes/deserialize、response bytes 和同秒 PgBouncer/socket/route 证据；暖请求目录 SQL 必须为 0。
+
+## 2026-10-23 单次尾部继续恶化
+
+固定窗 `audio-assets` 5/5 成功，2 个冷建命中 canonical 指纹 `be891b5c1af362da`，累计
+16.652 秒、P50/P95/max 8.271/8.380/8.380 秒。相较上一窗，冷建次数和累计耗时下降 33.3%/30.9%，但
+单次 P95/max 又上升约 3.3%/1.3%。两次 Session hold 合计 16.903 秒，其中匹配 SQL 16.652 秒、非 SQL
+仅 558ms；旧附件 N+1、deferred lazy-load 和文件 I/O 跨 Session 均未捕获。此前同形 executor 仅
+5.182ms，本窗表统计和代表 EXPLAIN 仍不支持索引 DDL。
+
+状态保持 **RUNTIME_REPLACED / OPEN / REPEATED / OBSERVING**。次数下降不能抵消单次尾部复发；下一自然
+冷建仍必须补 pool acquire、driver fetch bytes/deserialize、response bytes 与同秒 PgBouncer/socket/route
+证据，暖请求目录 SQL 必须为 0。
+
+## 2026-10-24 次数与累计耗时双重恶化
+
+固定窗 `audio-assets` 10/10 成功、HTTP 累计 39.786 秒，P95/max 10.961 秒；canonical 指纹
+`be891b5c1af362da` 由上一窗 2 次/16.652 秒恶化到 4 次/35.271 秒，次数 +100%、累计 +111.8%，
+P95/max 8.878/9.314 秒。4 个连接持有 P95/max 9.375 秒，SQL 合计 35.271 秒、非 SQL 仅 270ms；未见
+Session 跨文件 I/O、旧附件 N+1 或逐项 lazy-load。
+
+同形生产 executor 仍为毫秒级，目标表无锁、无 temp/大读证据，PgBouncer wait P95 54.29ms、query P95
+82.38ms 且八类错误均为 0；因此本窗恶化继续归于 executor 外 driver/fetch/私网尾部，而不是缺索引。
+状态保持 **RUNTIME_REPLACED / OPEN / REPEATED / OBSERVING**。下一自然冷建必须补 pool acquire、fetch bytes/
+deserialize、response bytes 与同秒 socket/route；在分段证据齐全前不以延长 TTL 或盲目 DDL 掩盖根因。
+
+## 2026-10-26 无自然目录请求，不能以零指纹判绿
+
+固定窗没有 `audio-assets` 自然请求，canonical 指纹 `be891b5c1af362da` 为 0。相较上一窗 4 条/35.271 秒只是
+覆盖消失，不是尾延迟改善或修复后证据。既有 O(1) 投影、single-flight 与 Session 外文件校验保持不变，本轮也
+没有引入 TTL、超时或索引掩盖。
+
+状态保持 **RUNTIME_REPLACED / OPEN / REPEATED / UNOBSERVED**。下一自然冷/暖配对仍须记录 pool acquire、
+driver fetch bytes/deserialize、response bytes 与同秒 socket/route；暖请求目录 SQL 必须为 0。
+
+## 2026-10-27 两次自然冷建长尾明确复发
+
+固定窗 `audio-assets` 5/5 成功、HTTP 累计 21.557 秒，P95/max 12.106 秒；canonical 指纹
+`be891b5c1af362da` 两次累计 20.033 秒，分别 11.341/8.692 秒，均返回 1481 行。request
+`aa2987f3`/`2acd5aa0` 的 Session hold 为 11.426/8.749 秒，非 SQL 仅 84.73/56.54ms，证明文件校验仍在
+Session 外，没有旧附件 N+1 或 lazy-load 复发。
+
+生产同形查询返回 854,488 bytes，Seq Scan + sort executor 仅 2.869ms、504 shared hit、无物理读；应用最大值
+约为 executor 的 3,953 倍。既有 2,500 行上限、字段投影、single-flight 与 300 秒缓存均有效，但 cache miss 后
+driver/PgBouncer/私网 fetch 尾部再次复发。状态恢复为 **RUNTIME_REPLACED / OPEN / REPEATED / OBSERVING**；
+不加索引、不延长 timeout/TTL。下一冷建必须补 pool acquire、fetch bytes/deserialize、server socket、route、
+远端 activity 与 response bytes 的同秒分段，暖请求目录 SQL 必须为 0。
+
+## 2026-10-29 三次冷建与驱动接收阶段精确分段
+
+固定窗 `audio-assets` 8/8 成功、累计 36.317 秒，P95/max 14.269 秒；canonical 指纹三次累计
+33.761 秒，P50/P95/max 11.133/12.993/12.993 秒。8 次请求只有 3 次目录 SQL，证明 300 秒缓存和
+single-flight 正常；三个 hold 的非 SQL 合计仅 675.04ms，Session 外文件校验未复发。
+
+同形生产查询返回 1,541 行/881,038 bytes，executor 6.527ms。新增同连接分段探针显示 connect 354.84ms，
+三次 execute/fetch 8.967/9.365/9.411 秒，Python materialize 仅 8.95/7.48/9.17ms，排除 executor 与应用
+反序列化。现有投影字段均被目录合并/解析/响应合同使用，盲目删字段会破坏完整性；服务端分页会改变全局搜索
+语义。本轮不改代码、不加索引，状态保持 **RUNTIME_REPLACED / OPEN / REPEATED / OBSERVING**。下一次自然
+冷建必须同步采 client/server socket、route、server activity 与 response bytes。
+
+## 2026-10-30 自然冷建与 PgBouncer/直连同形探针
+
+固定窗 `audio-assets` 8/8 成功，只有 1 个自然冷建命中 canonical 指纹 `be891b5c1af362da`：
+SQL 9.288 秒、1,558 行，请求 10.075 秒、Session hold 9.351 秒，hold 内非 SQL 仅 63.42ms；其余
+7 次缓存命中保持快速，说明 300 秒缓存、single-flight 与 Session 外文件校验仍有效。
+
+同一只读查询分别经 PgBouncer 与 `DIRECT_DATABASE_URL` 执行，均返回 1,558 行/891,354 bytes：前者
+connect 9.12ms、execute/fetch 9.105 秒、Python materialize 4.61ms、executor 6.029ms；后者 connect
+236.73ms、execute/fetch 9.067 秒、materialize 6.52ms、executor 5.139ms。两条路径同慢，排除缺索引、
+PostgreSQL executor、PgBouncer 排队与 Python 结果物化，公共边界收窄到 psycopg2 经 Tailscale
+`100.96.3.12 -> 100.92.99.39`、MTU 1280 的结果接收链路。
+
+状态保持 **RUNTIME_REPLACED / OPEN / REPEATED / WAITING_INFRASTRUCTURE**。字段均服务于现有完整目录合同，
+本轮不删字段、不分页改语义、不延长 TTL/timeout，也不盲目加索引。下一轮须取得自然冷建的 client/server
+socket 分段或在同等 payload 下完成同机房/非 Tailscale A/B，并以随后完整 24 小时自然窗确认不复发。
+
+## 2026-11-02 四次自然冷建再次主导全窗慢 SQL
+
+固定窗 `audio-assets` 13/13 成功，canonical 指纹 `be891b5c1af362da` 四次累计 38.203 秒，P50/P95/max
+约 9.667/9.902/9.902 秒；对应四个连接持有 P95/max 约 10.025 秒，匹配 SQL 合计 38.312 秒、非 SQL
+仅 0.716 秒。该指纹占全窗慢 SQL 累计耗时 64.5%，是本轮首要性能问题。
+
+结合 10-30 同形 PgBouncer/直连 execute-fetch 9.105/9.067 秒、executor 6.029/5.139ms 的 A/B，根因仍在
+共同 Tailscale/psycopg2 结果接收边界，而非 PostgreSQL executor、索引、Python materialize 或 Session
+跨文件 I/O。本轮不删完整字段、不改全局搜索语义、不延长 TTL/timeout、不加索引。状态保持
+**RUNTIME_REPLACED / OPEN / REPEATED / WAITING_INFRASTRUCTURE**；下一轮继续要求同机房/非 Tailscale A/B
+或 client/server socket 同秒分段，随后完整自然窗确认不复发。

@@ -52,12 +52,16 @@ from services.wechat_channels_publish_jobs import (
 )
 from services.mp3_video_workflow import (
     DEFAULT_GEMINI_URL,
+    DEFAULT_VIDEO_SPEEDS,
+    _direct_ds_numbered_sections,
+    _wsj_fields_from_response,
     AUDIO_EXTENSIONS,
     FEATURE_NAME,
     INFOGRAPHIC_PROMPT,
     Mp3VideoWorkflowError,
     QUEUE_NAME,
     VISUAL_ARTIFACT_KEYS,
+    WSJ_ARTIFACT_KEY,
     _db_retry,
     _video_file_ready,
     audio_meta_from_asset_reference,
@@ -827,11 +831,22 @@ def _bilibili_upload_parent_snapshot(
                         "vertical_video_path",
                     ),
                 ).label("vertical_video_path"),
+                func.coalesce(
+                    _task_json_text(result, "wsj_video", "video_path"),
+                    _task_json_text(result, "wsj_video", "landscape_video_path"),
+                    _task_json_text(result, "wsj_video", "vertical_video_path"),
+                ).label("wsj_video_path"),
+                _task_json_text(result, "wsj_video", "cover_path").label(
+                    "wsj_video_cover_path"
+                ),
                 _task_json_text(result, "plan", "xiaojunjun_video_title").label(
                     "landscape_title"
                 ),
                 _task_json_text(result, "plan", "ciketc_video_title").label(
                     "vertical_title"
+                ),
+                _task_json_text(result, "plan", "wsj_video_title").label(
+                    "wsj_title"
                 ),
                 _task_json_text(result, "plan", "title").label("plan_title"),
                 _task_json_text(
@@ -846,6 +861,12 @@ def _bilibili_upload_parent_snapshot(
                     "xiaojunjun_cover",
                     "path",
                 ).label("xiaojunjun_cover_path"),
+                _task_json_text(
+                    result,
+                    "artifacts",
+                    WSJ_ARTIFACT_KEY,
+                    "path",
+                ).label("wsj_cover_path"),
                 _task_json_text(
                     result,
                     "artifacts",
@@ -915,6 +936,7 @@ def _bilibili_upload_parent_snapshot(
 
     artifacts = {
         "xiaojunjun_cover": {"path": row.xiaojunjun_cover_path},
+        WSJ_ARTIFACT_KEY: {"path": row.wsj_cover_path},
         "finance_cover": {"path": row.finance_cover_path},
         "xiaojunjun_background": {"path": row.xiaojunjun_background_path},
         "podcast_cover": {"path": row.podcast_cover_path},
@@ -931,10 +953,15 @@ def _bilibili_upload_parent_snapshot(
             "plan": {
                 "xiaojunjun_video_title": row.landscape_title,
                 "ciketc_video_title": row.vertical_title,
+                "wsj_video_title": row.wsj_title,
                 "title": row.plan_title,
             },
             "landscape_video": {"video_path": row.landscape_video_path},
             "vertical_video": {"video_path": row.vertical_video_path},
+            "wsj_video": {
+                "video_path": row.wsj_video_path,
+                "cover_path": row.wsj_video_cover_path,
+            },
             "artifacts": artifacts,
         },
     )
@@ -1003,8 +1030,8 @@ def submit_bilibili_upload(current_user, job_id):
         return jsonify({"success": False, "message": "任务不存在"}), 404
 
     video_key = str(data.get("video_key") or data.get("video") or "landscape").strip().lower()
-    if video_key not in {"landscape", "vertical"}:
-        return jsonify({"success": False, "message": "video_key 只能是 landscape 或 vertical"}), 400
+    if video_key not in {"landscape", "vertical", "wsj"}:
+        return jsonify({"success": False, "message": "video_key 只能是 landscape、vertical 或 wsj"}), 400
 
     video = _video_by_key(task, video_key)
     video_path = _video_output_path(video)
@@ -1046,7 +1073,7 @@ def submit_bilibili_upload(current_user, job_id):
                 "title_source": (
                     "manual"
                     if _clean_upload_text(data.get("title"))
-                    else ("ds_6" if video_key == "landscape" else "ds_7")
+                    else ("ds_6" if video_key == "landscape" else ("ds_8" if video_key == "wsj" else "ds_7"))
                 ),
             },
             credential_name=task.credential_name,
@@ -1399,14 +1426,15 @@ def regenerate_videos(current_user, job_id):
     if enqueue_error:
         return jsonify({"success": False, "message": enqueue_error}), 502
     plan_audio = (payload.get("plan") or {}).get("audio") or {}
+    uniform_speed = payload.get("video_speed_override")
     range_text = (
         f"（{_format_audio_time(plan_audio.get('start_seconds'))}"
         f"-{_format_audio_time(plan_audio.get('end_seconds'))}，"
-        f"{plan_audio.get('speed') or 1.2}×）"
+        + (f"统一 {uniform_speed}×）" if uniform_speed is not None else "按各组默认倍速）")
     )
     return jsonify({
         "success": True,
-        "message": f"已按新设置重新投递横屏和竖屏视频生成任务{range_text}",
+        "message": f"已按新设置重新投递三组视频生成任务{range_text}",
         **payload,
         "data": payload,
     })
@@ -1416,7 +1444,7 @@ def regenerate_videos(current_user, job_id):
 @require_login
 def regenerate_artifact(current_user, job_id, artifact_key):
     key = str(artifact_key or "").strip()
-    if key not in VISUAL_ARTIFACT_KEYS:
+    if key not in VISUAL_ARTIFACT_KEYS and key != WSJ_ARTIFACT_KEY:
         return jsonify({"success": False, "message": "这个产物不支持重做封皮/背景图"}), 400
 
     task = _get_owned_task(current_user, job_id)
@@ -1480,6 +1508,10 @@ def regenerate_artifact(current_user, job_id, artifact_key):
             "title_text": new_artifact.get("manual_title_text") or title_text,
         })
     artifacts[key] = new_artifact
+    if key == WSJ_ARTIFACT_KEY:
+        artifacts = {k: v for k, v in artifacts.items() if not k.startswith("keyframe_wsj_")}
+        keyframes = result.get("keyframes") or {}
+        result["keyframes"] = {k: v for k, v in keyframes.items() if not k.startswith("keyframe_wsj_")}
     result["artifacts"] = artifacts
     if key == "audio_background" and isinstance(new_artifact.get("source_infographic"), dict):
         result["infographic"] = new_artifact.get("source_infographic")
@@ -2111,6 +2143,8 @@ def _job_payload(task, include_raw=False, *, bilibili_uploads=_JOB_PAYLOAD_BILIB
     infographic = result.get("infographic")
     landscape_path = _video_output_path(result.get("landscape_video"))
     vertical_path = _video_output_path(result.get("vertical_video"))
+    wsj_video = _video_by_key_from_result(result, "wsj")
+    wsj_path = _video_output_path(wsj_video)
     source_output_path = _source_output_path(result)
     status = STATUS_MAP.get(task.status, task.status or "queued")
     payload = {
@@ -2137,7 +2171,9 @@ def _job_payload(task, include_raw=False, *, bilibili_uploads=_JOB_PAYLOAD_BILIB
         "gemini": result.get("gemini"),
         "source": result.get("source"),
         "initial_response_text": result.get("initial_response_text"),
-        "plan": result.get("plan"),
+        "plan": _plan_with_wsj_response_fields(result),
+        "default_video_speeds": DEFAULT_VIDEO_SPEEDS,
+        "video_speed_override": (request_payload.get("audio_range_override") or {}).get("speed"),
         "infographic": infographic,
         "artifacts": artifacts,
         "keyframes": result.get("keyframes") or {},
@@ -2160,6 +2196,8 @@ def _job_payload(task, include_raw=False, *, bilibili_uploads=_JOB_PAYLOAD_BILIB
         ),
         "landscape_video": result.get("landscape_video"),
         "vertical_video": result.get("vertical_video"),
+        "wsj_video": wsj_video,
+        "wsj_video_outdated": bool(_video_output_path(result.get("wsj_video")) and not wsj_video),
         "ds_extract": _ds_extract_payload(result),
         "logs": result.get("logs") or [],
         "download_input_audio_url": f"/api/mp3-video-workflows/jobs/{task.id}/input-audio",
@@ -2168,6 +2206,7 @@ def _job_payload(task, include_raw=False, *, bilibili_uploads=_JOB_PAYLOAD_BILIB
         "download_infographic_url": f"/api/mp3-video-workflows/jobs/{task.id}/download-artifact/infographic" if _path_exists((infographic or {}).get("path")) else None,
         "download_landscape_video_url": f"/api/mp3-video-workflows/jobs/{task.id}/download-video/landscape" if _video_file_ready(landscape_path) else None,
         "download_vertical_video_url": f"/api/mp3-video-workflows/jobs/{task.id}/download-video/vertical" if _video_file_ready(vertical_path) else None,
+        "download_wsj_video_url": f"/api/mp3-video-workflows/jobs/{task.id}/download-video/wsj" if _video_file_ready(wsj_path) else None,
     }
     artifact_urls = {}
     for key, artifact in artifacts.items():
@@ -2310,6 +2349,7 @@ def _apply_continue_audio_range_override(result, workflow, payload, *, allow_spe
     plan_audio["end_seconds"] = audio_range["end_seconds"]
     if speed is not None:
         plan_audio["speed"] = speed
+    plan_audio.pop("speed_override", None)
     plan["audio"] = plan_audio
     result["plan"] = plan
     workflow["audio_range_override"] = audio_range
@@ -2321,6 +2361,9 @@ def _prepare_keyframe_job_for_full_video(task, payload=None):
     params = dict(task.params or {})
     workflow = dict(params.get(FEATURE_NAME) or {})
     result = dict(task.result or {})
+    plan = _plan_with_wsj_response_fields(result)
+    if plan:
+        result["plan"] = plan
     render_mode = str(
         result.get("render_mode")
         or workflow.get("render_mode")
@@ -2333,8 +2376,8 @@ def _prepare_keyframe_job_for_full_video(task, payload=None):
     ))
     if render_mode != "keyframes" and not has_keyframes:
         return False, "当前任务不是关键帧预览任务，不能用这个入口续跑完整视频"
-    if _video_file_ready(_video_output_path(result.get("landscape_video"))) and _video_file_ready(_video_output_path(result.get("vertical_video"))):
-        return False, "当前任务已经有完整横屏和竖屏视频，无需续跑"
+    if all(_video_file_ready(_video_output_path(_video_by_key_from_result(result, key))) for key in ("landscape", "vertical", "wsj")):
+        return False, "当前任务已完成三组视频，无需续跑"
 
     ok, message, audio_range = _apply_continue_audio_range_override(result, workflow, payload)
     if not ok:
@@ -2352,13 +2395,15 @@ def _prepare_keyframe_job_for_full_video(task, payload=None):
     result.pop("deferred_waits", None)
     result["landscape_video"] = _drop_keyframe_skip_video(result.get("landscape_video"))
     result["vertical_video"] = _drop_keyframe_skip_video(result.get("vertical_video"))
+    if "wsj_video" in result:
+        result["wsj_video"] = _drop_keyframe_skip_video(result.get("wsj_video"))
     logs = list(result.get("logs") or [])
     range_text = ""
     if audio_range:
         range_text = f"（音频 {_format_audio_time(audio_range.get('start_seconds'))}-{_format_audio_time(audio_range.get('end_seconds'))}）"
     logs.append({
         "step": "continue_full_video_requested",
-        "message": f"用户确认关键帧效果，继续生成完整横屏和竖屏视频{range_text}",
+        "message": f"用户确认关键帧效果，继续生成三组完整视频{range_text}",
         "progress": max(int(task.progress or 0), 68),
         "updated_at": requested_at,
     })
@@ -2380,7 +2425,9 @@ def _prepare_job_for_video_regeneration(task, payload=None):
     params = dict(task.params or {})
     workflow = dict(params.get(FEATURE_NAME) or {})
     result = dict(task.result or {})
-    plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
+    plan = _plan_with_wsj_response_fields(result)
+    if plan:
+        result["plan"] = plan
     artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
     if not plan:
         return False, "当前任务缺少 DS/规划结果，不能重生成视频"
@@ -2405,18 +2452,21 @@ def _prepare_job_for_video_regeneration(task, payload=None):
         "archived_at": requested_at,
         "landscape_video": result.get("landscape_video"),
         "vertical_video": result.get("vertical_video"),
+        "wsj_video": result.get("wsj_video"),
         "children": {
             "landscape_video": (result.get("children") or {}).get("landscape_video") if isinstance(result.get("children"), dict) else None,
             "vertical_video": (result.get("children") or {}).get("vertical_video") if isinstance(result.get("children"), dict) else None,
+            "wsj_video": (result.get("children") or {}).get("wsj_video") if isinstance(result.get("children"), dict) else None,
         },
     }
-    if old_videos["landscape_video"] or old_videos["vertical_video"]:
+    if any(old_videos[key] for key in ("landscape_video", "vertical_video", "wsj_video")):
         history.append(old_videos)
         result["regenerated_video_history"] = history[-8:]
 
     children = dict(result.get("children") or {})
     children.pop("landscape_video", None)
     children.pop("vertical_video", None)
+    children.pop("wsj_video", None)
 
     result["render_mode"] = "full_video"
     result["force_video_regenerate_at"] = requested_at
@@ -2428,11 +2478,12 @@ def _prepare_job_for_video_regeneration(task, payload=None):
     result.pop("deferred_waits", None)
     result.pop("landscape_video", None)
     result.pop("vertical_video", None)
+    result.pop("wsj_video", None)
     logs = list(result.get("logs") or [])
     logs.append({
         "step": "regenerate_videos_requested",
         "message": (
-            "用户要求重新生成横屏和竖屏视频，强制跳过旧视频复用"
+            "用户要求重新生成三组视频，强制跳过旧视频复用"
             + (
                 f"（音频 {_format_audio_time(audio_range.get('start_seconds'))}"
                 f"-{_format_audio_time(audio_range.get('end_seconds'))}）"
@@ -2490,6 +2541,11 @@ def _video_by_key_from_result(result, key):
         return result.get("landscape_video")
     if key == "vertical":
         return result.get("vertical_video")
+    if key == "wsj":
+        video = result.get("wsj_video") or {}
+        cover = (result.get("artifacts") or {}).get(WSJ_ARTIFACT_KEY) or {}
+        if cover.get("path") and video.get("cover_path") == cover["path"]:
+            return video
     return None
 
 
@@ -2505,6 +2561,13 @@ def _default_bilibili_title(result, ds, video_key):
         return _first_clean_bilibili_title(
             ds.get("title_6"),
             plan.get("xiaojunjun_video_title"),
+            plan.get("title"),
+            "内资闭门会",
+        )
+    if video_key == "wsj":
+        return _first_clean_bilibili_title(
+            ds.get("title_8"),
+            plan.get("wsj_video_title"),
             plan.get("title"),
             "内资闭门会",
         )
@@ -2554,7 +2617,9 @@ def _resolve_bilibili_cover(result, video_key, requested_key=""):
         path = artifact.get("path") if isinstance(artifact, dict) else None
         return (path, requested_key) if _path_exists(path) else (None, requested_key)
 
-    if video_key == "landscape":
+    if video_key == "wsj":
+        candidates = [WSJ_ARTIFACT_KEY]
+    elif video_key == "landscape":
         candidates = ["xiaojunjun_cover", "finance_cover", "xiaojunjun_background"]
     else:
         candidates = ["finance_cover", "podcast_cover", "vertical_cover", "audio_background"]
@@ -2679,10 +2744,10 @@ def _bilibili_upload_delay_time(data):
             raise ValueError("B站定时发布时间必须是秒级时间戳") from exc
 
     now_ts = int(time.time())
-    min_ts = now_ts + 5 * 60
+    min_ts = now_ts + 15 * 60
     max_ts = now_ts + 15 * 24 * 60 * 60
     if timestamp < min_ts or timestamp > max_ts:
-        raise ValueError("B站定时发布时间需在 5 分钟后、15 天内")
+        raise ValueError("B站定时发布时间需在 15 分钟后、15 天内")
     return timestamp
 
 
@@ -2743,7 +2808,7 @@ def _ds_extract_payload(result):
     raw_text = _source_response_text(result)
     sections = _numbered_sections(raw_text)
     clip = _extract_clip(sections.get("4") or raw_text)
-    plan = result.get("plan") if isinstance(result, dict) and isinstance(result.get("plan"), dict) else {}
+    plan = _plan_with_wsj_response_fields(result)
     plan_clip = _clip_from_plan(plan)
     # Once the production planner has accepted and persisted a structured
     # result, it is authoritative for display too. Re-parsing the raw model
@@ -2752,6 +2817,7 @@ def _ds_extract_payload(result):
     plan_title_1 = _clean_ds_title(_plan_title_option(plan, 0) or "")
     plan_title_2 = _clean_ds_title(_plan_title_option(plan, 1) or plan.get("title") or "")
     plan_title_6 = _clean_ds_title(plan.get("xiaojunjun_video_title") or "", prefer_closed_door=True)
+    wsj = _wsj_fields_from_response(raw_text)
     plan_title_7 = _clean_ds_title(plan.get("ciketc_video_title") or "", prefer_closed_door=True)
     payload = {
         "title_1": plan_title_1 or _clean_ds_title(sections.get("1", "")),
@@ -2759,6 +2825,8 @@ def _ds_extract_payload(result):
         "clip": clip,
         "title_6": plan_title_6 or _clean_ds_title(sections.get("6", ""), prefer_closed_door=True),
         "title_7": plan_title_7 or _clean_ds_title(sections.get("7", ""), prefer_closed_door=True),
+        "title_8": plan.get("wsj_video_title") or wsj.get("wsj_video_title") or "",
+        "wsj_title_lines": plan.get("wsj_title_lines") or wsj.get("wsj_title_lines") or [],
         "raw_text": raw_text,
         "raw_sections": sections,
     }
@@ -2777,10 +2845,23 @@ def _ds_extract_payload(result):
         payload["title_2"],
         payload["title_6"],
         payload["title_7"],
+        payload["title_8"],
+        bool(payload["wsj_title_lines"]),
         clip.get("start_text"),
         clip.get("end_text"),
     ])
     return payload
+
+
+def _plan_with_wsj_response_fields(result):
+    result = result if isinstance(result, dict) else {}
+    plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
+    enriched = dict(plan)
+    raw_text = _source_response_text(result)
+    for key, value in _wsj_fields_from_response(raw_text).items():
+        if not enriched.get(key):
+            enriched[key] = value
+    return enriched
 
 
 def _plan_title_option(plan, index):
@@ -2815,23 +2896,7 @@ def _coerce_seconds(value):
 
 
 def _numbered_sections(text):
-    text = str(text or "")
-    if not text.strip():
-        return {}
-    marker_re = re.compile(
-        r"(?:(?<=\n)|^)\s*(?:[-*]\s*)?(?:\*\*)?\s*([1-7])\s*[.．、:：]\s*"
-        r"|(?:\*\*)\s*([1-7])\s*[.．、:：]\s*"
-    )
-    matches = list(marker_re.finditer(text))
-    sections = {}
-    for index, match in enumerate(matches):
-        number = match.group(1) or match.group(2)
-        start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        content = text[start:end].strip()
-        if number and content:
-            sections[number] = content
-    return sections
+    return _direct_ds_numbered_sections(text)
 
 
 def _clean_ds_text(text):
@@ -3003,6 +3068,7 @@ def _download_items_for_payload(payload):
         add(key, label, url, kind)
     add("landscape_video", "小君君横屏视频", payload.get("download_landscape_video_url"), "video")
     add("vertical_video", "此刻此声竖屏视频", payload.get("download_vertical_video_url"), "video")
+    add("wsj_video", "WSJ 4:3 视频", payload.get("download_wsj_video_url"), "video")
     add("result_json", "编排结果 JSON", payload.get("download_result_url"), "json")
     return items
 

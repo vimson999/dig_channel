@@ -10,7 +10,7 @@ from difflib import SequenceMatcher
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import requests
-from bilibili_api import Credential, user
+from bilibili_api import Credential, request_settings, user
 from sqlalchemy import and_, bindparam, cast, column, or_, update, values
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -89,6 +89,23 @@ class BilibiliIntelligenceError(RuntimeError):
     pass
 
 
+def _configure_bilibili_api_proxy() -> str:
+    """Make bilibili_api honor the process proxy instead of relying on TUN DNS."""
+    proxy = next((
+        str(os.environ.get(name) or "").strip()
+        for name in (
+            "BILIBILI_INTELLIGENCE_PROXY",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+        )
+        if str(os.environ.get(name) or "").strip()
+    ), "")
+    request_settings.set_proxy(proxy)
+    return proxy
+
+
 def _int_env(name: str, default: int, *, lower: int = 1, upper: int = 10000) -> int:
     try:
         value = int(os.environ.get(name, default))
@@ -144,6 +161,7 @@ async def _fetch_user_videos(uid: str, credential: Credential, page_size: int) -
 
 
 def fetch_user_videos(uid: str, credential: Credential, page_size: int = 30) -> Dict[str, Any]:
+    _configure_bilibili_api_proxy()
     return asyncio.run(_fetch_user_videos(uid, credential, page_size))
 
 

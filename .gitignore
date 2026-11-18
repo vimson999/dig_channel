@@ -167,6 +167,7 @@ runtime/browser_profiles/
 /outputs/
 data/generated_thumbnails/
 data/cache/
+data/bilibili_upower_archive/
 data/processed/
 data/uploads/
 data/audio-ad-removal/workspaces/

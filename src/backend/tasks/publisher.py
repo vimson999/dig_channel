@@ -6,6 +6,7 @@ import json
 import subprocess
 import time
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from sqlalchemy import cast, func
 from sqlalchemy.dialects.postgresql import JSONB
@@ -25,7 +26,12 @@ from models.task import PublicationTask
 from models import db
 from services.video_editor import video_editor_service
 from services.thumbnail_service import thumbnail_service
-from services.bilibili.uploader import BiliUploader, DEFAULT_NEUTRAL_MARK
+from services.bilibili.uploader import (
+    BilibiliScheduledUploadMarginError,
+    BilibiliStaleChargingTierError,
+    BiliUploader,
+    DEFAULT_NEUTRAL_MARK,
+)
 from services.youtube.uploader import YouTubeUploader
 from services.platform_credential_service import resolve_bilibili_auth
 from services.platform_publish_dispatch import PLATFORM_UPLOAD_QUEUE
@@ -34,6 +40,7 @@ from services.report_stick_figure_audio_alignment import (
     align_subtitles_to_audio,
 )
 from services.runtime_guard import (
+    deployment_actor_identity,
     guard_publication_task_start,
     is_retryable_db_error,
     release_db_session_quietly,
@@ -1346,7 +1353,13 @@ def run_publication_pipeline(self, task_id):
             task = update_task_record(task_id, progress=50, result=result_state)
     
             # --- Step 2: Thumbnail ---
-            final_cover_path = None
+            final_cover_path = (
+                to_abs_path(vid_params.get('image_path'))
+                if global_aspect_ratio == '4:3' and params.get('metadata', {}).get('role') == 'wsj_4_3'
+                else None
+            )
+            if final_cover_path:
+                result_state = {**result_state, 'cover_path': final_cover_path}
             if thumb_params:
                 task = update_task_record(task_id, current_step='thumbnail', result=result_state)
                 
@@ -1629,13 +1642,32 @@ def run_bilibili_upload_only(self, task_id):
         cover_path = _first_existing_path(context.cover_path)
         if not video_path:
             message = "无法补发 B站：找不到已生成的视频文件"
+            completed_at = datetime.utcnow()
+            actor = deployment_actor_identity(
+                deployment_root=PROJECT_ROOT,
+                code_path=Path(__file__),
+            )
             update_task_record(
                 task_id,
                 status="failed",
                 current_step="failed",
                 progress=0,
                 error_message=message,
-                completed_at=datetime.utcnow(),
+                completed_at=completed_at,
+                result_patch={
+                    "upload_failure": {
+                        "reason": "video_path_unavailable",
+                        "video_path": str(context.video_path or ""),
+                        "closed_at": completed_at.isoformat() + "Z",
+                        "actor": actor,
+                    },
+                },
+            )
+            logger.error(
+                "Task %s Bilibili upload video unavailable; actor=%s video_path=%s",
+                task_id,
+                json.dumps(actor, ensure_ascii=False, sort_keys=True),
+                context.video_path,
             )
             raise FileNotFoundError(message)
 
@@ -1663,6 +1695,8 @@ def run_bilibili_upload_only(self, task_id):
                 buvid3=bili_auth.get("buvid3"),
                 dedeuserid=bili_auth.get("dedeuserid"),
             )
+            uploader.validate_scheduled_upload_margin(context.delay_time)
+            uploader.validate_charging_pay_selection(context.charging_pay)
 
             async def _do_upload():
                 return await uploader.upload_single(
@@ -1728,11 +1762,25 @@ def run_bilibili_upload_only(self, task_id):
             raise
         except Exception as exc:
             logger.error("Bilibili upload supplement failed for task %s: %s", task_id, exc, exc_info=True)
+            reselect_required = isinstance(
+                exc,
+                (BilibiliStaleChargingTierError, BilibiliScheduledUploadMarginError),
+            )
+            result_patch = {"bilibili_error": str(exc)}
+            if reselect_required:
+                result_patch.update({
+                    "bilibili_reselect_required": True,
+                    "bilibili_error_code": (
+                        "schedule_margin_expired"
+                        if isinstance(exc, BilibiliScheduledUploadMarginError)
+                        else "stale_upower_level"
+                    ),
+                })
             update_task_record(
                 task_id,
-                result_patch={"bilibili_error": str(exc)},
+                result_patch=result_patch,
                 status="failed",
-                current_step="failed",
+                current_step="waiting_user_reselect" if reselect_required else "failed",
                 progress=10,
                 error_message=str(exc),
                 completed_at=datetime.utcnow(),

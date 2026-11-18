@@ -446,6 +446,9 @@ def _run_audio_clean_task_impl_guarded(task_id, celery_task=None):
 
             merged_result = dict(progress_result)
             merged_result.update(result)
+            # Preserve per-file evidence even when canonical validation or a
+            # downstream handoff raises; failure handling uses this snapshot.
+            progress_result.update(merged_result)
             registration = register_cleaned_outputs(
                 task_key,
                 media_type="audio",
@@ -457,8 +460,20 @@ def _run_audio_clean_task_impl_guarded(task_id, celery_task=None):
                 registration,
             )
             cleaned_files = merged_result.get("cleaned_files") or []
+            progress_result.update(merged_result)
             if not cleaned_files:
-                raise RuntimeError("音频清洗完成但没有拿到可验证的清洗输出文件")
+                errors = list(dict.fromkeys(
+                    str(item.get("error") or item.get("message") or item.get("reason") or "")
+                    for item in merged_result.get("files") or []
+                    if isinstance(item, dict) and item.get("status") in {"failed", "skipped"}
+                ))
+                detail = "；".join(error for error in errors if error)[:1200]
+                counts = (
+                    f"成功 {merged_result.get('success_count', 0)}，"
+                    f"失败 {merged_result.get('failed_count', 0)}，"
+                    f"跳过 {merged_result.get('skipped_count', 0)}"
+                )
+                raise RuntimeError(f"音频清洗无可用输出（{counts}）" + (f"：{detail}" if detail else "：清洗输出未通过文件校验"))
 
             source_refs = _clean_source_refs(pipeline, merged_result)
             result = _enqueue_auto_publish_task(

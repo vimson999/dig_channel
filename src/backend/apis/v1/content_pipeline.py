@@ -354,6 +354,25 @@ def list_web_content_pipeline_submissions(current_user):
     publish_by_source = {}
     for task in publish_tasks:
         publish_by_source.setdefault(str(task.source_task_id), task)
+    failed_publish_ids = [
+        str(task.id) for task in publish_by_source.values()
+        if _normalized_history_status(task.status) == "failed"
+    ]
+    publish_failure_messages = {}
+    if failed_publish_ids:
+        failed_results = (
+            db.session.query(
+                PublicationTask.id,
+                PublicationTask.result["rounds"][0]["rules"][0]["message"]
+                .as_string().label("failure_message"),
+            )
+            .filter(PublicationTask.id.in_(failed_publish_ids))
+            .all()
+        )
+        publish_failure_messages = {
+            str(row.id): str(row.failure_message)[:500] if row.failure_message else None
+            for row in failed_results
+        }
 
     tasks_by_submission = {submission_id: [] for submission_id in submission_ids}
     for task in clean_tasks:
@@ -370,6 +389,7 @@ def list_web_content_pipeline_submissions(current_user):
                 row.submitted_at,
                 tasks_by_submission.get(submission_id) or [],
                 publish_by_source,
+                publish_failure_messages,
             )
         )
     return jsonify(
@@ -524,7 +544,9 @@ def _web_submission_history_item(
     submitted_at,
     clean_tasks,
     publish_by_source,
+    publish_failure_messages=None,
 ):
+    publish_failure_messages = publish_failure_messages or {}
     kind_by_feature = {
         "content_pdf_clean": "pdf",
         "content_audio_clean": "mp3",
@@ -558,7 +580,11 @@ def _web_submission_history_item(
                 "files_count": int(clean_task.content_clean_files_count or 0),
                 "success_count": int(clean_task.content_clean_success_count or 0),
                 "failed_count": int(clean_task.content_clean_failed_count or 0),
-                "error": str(status_source.error_message or "") or None,
+                "error": (
+                    publish_failure_messages.get(str(publish_task.id))
+                    if publish_task and item_status == "failed"
+                    else None
+                ) or str(status_source.error_message or "") or None,
                 "updated_at": _history_datetime(status_source.updated_at),
             }
         )

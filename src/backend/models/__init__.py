@@ -37,6 +37,7 @@ from .bilibili_intelligence import (
     BilibiliCompetitorVideo,
 )
 from .bilibili_publish import PublicationTaskBilibiliUpload
+from .bilibili_upower_archive import BilibiliUpowerArchiveStat, BilibiliUpowerTopicReport, BilibiliUpowerTopic
 from .tts import TTSArticle, TTSSegment
 from .zsxq_sync import (
     ZsxqAttachment,
@@ -109,6 +110,7 @@ __all__ = [
     'BilibiliCompetitor',
     'BilibiliCompetitorVideo',
     'BilibiliChargingSnapshot',
+    'BilibiliUpowerArchiveStat',
     'PublicationTaskBilibiliUpload',
     'TTSArticle',
     'TTSSegment',
