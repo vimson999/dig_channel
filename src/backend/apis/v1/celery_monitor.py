@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import redis
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, has_app_context, jsonify, request
 
 
 bp = Blueprint("celery_monitor", __name__, url_prefix="/api/v1/celery")
@@ -88,6 +88,15 @@ SERVICES = {
         "run_script": "scripts/dev/run-celery.sh",
         "log_file": "render.log",
         "description": "publisher / video-editor / 火柴人视频主渲染队列",
+    },
+    "book_commerce": {
+        "label": "图书带货分析",
+        "queue": "book_commerce",
+        "hostname_prefix": "book_commerce@",
+        "run_script": "scripts/dev/run-celery-book-commerce.sh",
+        "log_file": "book_commerce.log",
+        "description": "图书带货增长和候选计算队列",
+        "auto_heal": False,
     },
     "platform_upload": {
         "label": "平台上传",
@@ -2565,6 +2574,8 @@ def _row_get(row, key):
 
 
 def _start_service(service_id, service, *, clear_pause=True):
+    if service_id == "book_commerce" and (not has_app_context() or not current_app.config.get("ENABLE_BOOK_COMMERCE", False)):
+        raise RuntimeError("图书带货情报尚未启用")
     _ensure_dirs()
     paused = _load_paused_services().get(service_id)
     if paused and not clear_pause:

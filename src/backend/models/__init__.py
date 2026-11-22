@@ -31,6 +31,7 @@ from .voyage_analysis import VoyageAnalysis
 from .platform_credential import PlatformCredentialAccount, PlatformCredentialBinding
 from .zsxq_history_api_client import ZsxqHistoryApiClient
 from .external_document import ExternalDocument, ZsxqTopicExternalDocument
+from . import book_commerce
 from .bilibili_intelligence import (
     BilibiliChargingSnapshot,
     BilibiliCompetitor,

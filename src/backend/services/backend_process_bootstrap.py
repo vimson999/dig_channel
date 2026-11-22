@@ -173,6 +173,10 @@ def _bootstrap_celery_services(app, mode):
             "ok": False,
         }
         try:
+            if service_id == "book_commerce" and not (app and app.config.get("ENABLE_BOOK_COMMERCE", False)):
+                item.update({"action": "feature_disabled", "ok": True, "skipped": True})
+                results.append(item)
+                continue
             if _is_service_paused(service_id):
                 item.update({"action": "paused", "ok": True, "skipped": True})
                 results.append(item)

@@ -321,6 +321,13 @@ class SharedNavigation {
                         "group": "发现机会"
                     },
                     {
+                        "id": "book-commerce",
+                        "name": "图书带货情报",
+                        "icon": "fas fa-book-open",
+                        "href": "book-commerce.html",
+                        "group": "发现机会"
+                    },
+                    {
                         "id": "zsxq-insights",
                         "name": "生财情报台",
                         "icon": "fas fa-chart-simple",
@@ -721,7 +728,7 @@ class SharedNavigation {
     }
 
     renderNavLink(item) {
-        return `<a href="${item.href}" class="shared-nav-link" ${item.id === this.currentPage ? 'aria-current="page"' : ''}${this.getLinkAttributes(item)}>
+        return `<a href="${item.href}" class="shared-nav-link" ${item.id === 'book-commerce' ? 'data-book-commerce-link hidden' : ''} ${item.id === this.currentPage ? 'aria-current="page"' : ''}${this.getLinkAttributes(item)}>
             <i class="${item.icon}" aria-hidden="true"></i><span>${item.name}</span>
             ${item.external ? '<small>外部 ↗</small>' : ''}</a>`;
     }
@@ -949,6 +956,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 只把真正的站点 banner 当作已挂载导航；业务卡片和弹窗也会使用 header 标签。
     if (!document.querySelector('header[role="banner"]')) {
         window.sharedNavigation = new SharedNavigation();
+        const base = (window.API_BASE_URL || window.CONFIG?.API_BASE_URL || '/api/v1').replace(/\/$/, '');
+        const token = localStorage.getItem('access_token');
+        fetch(`${base}/book-commerce/availability`, {credentials: 'include', headers: token ? {Authorization: `Bearer ${token}`} : {}})
+            .then(response => response.ok ? response.json() : null)
+            .then(result => {
+                if (result?.success && result.data?.enabled && result.data?.ready) {
+                    document.querySelectorAll('[data-book-commerce-link]').forEach(link => { link.hidden = false; });
+                }
+            }).catch(() => {});
     }
 });
 

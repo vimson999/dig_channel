@@ -63,3 +63,5 @@ Backend startup bootstrap:
 - 临时强制重启托管进程：`BACKEND_PROCESS_BOOTSTRAP_MODE=restart ./scripts/dev/run-backend.sh`
 - 临时关闭自动恢复：`BACKEND_PROCESS_BOOTSTRAP_ENABLED=0 ./scripts/dev/run-backend.sh`
 - 默认托管队列是 `all`，watchdog 默认跟随 `BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES`；默认启动知识星球系统同步、内容历史清理、B站充电人数采集、B站情报每小时同步、YouTube 频道每日同步和最近 3 天视频每日同步计划。可用 `BACKEND_PROCESS_BOOTSTRAP_CELERY_SERVICES`、`CELERY_AUTO_HEAL_SERVICES` 和 `BACKEND_PROCESS_BOOTSTRAP_SCHEDULERS` 指定逗号分隔的服务列表，设为 `none` 可临时禁用 scheduler 自启动
+
+- `./scripts/dev/run-celery-book-commerce.sh` 启动图书带货分析专用队列（并发 1）；仅在完成数据库迁移并启用功能后启动。

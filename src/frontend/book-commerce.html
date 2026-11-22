@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f5f1">
+  <title>图书带货情报 - Shioa</title>
+  <link rel="stylesheet" href="css/book-commerce.css">
+</head>
+<body>
+<main class="commerce">
+  <header class="hero">
+    <div class="hero-copy">
+      <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>内容观察 · 数据情报</p>
+      <h1>图书带货情报</h1>
+      <p class="hero-description">从账号、商品和视频的日度变化中，找到值得继续研究的内容。</p>
+    </div>
+    <button id="refresh" class="button button-quiet" type="button"><span aria-hidden="true">↻</span> 刷新数据</button>
+  </header>
+
+  <p id="notice" role="status" aria-live="polite"></p>
+
+  <section class="overview" aria-labelledby="overview-title">
+    <div class="section-heading">
+      <div><p class="section-kicker">当前数据集</p><h2 id="overview-title">数据概况</h2></div>
+      <p class="section-note">汇总已导入的对标资料</p>
+    </div>
+    <div id="summary" class="summary" aria-label="数据概况"></div>
+  </section>
+
+  <section class="workspace" aria-label="情报浏览">
+    <div class="workspace-heading">
+      <div class="workspace-title"><p class="section-kicker">发现机会</p><h2>情报浏览</h2></div>
+      <div class="toolbar">
+        <nav id="tabs" aria-label="情报栏目">
+          <button type="button" data-tab="accounts" aria-selected="true">账号概览</button>
+          <button type="button" data-tab="products" aria-selected="false">商品动销</button>
+          <button type="button" data-tab="videos" aria-selected="false">视频互动</button>
+          <button type="button" data-tab="candidates" aria-selected="false">候选池</button>
+          <button type="button" data-tab="decisions" aria-selected="false">我的标记</button>
+          <button type="button" data-tab="imports" aria-selected="false" hidden>数据导入</button>
+        </nav>
+      </div>
+    </div>
+
+    <div id="filters-panel" class="filters-panel">
+      <div class="filters-heading"><div><h3>筛选条件</h3><p>按赛道和日期查看相关情报</p></div></div>
+      <div class="filters">
+        <div class="filter-field category-filter" id="category-filter">
+          <span id="category-label">赛道</span>
+          <button id="category-toggle" class="category-toggle" type="button" aria-expanded="false" aria-controls="category-menu" aria-labelledby="category-label category-summary">
+            <span id="category-summary">全部赛道</span><span class="category-chevron" aria-hidden="true">⌄</span>
+          </button>
+          <div id="category-menu" class="category-menu" hidden>
+            <input id="category-search" type="search" autocomplete="off" placeholder="搜索赛道名称或路径">
+            <p class="category-menu-hint">可勾选多个；命中任一所选赛道即显示</p>
+            <div id="category-options" class="category-options" role="group" aria-label="赛道选项"></div>
+            <div class="category-menu-footer"><span id="category-selection-count">未选择赛道</span><button id="category-clear" type="button">清空</button></div>
+          </div>
+          <div id="selected-categories" class="selected-categories" aria-live="polite"></div>
+        </div>
+        <label class="filter-field"><span>业务日期</span><input id="business-date" type="date"></label>
+        <label class="filter-field" id="scope-label" hidden><span>销量范围</span><select id="scope"><option value="account_listing">账号橱窗</option><option value="platform_listing">平台商品</option></select></label>
+        <label class="filter-field" id="decision-label" hidden><span>标记筛选</span><select id="decision-filter"><option value="visible">未忽略</option><option value="all">全部</option><option value="saved">已收藏</option><option value="to_research">待研究</option><option value="dismissed">已忽略</option><option value="pending">待处理</option></select></label>
+        <button id="load" class="button button-primary" type="button">查看情报</button>
+      </div>
+      <p id="context" class="context-line" role="status"></p>
+    </div>
+
+    <div id="results-heading" class="results-heading"><div><p class="section-kicker">浏览结果</p><h3 id="results-title">账号概览</h3></div><span id="result-count" class="result-count"></span></div>
+    <div id="content" aria-live="polite"></div>
+    <div id="pagination" class="pagination"><button id="prev" class="button button-quiet" type="button">上一页</button><span id="page"></span><button id="next" class="button button-quiet" type="button">下一页</button></div>
+  </section>
+
+  <dialog id="detail" aria-labelledby="detail-title">
+    <div class="dialog-head"><div><p class="section-kicker">数据详情</p><h2 id="detail-title">详情</h2></div><button id="close-detail" class="button button-quiet" type="button">关闭</button></div>
+    <div id="detail-body" class="detail-body"></div>
+  </dialog>
+</main>
+<script src="js/env.js"></script>
+<script src="js/config.js"></script>
+<script src="js/shared-navigation.js"></script>
+<script src="js/book-commerce.js"></script>
+</body>
+</html>

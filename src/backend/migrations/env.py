@@ -4,6 +4,7 @@ from logging.config import fileConfig
 from flask import current_app
 
 from alembic import context
+from utils.migration_filters import exclude_book_commerce
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -65,7 +66,8 @@ def run_migrations_offline():
     """
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url, target_metadata=get_metadata(), literal_binds=True
+        url=url, target_metadata=get_metadata(), literal_binds=True,
+        include_object=exclude_book_commerce
     )
 
     with context.begin_transaction():
@@ -90,7 +92,13 @@ def run_migrations_online():
                 directives[:] = []
                 logger.info('No changes in schema detected.')
 
-    conf_args = current_app.extensions['migrate'].configure_args
+    conf_args = dict(current_app.extensions['migrate'].configure_args)
+    previous_include_object = conf_args.get("include_object")
+    def include_object(obj, name, type_, reflected, compare_to):
+        return exclude_book_commerce(obj, name, type_, reflected, compare_to) and (
+            previous_include_object is None or previous_include_object(obj, name, type_, reflected, compare_to)
+        )
+    conf_args["include_object"] = include_object
     if conf_args.get("process_revision_directives") is None:
         conf_args["process_revision_directives"] = process_revision_directives
 

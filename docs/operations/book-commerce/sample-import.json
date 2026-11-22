@@ -1,0 +1,196 @@
+{
+  "source": "synthetic_provider_example",
+  "adapter_version": "1.0.0",
+  "accounts": [
+    {
+      "source_key": "account:demo-shiguang",
+      "external_id": "demo-channel-001",
+      "name": "示例账号（虚构）",
+      "categories": ["养生饮食"],
+      "location": "湖北 武汉",
+      "is_ai_content": false,
+      "source_url": "https://example.com/channels/demo-shiguang",
+      "observed_at": "2026-11-17T20:05:00+08:00"
+    }
+  ],
+  "books": [
+    {
+      "source_key": "book:demo-9787111128069",
+      "title": "示例图书（虚构）",
+      "isbn13": "9787111128069",
+      "author": "示例作者",
+      "publisher": "示例出版社",
+      "edition": "示例版",
+      "category": "养生饮食",
+      "observed_at": "2026-11-17T20:05:00+08:00"
+    }
+  ],
+  "listings": [
+    {
+      "source_key": "listing:demo-shop:demo-book",
+      "external_id": "demo-listing-001",
+      "shop_external_id": "demo-shop-001",
+      "shop_name": "示例店铺（虚构）",
+      "title": "示例图书商品",
+      "variant": "单本",
+      "book": "book:demo-9787111128069",
+      "source_url": "https://example.com/shop/demo-listing-001",
+      "observed_at": "2026-11-17T20:05:00+08:00"
+    }
+  ],
+  "videos": [
+    {
+      "source_key": "video:demo-shiguang-001",
+      "external_id": "demo-video-001",
+      "account": "account:demo-shiguang",
+      "title": "示例视频：日常饮食习惯",
+      "published_at": "2026-11-15T18:00:00+08:00",
+      "source_url": "https://example.com/video/demo-video-001",
+      "core_hook": "示例开场钩子",
+      "script_text": "这是虚构的演示文案，不代表任何真实作品。",
+      "transcript_status": "available",
+      "transcript_source": "synthetic_example",
+      "transcript_updated_at": "2026-11-17T20:05:00+08:00",
+      "observed_at": "2026-11-17T20:05:00+08:00"
+    }
+  ],
+  "account_listings": [
+    {
+      "account": "account:demo-shiguang",
+      "listing": "listing:demo-shop:demo-book",
+      "status": "active",
+      "observed_at": "2026-11-17T20:05:00+08:00"
+    }
+  ],
+  "video_listing_links": [
+    {
+      "video": "video:demo-shiguang-001",
+      "account": "account:demo-shiguang",
+      "listing": "listing:demo-shop:demo-book",
+      "valid_from": "2026-11-16T10:00:00+08:00",
+      "valid_to": null,
+      "observed_at": "2026-11-17T20:05:00+08:00",
+      "relation_type": "attached",
+      "verification_status": "confirmed",
+      "evidence_reference": "https://example.com/evidence/demo-video-001"
+    }
+  ],
+  "observations": [
+    {
+      "kind": "account",
+      "account": "account:demo-shiguang",
+      "observed_at": "2026-11-16T20:00:00+08:00",
+      "values": {
+        "total_posts": 120,
+        "showcase_rating": "4.73",
+        "buyers_count": 80,
+        "total_sales": 310,
+        "repeat_customers": 10,
+        "total_products": 25
+      },
+      "quality": {
+        "total_posts": "exact",
+        "showcase_rating": "exact",
+        "buyers_count": "exact",
+        "total_sales": "exact",
+        "repeat_customers": "exact",
+        "total_products": "exact"
+      }
+    },
+    {
+      "kind": "account",
+      "account": "account:demo-shiguang",
+      "observed_at": "2026-11-17T20:00:00+08:00",
+      "values": {
+        "total_posts": 121,
+        "showcase_rating": "4.73",
+        "buyers_count": 81,
+        "total_sales": 335,
+        "repeat_customers": 10,
+        "total_products": 25
+      },
+      "quality": {
+        "total_posts": "exact",
+        "showcase_rating": "exact",
+        "buyers_count": "exact",
+        "total_sales": "exact",
+        "repeat_customers": "exact",
+        "total_products": "exact"
+      }
+    },
+    {
+      "kind": "showcase",
+      "account": "account:demo-shiguang",
+      "listing": "listing:demo-shop:demo-book",
+      "scope": "account_listing",
+      "observed_at": "2026-11-16T20:00:00+08:00",
+      "values": {
+        "cumulative_sales": 310,
+        "price": "49.80",
+        "currency": "CNY",
+        "availability": "in_stock"
+      },
+      "quality": {
+        "cumulative_sales": "exact",
+        "price": "exact",
+        "currency": "exact",
+        "availability": "exact"
+      }
+    },
+    {
+      "kind": "showcase",
+      "account": "account:demo-shiguang",
+      "listing": "listing:demo-shop:demo-book",
+      "scope": "account_listing",
+      "observed_at": "2026-11-17T20:00:00+08:00",
+      "values": {
+        "cumulative_sales": 335,
+        "price": "49.80",
+        "currency": "CNY",
+        "availability": "in_stock"
+      },
+      "quality": {
+        "cumulative_sales": "exact",
+        "price": "exact",
+        "currency": "exact",
+        "availability": "exact"
+      }
+    },
+    {
+      "kind": "video",
+      "account": "account:demo-shiguang",
+      "video": "video:demo-shiguang-001",
+      "observed_at": "2026-11-16T20:00:00+08:00",
+      "values": {
+        "likes": 1200,
+        "shares": 200,
+        "comments": null,
+        "is_pinned": false
+      },
+      "quality": {
+        "likes": "exact",
+        "shares": "exact",
+        "comments": "unknown",
+        "is_pinned": "exact"
+      }
+    },
+    {
+      "kind": "video",
+      "account": "account:demo-shiguang",
+      "video": "video:demo-shiguang-001",
+      "observed_at": "2026-11-17T20:00:00+08:00",
+      "values": {
+        "likes": 1400,
+        "shares": 380,
+        "comments": null,
+        "is_pinned": false
+      },
+      "quality": {
+        "likes": "exact",
+        "shares": "exact",
+        "comments": "unknown",
+        "is_pinned": "exact"
+      }
+    }
+  ]
+}

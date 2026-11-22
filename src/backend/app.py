@@ -168,6 +168,7 @@ def create_app(config_class=Config, *, register_apis=True):
                      "X-API-Key",
                      "X-Timestamp",
                      "X-Signature",
+                     "Idempotency-Key",
                  ],
                  expose_headers=[
                      "X-Insights-Cache",

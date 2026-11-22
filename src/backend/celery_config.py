@@ -77,6 +77,7 @@ def make_celery(app_name=__name__):
             'tasks.external_documents',
             'tasks.douyin_publish',
             'tasks.wechat_channels_publish',
+            'tasks.book_commerce',
         ] # Auto-discover tasks
     )
     
@@ -120,6 +121,7 @@ def make_celery(app_name=__name__):
         task_queues=(
             Queue('render', Exchange('render'), routing_key='render'),
             Queue('platform_upload', Exchange('platform_upload'), routing_key='platform_upload'),
+            Queue('book_commerce', Exchange('book_commerce'), routing_key='book_commerce'),
             Queue('cloud_tts', Exchange('cloud_tts'), routing_key='cloud_tts'),
             Queue('doubao_browser_tts', Exchange('doubao_browser_tts'), routing_key='doubao_browser_tts'),
             Queue('report_pdf_gemini', Exchange('report_pdf_gemini'), routing_key='report_pdf_gemini'),
@@ -137,6 +139,7 @@ def make_celery(app_name=__name__):
             Queue('content_pipeline', Exchange('content_pipeline'), routing_key='content_pipeline'),
         ),
         task_routes={
+            'tasks.book_commerce.calculate': {'queue': 'book_commerce'},
             'tasks.audio_transcription.process_job': {'queue': 'report_audio_workflow'},
             'tts.process_doubao_publication': {'queue': 'cloud_tts'},
             'tts.process_article': {'queue': 'cloud_tts'},

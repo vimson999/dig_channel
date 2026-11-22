@@ -63,6 +63,9 @@ def register_blueprints(app):
     from api.data_collection import data_collection_bp
     app.register_blueprint(data_collection_bp)
 
+    from .book_commerce import bp as book_commerce_bp
+    app.register_blueprint(book_commerce_bp)
+
     # 注册Bilibili API
     from .bilibili import bp as bilibili_bp
     app.register_blueprint(bilibili_bp)
