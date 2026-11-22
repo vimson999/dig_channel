@@ -58,15 +58,17 @@ def test_wsj_parent_submits_shared_image_and_records_done_video(monkeypatch):
     update.assert_called_once_with("parent", {"wsj_video": summary})
 
 
-def test_replacing_wsj_cover_invalidates_only_wsj_download():
-    from api.mp3_video_workflow import _video_by_key_from_result
+def test_replacing_wsj_cover_marks_outdated_without_hiding_wsj_video():
+    from api.mp3_video_workflow import _is_wsj_video_outdated, _video_by_key_from_result
 
     old = {"video_path": "/old.mp4", "cover_path": "/old.png"}
     landscape = {"video_path": "/landscape.mp4"}
     result = {"artifacts": {"wsj_cover": {"path": "/old.png"}}, "wsj_video": old, "landscape_video": landscape}
     assert _video_by_key_from_result(result, "wsj") == old
+    assert _is_wsj_video_outdated(result) is False
     result["artifacts"]["wsj_cover"]["path"] = "/new.png"
-    assert _video_by_key_from_result(result, "wsj") is None
+    assert _video_by_key_from_result(result, "wsj") == old
+    assert _is_wsj_video_outdated(result) is True
     assert _video_by_key_from_result(result, "landscape") == landscape
 
 

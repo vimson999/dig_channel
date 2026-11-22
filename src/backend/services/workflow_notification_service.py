@@ -381,10 +381,12 @@ class WorkflowNotificationService:
         }
         return self.send({"provider": self.provider(), "event_type": "test", "workflow": workflow})
 
-    def send_email_message(self, subject, body):
+    def send_email_message(self, subject, body, *, to=None):
         if self.provider() not in SUPPORTED_EMAIL_PROVIDERS:
             return {"sent": False, "reason": "disabled"}
         settings = self.email_settings()
+        if to is not None:
+            settings["to"] = to
         missing = self.missing_email_settings(settings)
         if missing:
             return {"sent": False, "reason": "missing_config", "missing": missing}

@@ -247,19 +247,62 @@ def select_batch_transcription_directory():
         return jsonify({'success': False, 'error': f'无法打开目录选择器: {exc}'}), 500
 
 
+def _build_explicit_audio_files(raw_file_paths, input_dir=''):
+    if not isinstance(raw_file_paths, list) or not raw_file_paths:
+        raise ValueError('file_paths 必须是非空路径列表')
+    root = Path(input_dir).resolve() if input_dir else None
+    seen = set()
+    used_rel = set()
+    files = []
+    for raw_item in raw_file_paths:
+        text = str(raw_item or '').strip()
+        if not text:
+            raise ValueError('file_paths 包含空路径')
+        path = Path(os.path.abspath(os.path.expanduser(text))).resolve()
+        if not path.is_file() or path.suffix.lower() not in AUDIO_EXTENSIONS:
+            raise ValueError(f'不支持或不存在的音频文件: {path}')
+        if str(path) in seen:
+            continue
+        seen.add(str(path))
+        if root is not None:
+            try:
+                rel = str(path.relative_to(root))
+            except ValueError:
+                rel = path.name
+        else:
+            rel = path.name
+        if rel.casefold() in used_rel:
+            raise ValueError(f'file_paths 存在重名输出冲突: {rel}')
+        used_rel.add(rel.casefold())
+        files.append({
+            'source_path': str(path),
+            'relative_path': rel,
+            'status': 'waiting',
+            'output_path': None,
+            'duration_seconds': _get_audio_duration(str(path)),
+            'elapsed_seconds': None,
+            'error': None,
+        })
+    return files
+
+
 @bp.route('/start', methods=['POST'])
 def start_batch_transcription():
     data = request.get_json(silent=True) or {}
     raw_input_dir = str(data.get('input_dir') or '').strip()
     raw_output_dir = str(data.get('output_dir') or '').strip()
+    raw_file_paths = data.get('file_paths')
     input_dir = os.path.abspath(os.path.expanduser(raw_input_dir)) if raw_input_dir else ''
     output_dir = os.path.abspath(os.path.expanduser(raw_output_dir)) if raw_output_dir else ''
     model_size = str(data.get('model_size') or DEFAULT_MODEL_SIZE).strip()
 
-    if not input_dir or not output_dir:
-        return jsonify({'success': False, 'error': '输入目录和输出目录不能为空'}), 400
-    if not os.path.isdir(input_dir):
-        return jsonify({'success': False, 'error': f'输入目录不存在: {input_dir}'}), 400
+    if not output_dir:
+        return jsonify({'success': False, 'error': '输出目录不能为空'}), 400
+    if raw_file_paths is None:
+        if not input_dir:
+            return jsonify({'success': False, 'error': '输入目录和输出目录不能为空'}), 400
+        if not os.path.isdir(input_dir):
+            return jsonify({'success': False, 'error': f'输入目录不存在: {input_dir}'}), 400
     if model_size not in {'tiny', 'base', 'small', 'medium', 'large-v3'}:
         return jsonify({'success': False, 'error': f'不支持的模型: {model_size}'}), 400
 
@@ -268,7 +311,17 @@ def start_batch_transcription():
     except Exception as exc:
         return jsonify({'success': False, 'error': f'无法创建输出目录: {exc}'}), 400
 
-    files = _scan_audio_files(input_dir)
+    if raw_file_paths is not None:
+        try:
+            files = _build_explicit_audio_files(raw_file_paths, input_dir=input_dir)
+        except ValueError as exc:
+            return jsonify({'success': False, 'error': str(exc)}), 400
+        if not input_dir:
+            input_dir = os.path.commonpath([item['source_path'] for item in files])
+            if os.path.isfile(input_dir):
+                input_dir = os.path.dirname(input_dir)
+    else:
+        files = _scan_audio_files(input_dir)
     if not files:
         return jsonify({'success': False, 'error': '输入目录下没有找到支持的音频文件'}), 400
 

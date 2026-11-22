@@ -17,6 +17,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
+
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _execution_date_text(sep: str = ".") -> str:
+    return datetime.now(SHANGHAI_TZ).strftime(f"%Y{sep}%m{sep}%d")
 
 import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
@@ -410,6 +417,8 @@ def status_payload() -> Dict[str, Any]:
         "transcript_provider": "deepseek" if transcript_configured else "unavailable",
         "transcript_model": transcript_model() if transcript_configured else None,
         "business_feature": FEATURE_NAME,
+        "ima_agent_audio_v1": True,
+        "video_speeds": dict(DEFAULT_VIDEO_SPEEDS),
     }
 
 
@@ -1116,7 +1125,8 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
             duration = float(audio.get("duration_seconds") or 0) or probe_media_duration(str(audio_path))
             audio["duration_seconds"] = duration
             if _workflow_uses_direct_ds_response(workflow):
-                plan = plan_from_direct_ds_response(first_response, audio=audio)
+                plan = plan_from_direct_ds_response(first_response, audio=audio,
+                    local_only=bool(workflow.get("agent_audio_options")))
             else:
                 if _workflow_uses_transcript(workflow):
                     _validate_ds_response_contract(first_response, source_label="IMA 全文 DS 返回值")
@@ -1133,8 +1143,10 @@ def process_job(task_id: str, wait_hint: Optional[Dict[str, Any]] = None) -> boo
         if wsj_fields:
             plan = {**plan, **wsj_fields}
             _update_result(task_key, {"plan": plan})
+        if workflow.get("agent_audio_options"):
+            plan = {**plan, "agent_audio_options": workflow["agent_audio_options"]}
         plan = _apply_workflow_audio_range_override(plan, workflow)
-        if workflow.get("audio_range_override"):
+        if workflow.get("agent_audio_options") or workflow.get("audio_range_override"):
             _update_result(task_key, {"plan": plan})
         if _workflow_uses_direct_ds_response(workflow) or _workflow_uses_transcript(workflow):
             _validate_strict_ds_plan(
@@ -2010,11 +2022,35 @@ def plan_from_first_response(first_response: str, *, audio: Dict[str, Any]) -> D
     return validate_plan(payload, fallback=fallback, audio=audio)
 
 
-def plan_from_direct_ds_response(first_response: str, *, audio: Dict[str, Any]) -> Dict[str, Any]:
+def plan_from_direct_ds_response(first_response: str, *, audio: Dict[str, Any], local_only: bool = False) -> Dict[str, Any]:
     first_response = (first_response or "").strip()
     if not first_response:
         raise Mp3VideoWorkflowError("DS 返回值为空，无法规划视频")
+    if local_only:
+        _validate_ds_response_contract(first_response, source_label="Codex 分析结果")
+        source_sections = _direct_ds_numbered_sections(first_response)
+        bounds = extract_audio_range(source_sections.get("4", ""))
+        duration = float(audio.get("duration_seconds") or 0)
+        if not bounds or not 0 <= bounds[0] < bounds[1] <= duration:
+            raise Mp3VideoWorkflowError("Codex 黄金片段边界超出音频范围")
     local_plan = _local_plan_from_direct_ds_response(first_response, audio=audio)
+    if local_only:
+        sections = _direct_ds_numbered_sections(first_response)
+        exec_date = _execution_date_text(".")
+        local_plan["date_text"] = (
+            _direct_ds_date(sections.get("7", ""))
+            or _direct_ds_date(sections.get("6", ""))
+            or _direct_ds_date(sections.get("8", ""))
+            or exec_date
+        )
+        exec_dash = local_plan["date_text"].replace(".", "-")
+        for title_key in ("xiaojunjun_video_title", "ciketc_video_title", "wsj_video_title"):
+            if isinstance(local_plan.get(title_key), str) and "日期待确认" in local_plan[title_key]:
+                local_plan[title_key] = local_plan[title_key].replace("日期待确认", exec_dash)
+        if not local_plan.get("wsj_video_title") or len(local_plan.get("wsj_title_lines") or []) != 3:
+            raise Mp3VideoWorkflowError("Codex 分析结果缺少第 8 条 WSJ 标题或第 9 条三行封面文案")
+        _validate_strict_ds_plan(local_plan, source_label="Codex 分析结果")
+        return local_plan
     try:
         planner_payload = deepseek_plan(first_response, audio=audio)
     except Exception as exc:
@@ -2041,6 +2077,16 @@ def _local_plan_from_direct_ds_response(first_response: str, *, audio: Dict[str,
     title_3 = _direct_ds_title_value(sections.get("3", ""))
     title_6 = _direct_ds_closed_door_title(sections.get("6", ""), separator="/")
     title_7 = _direct_ds_closed_door_title(sections.get("7", ""), separator="|")
+    xiaojunjun_3lines = _three_line_cover_copy(
+        sections.get("10", ""),
+        heading_pattern=r"^(?:小君君[^\n]*(?:封皮|封面)|横屏封皮)",
+        max_chars=18,
+    )
+    finance_3lines = _three_line_cover_copy(
+        sections.get("11", ""),
+        heading_pattern=r"^(?:此刻此声[^\n]*(?:封皮|封面)|财经封皮)",
+        max_chars=14,
+    )
     audio_range = extract_audio_range(sections.get("4", "") or first_response)
 
     title_options = [item for item in [title_1, title_2, title_3] if item]
@@ -2053,26 +2099,39 @@ def _local_plan_from_direct_ds_response(first_response: str, *, audio: Dict[str,
         audio_plan["end_seconds"] = round(audio_range[1], 3)
     audio_plan["speed"] = DEFAULT_SPEED
 
+    finance_cover_copy = finance_3lines or _ensure_three_cover_lines(
+        _direct_ds_finance_cover_title(finance_title, title_6),
+        max_chars=13,
+    )
+    xiaojunjun_cover_copy = xiaojunjun_3lines or _ensure_three_cover_lines(
+        _xiaojunjun_cover_subtitle(
+            title_2 or title_3 or base_title,
+            fallback=title_3 or base_title,
+        ),
+        max_chars=18,
+    )
+    vertical_subtitle = _direct_ds_vertical_cover_subtitle(vertical_title, title_7, title_3)
+    if (not vertical_subtitle or "日期待确认" in vertical_subtitle) and finance_3lines:
+        f_lines = [line.strip() for line in finance_3lines.splitlines() if line.strip()]
+        vertical_subtitle = _clip_title_line(f_lines[1] if len(f_lines) > 1 else f_lines[0], 16)
+
     payload = {
         "title": base_title,
         "title_options": title_options,
         "subtitle": title_3 or fallback.get("subtitle"),
         "cover_main_title": "内资闭门会议",
         "cover_title": _direct_ds_vertical_cover_title(vertical_title, title_7),
-        "cover_subtitle": _direct_ds_vertical_cover_subtitle(vertical_title, title_7, title_3),
-        "finance_cover_subtitle": _direct_ds_finance_cover_title(finance_title, title_6),
+        "cover_subtitle": vertical_subtitle,
+        "finance_cover_subtitle": finance_cover_copy,
         "xiaojunjun_title": "内资闭门会议",
-        # Section 6 remains the full landscape video title; the cover copy uses
-        # the independent high-density title version 2 so it cannot collapse
-        # into the finance cover derived from version 1.
-        "xiaojunjun_subtitle": _xiaojunjun_cover_subtitle(
-            title_2 or title_3 or base_title,
-            fallback=title_3 or base_title,
-        ),
+        # Section 6 remains the full landscape video title; prefer explicit
+        # section 10 three-line cover copy when present, falling back to
+        # balanced three-line copy from version 2.
+        "xiaojunjun_subtitle": xiaojunjun_cover_copy,
         "xiaojunjun_video_title": title_6 or fallback.get("xiaojunjun_video_title"),
         "ciketc_video_title": title_7 or fallback.get("ciketc_video_title"),
         **_wsj_fields_from_response(first_response),
-        "date_text": _direct_ds_date(title_7 or title_6 or first_response) or fallback.get("date_text"),
+        "date_text": _direct_ds_date(title_7 or title_6 or first_response) or fallback.get("date_text") or _execution_date_text("."),
         "emotion": fallback.get("emotion", "bull"),
         "audio": audio_plan,
         "provider": "direct_ds_local",
@@ -2172,6 +2231,48 @@ def _wsj_fields_from_response(text: str) -> Dict[str, Any]:
     return fields
 
 
+def _three_line_cover_copy(section: str, *, heading_pattern: str, max_chars: int) -> str:
+    lines: List[str] = []
+    for raw in str(section or "").replace("\r", "\n").splitlines():
+        clean = re.sub(r"^[\s*#>•-]+|[\s*]+$", "", raw).strip()
+        if not clean or clean.startswith("```") or re.match(heading_pattern, clean, re.I):
+            continue
+        clean = re.sub(r"^(?:0?[123][.、:：)）]?\s+|第[一二三]行[：:]\s*)", "", clean)
+        clean = clean.strip("“”\"'《》 ")
+        if not clean or _is_cover_process_text(clean):
+            continue
+        lines.append(_clip_title_line(clean, max_chars))
+    return "\n".join(lines[:3]) if len(lines) >= 3 else ""
+
+
+def _ensure_three_cover_lines(text: Any, *, max_chars: int) -> str:
+    rows = [
+        _clean_line(line).strip("“”\"'《》 ")
+        for line in str(text or "").replace("\r", "\n").splitlines()
+        if _clean_line(line) and not _is_cover_process_text(line)
+    ]
+    if not rows:
+        return ""
+    rows = rows[:3]
+    while len(rows) < 3:
+        idx = max(range(len(rows)), key=lambda i: len(rows[i]))
+        candidate = rows[idx]
+        if len(candidate) < 6:
+            break
+        target = round(len(candidate) / (4 - len(rows)))
+        breaks = [
+            i for i in range(2, len(candidate) - 1)
+            if candidate[i - 1] in "，。；、：？！,.;:!?｜|/" and min(i, len(candidate) - i) >= max(2, target // 2)
+        ]
+        split_at = min(breaks, key=lambda i: abs(i - target)) if breaks else max(2, min(target, len(candidate) - 2))
+        left = candidate[:split_at].strip("，,、。.;；:：!！?？|｜/ ")
+        right = candidate[split_at:].strip("，,、。.;；:：!！?？|｜/ ")
+        if not left or not right:
+            break
+        rows[idx:idx + 1] = [left, right]
+    return "\n".join(_clip_title_line(line, max_chars) for line in rows[:3] if _clean_line(line))
+
+
 def _direct_ds_numbered_sections(text: str) -> Dict[str, str]:
     source = str(text or "").replace("\r", "\n")
     if not source.strip():
@@ -2180,14 +2281,14 @@ def _direct_ds_numbered_sections(text: str) -> Dict[str, str]:
     # ``### 6.`` or ``### 6｜``. Prefer those explicit headings when present so
     # numbered quotes inside section 5 cannot be mistaken for new sections.
     markdown_marker_re = re.compile(
-        r"^[ \t]*#{1,6}[ \t]*(?:\*\*)?[ \t]*([1-9])[ \t]*[.．、:：|｜][ \t]*",
+        r"^[ \t]*#{1,6}[ \t]*(?:\*\*)?[ \t]*(1[01]|[1-9])[ \t]*[.．、:：|｜][ \t]*",
         flags=re.M,
     )
     matches = list(markdown_marker_re.finditer(source))
     if not matches:
         marker_re = re.compile(
-            r"(?:(?<=\n)|^)\s*(?:[-*]\s*)?(?:\*\*)?\s*([1-9])\s*[.．、:：]\s*"
-            r"|(?:\*\*)\s*([1-9])\s*[.．、:：]\s*"
+            r"(?:(?<=\n)|^)[ \t]*(?:[-*][ \t]*)?(?:\*\*)?[ \t]*(1[01]|[1-9])[ \t]*[.．、:：][ \t]*"
+            r"|(?:\*\*)[ \t]*(1[01]|[1-9])[ \t]*[.．、:：][ \t]*"
         )
         matches = list(marker_re.finditer(source))
     markers = []
@@ -2200,6 +2301,8 @@ def _direct_ds_numbered_sections(text: str) -> Dict[str, str]:
     # headings, so fill only the missing section numbers from those labels.
     descriptive_marker_re = re.compile(
         r"^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?[ \t]*(?:"
+        r"(?P<section_11>此刻此声[^\n]*(?:封皮|封面)[^\n]*(?:三行|3行)[^\n]*)|"
+        r"(?P<section_10>小君君[^\n]*(?:封皮|封面)[^\n]*(?:三行|3行)[^\n]*)|"
         r"(?P<section_9>WSJ[ \t]*封面[^\n]*(?:三行|3行)[^\n]*)|"
         r"(?P<section_8>WSJ[ \t]*视频标题[^\n]*)|"
         r"(?P<section_7>标题优化另(?:一|一个)版本[^\n]*)|"
@@ -2328,7 +2431,7 @@ def _direct_ds_closed_door_parts(value: Any) -> List[str]:
     for part in parts:
         if re.match(r"^内资闭门会(?:议)?$", part):
             continue
-        if _closed_door_video_date(part):
+        if _closed_door_video_date(part) or part == "日期待确认":
             continue
         if not _is_cover_process_text(part):
             output.append(part)
@@ -2349,8 +2452,8 @@ def _closed_door_visual_lines(value: Any, *, max_units: float, max_lines: int = 
 
 def _direct_ds_finance_cover_title(title: Any, closed_door_title: Any = "") -> str:
     closed_parts = _direct_ds_closed_door_parts(closed_door_title)
-    closed_visual = _closed_door_visual_lines(closed_door_title, max_units=14, max_lines=3)
-    if closed_visual:
+    closed_visual = _closed_door_visual_lines(closed_door_title, max_units=13, max_lines=3)
+    if closed_visual and len(closed_visual.splitlines()) >= 3:
         return closed_visual
     text = _normalize_title_candidate(title)
     text = re.sub(r"^(?:专家密讲|独家)\s*[:：]\s*", "", text).strip()
@@ -2360,22 +2463,17 @@ def _direct_ds_finance_cover_title(title: Any, closed_door_title: Any = "") -> s
         if _clean_line(item) and not _is_cover_process_text(item)
     ]
     lines: List[str] = []
-    if closed_parts:
-        lines.append(closed_parts[0])
+    if closed_parts and len(closed_parts) >= 2:
+        lines.extend(closed_parts[:3])
     for clause in clauses:
         if any(_clean_line(clause) in _clean_line(line) or _clean_line(line) in _clean_line(clause) for line in lines):
             continue
         lines.append(clause)
         if len(lines) >= 3:
             break
-    if lines:
-        return "\n".join(_clip_finance_visual_line(part, max_units=15) for part in lines[:3] if _clean_line(part))
-    clauses = [item for item in _title_clause_parts(text) if _clean_line(item)]
-    if clauses:
-        return "\n".join(_clip_finance_visual_line(part, max_units=15) for part in clauses[:3] if _clean_line(part))
-    if len(closed_parts) >= 2:
-        return "\n".join(_clip_finance_visual_line(part, max_units=15) for part in closed_parts[:3] if _clean_line(part))
-    return _finance_cover_title(text)
+    if len(lines) >= 3:
+        return "\n".join(_clip_finance_visual_line(part, max_units=13) for part in lines[:3] if _clean_line(part))
+    return _ensure_three_cover_lines(text or closed_visual, max_chars=13)
 
 
 def _direct_ds_vertical_cover_title(title: Any, closed_door_title: Any = "") -> str:
@@ -2764,7 +2862,7 @@ def generate_wsj_visual(
     draw.rectangle((914, 106, 1118, 137), fill=paper)
     draw.text((1020, 122), "SPECIAL EDITION", font=_font(20, bold=True), fill="#46464c", anchor="mm")
     draw.rectangle((1547, 106, 1690, 137), fill=paper)
-    date = _closed_door_video_date(plan.get("date_text")).replace("-", ".") or "本期"
+    date = _closed_door_video_date(plan.get("date_text")).replace("-", ".") or _execution_date_text(".")
     draw.text((1619, 122), date,
               font=_font(20, bold=True), fill=accent, anchor="mm")
     draw.rectangle((903, 473, 1160, 514), fill=paper)
@@ -3499,7 +3597,8 @@ def _is_cover_process_text(value: Any) -> bool:
     text = _clean_line(value)
     return bool(re.search(
         r"DS\s*v?\d|IMA|Gemini|转录全文|Generated from transcript|推荐截取|源文件|最精华音频片段|"
-        r"精华音频片段|音频片段|片段说明|开始时间戳|结束时间戳|时间戳|无 Gemini upload|"
+        r"精华音频片段|音频片段|片段说明|黄金片段|起点原话|终点原话|起点\s*[:：]|终点\s*[:：]|"
+        r"开始时间戳|结束时间戳|时间戳|无 Gemini upload|"
         r"xxxx|当日日期|好的[，,]?\s*收到|收到您的指令|以下是基于|处理要求|输出结果|格式来写|"
         r"请你|尝试优化|使用\s*内资闭门会",
         text,
@@ -3760,6 +3859,7 @@ def create_publisher_video_task(
             "generate_subtitles": generate_subtitles,
             "force_new": bool(force_new),
             "audio": audio,
+            "audio_segment": audio_segment,
             "audio_signature": audio_signature,
         },
     }
@@ -3774,6 +3874,7 @@ def create_publisher_video_task(
             "metadata": params["metadata"],
             "source_task_id": parent_id,
             "generate_subtitles": generate_subtitles,
+            "audio_segment": audio_segment,
             "audio_signature": audio_signature,
             "video_path": None,
             "cover_path": None,
@@ -4039,7 +4140,17 @@ def audio_segment_from_plan(audio: Dict[str, Any], plan: Dict[str, Any], *, role
     plan_audio = plan.get("audio") if isinstance(plan.get("audio"), dict) else {}
     start = max(0.0, _parse_seconds(plan_audio.get("start_seconds"), default=0.0) or 0.0)
     end = _parse_seconds(plan_audio.get("end_seconds"), default=None)
-    if duration and start >= duration:
+    agent_options = plan.get("agent_audio_options") or {}
+    offset = float((agent_options.get("offsets") or {}).get(role, 0))
+    fade = float(agent_options.get("fade_in_seconds", 0))
+    if agent_options:
+        if duration <= 0 or end is None or end <= start:
+            raise Mp3VideoWorkflowError("智能体音频缺少可靠时长或黄金片段边界")
+        start += offset
+        end = min(duration, end + offset)
+        if start >= end or (end - start) < 0.1:
+            raise Mp3VideoWorkflowError("偏移后无有效音频区间")
+    elif duration and start >= duration:
         start = 0.0
     end_offset = 0.0
     if end is not None and duration:
@@ -4060,6 +4171,7 @@ def audio_segment_from_plan(audio: Dict[str, Any], plan: Dict[str, Any], *, role
         "start": round(start, 3),
         "end_offset": round(end_offset, 3),
         "speed": round(speed, 3),
+        **({"fade_in_seconds": fade, "source_offset_seconds": offset} if agent_options else {}),
     }
 
 
@@ -4072,6 +4184,8 @@ def _audio_segment_signature(segment: Optional[Dict[str, Any]]) -> Optional[str]
         "end_offset": round(float(segment.get("end_offset") or 0), 3),
         "speed": round(float(segment.get("speed") or DEFAULT_SPEED), 3),
     }
+    if segment.get("fade_in_seconds"):
+        payload["fade_in_seconds"] = float(segment["fade_in_seconds"])
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
@@ -4386,6 +4500,8 @@ def _clean_closed_door_video_title(value: Any, *, expected_separator: str) -> st
             parts.insert(0, "内资闭门会")
     if any(_is_cover_process_text(part) for part in parts):
         return ""
+    exec_dash = _execution_date_text("-")
+    parts = [exec_dash if part == "日期待确认" else part for part in parts]
     sep_text = " | " if expected == "|" else " / "
     return sep_text.join(parts[:5])[:180].strip()
 
@@ -6052,6 +6168,12 @@ def _task_public_summary(task: Optional[PublicationTask]) -> Optional[Dict[str, 
 
 def _publisher_result_summary(task: PublicationTask) -> Dict[str, Any]:
     result = task.result if _model_attr_loaded(task, "result") and isinstance(task.result, dict) else {}
+    params = task.params if _model_attr_loaded(task, "params") and isinstance(task.params, dict) else {}
+    audio_segment = (
+        result.get("audio_segment")
+        or (result.get("metadata") or {}).get("audio_segment")
+        or ((params.get("audio_segments") or [None])[0] if isinstance(params.get("audio_segments"), list) else None)
+    )
     video_path = (
         result.get("video_path")
         or result.get("landscape_video_path")
@@ -6068,6 +6190,7 @@ def _publisher_result_summary(task: PublicationTask) -> Dict[str, Any]:
         **(_task_public_summary(task) or {}),
         "generate_subtitles": _publisher_child_generate_subtitles(task, default=True),
         "audio_signature": _publisher_child_audio_signature(task),
+        **({"audio_segment": audio_segment} if isinstance(audio_segment, dict) else {}),
         "video_path": video_path,
         "landscape_video_path": video_path if aspect_ratio != "9:16" else None,
         "vertical_video_path": result.get("vertical_video_path") or (video_path if aspect_ratio == "9:16" else None),
@@ -6665,6 +6788,9 @@ def _clean_infographic_copy(value: Any, *, max_chars: int = 96) -> str:
     clean = re.sub(r"^\d+\s*[.、)]\s*", "", clean).strip()
     clean = re.sub(r"^(?:要点|核心观点|观点|金句|推荐理由)\s*[:：]\s*", "", clean).strip()
     clean = re.sub(r"[（(]\s*(?:约)?\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:附近)?\s*[)）]$", "", clean).strip()
+    clean = re.sub(r"[（(]\s*时间戳无法确定\s*[)）]\s*$", "", clean).strip()
+    clean = re.sub(r"\s*时间戳无法确定\s*$", "", clean).strip()
+    clean = clean.strip("“”\"' ")
     if not clean or len(clean) < 8 or _is_cover_process_text(clean):
         return ""
     if re.search(

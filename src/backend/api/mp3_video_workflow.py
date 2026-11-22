@@ -488,6 +488,25 @@ def create_job(current_user):
         source_mode = "gemini_audio"
     if source_mode not in {"gemini_audio", "ima_transcript", "ds_response"}:
         return jsonify({"success": False, "message": "input_source 只能是 gemini_audio、ima_transcript 或 ds_response"}), 400
+    agent_audio_options = data.get("agent_audio_options")
+    if agent_audio_options is not None:
+        try:
+            if source_mode != "ds_response" or not isinstance(agent_audio_options, dict):
+                raise ValueError("agent_audio_options 仅支持 ds_response 对象参数")
+            if set(agent_audio_options) != {"offsets", "fade_in_seconds", "planner_mode"}:
+                raise ValueError("agent_audio_options 字段不完整或含未知字段")
+            if agent_audio_options["planner_mode"] != "local":
+                raise ValueError("智能体规划必须为 local")
+            offsets = agent_audio_options["offsets"]
+            if not isinstance(offsets, dict) or set(offsets) != {"xiaojunjun_landscape", "ciketc_vertical", "wsj_4_3"}:
+                raise ValueError("需明确三组视频的偏移")
+            values = [*offsets.values(), agent_audio_options["fade_in_seconds"]]
+            if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0 for v in values):
+                raise ValueError("偏移与淡入必须为非负有限数字")
+            if any(v > 120 for v in offsets.values()) or agent_audio_options["fade_in_seconds"] > 10:
+                raise ValueError("偏移上限 120 秒，淡入上限 10 秒")
+        except ValueError as exc:
+            return jsonify({"success": False, "message": str(exc)}), 400
     render_mode = str(data.get("render_mode") or data.get("output_mode") or "keyframes").strip().lower()
     if render_mode in {"keyframe", "preview", "preview_keyframes", "frames"}:
         render_mode = "keyframes"
@@ -551,6 +570,7 @@ def create_job(current_user):
             "source_feature": source_feature,
             "source_task_id": source_task_id,
             FEATURE_NAME: {
+                **({"agent_audio_options": agent_audio_options} if agent_audio_options is not None else {}),
                 "audio_asset_id": audio_asset_id,
                 "input_source": source_mode,
                 "render_mode": render_mode,
@@ -2163,6 +2183,7 @@ def _job_payload(task, include_raw=False, *, bilibili_uploads=_JOB_PAYLOAD_BILIB
             "gemini_url": request_payload.get("gemini_url"),
             "transcript_chars": len(str(request_payload.get("transcript_text") or "")) if request_payload.get("input_source") == "ima_transcript" else 0,
             "metadata": request_payload.get("metadata") or {},
+            **({"agent_audio_options": request_payload["agent_audio_options"]} if request_payload.get("agent_audio_options") else {}),
         },
         "input_source": result.get("input_source") or request_payload.get("input_source") or "gemini_audio",
         "render_mode": result.get("render_mode") or request_payload.get("render_mode") or "full_video",
@@ -2197,7 +2218,7 @@ def _job_payload(task, include_raw=False, *, bilibili_uploads=_JOB_PAYLOAD_BILIB
         "landscape_video": result.get("landscape_video"),
         "vertical_video": result.get("vertical_video"),
         "wsj_video": wsj_video,
-        "wsj_video_outdated": bool(_video_output_path(result.get("wsj_video")) and not wsj_video),
+        "wsj_video_outdated": _is_wsj_video_outdated(result),
         "ds_extract": _ds_extract_payload(result),
         "logs": result.get("logs") or [],
         "download_input_audio_url": f"/api/mp3-video-workflows/jobs/{task.id}/input-audio",
@@ -2542,11 +2563,18 @@ def _video_by_key_from_result(result, key):
     if key == "vertical":
         return result.get("vertical_video")
     if key == "wsj":
-        video = result.get("wsj_video") or {}
-        cover = (result.get("artifacts") or {}).get(WSJ_ARTIFACT_KEY) or {}
-        if cover.get("path") and video.get("cover_path") == cover["path"]:
-            return video
+        return result.get("wsj_video")
     return None
+
+
+def _is_wsj_video_outdated(result):
+    result = result if isinstance(result, dict) else {}
+    video = result.get("wsj_video") or {}
+    if not _video_output_path(video):
+        return False
+    cover = (result.get("artifacts") or {}).get(WSJ_ARTIFACT_KEY) or {}
+    cover_path = cover.get("path")
+    return bool(cover_path and video.get("cover_path") != cover_path)
 
 
 def _video_output_path(video):
@@ -3203,7 +3231,7 @@ def _request_payload():
     if request.is_json:
         return request.get_json(silent=True) or {}
     data = dict(request.form.items())
-    for key in ("metadata",):
+    for key in ("agent_audio_options", "metadata",):
         value = data.get(key)
         if isinstance(value, str) and value.strip().startswith(("{", "[")):
             import json

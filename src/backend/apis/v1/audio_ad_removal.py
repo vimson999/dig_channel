@@ -17,6 +17,63 @@ WORK = ROOT / 'data/audio-ad-removal/workspaces'
 MAX_BYTES = 500 * 1024 * 1024
 
 
+@bp.post('/process')
+@require_login
+def process(user):
+    """Remove matches in one request and return an MP3 (multipart/form-data)."""
+    source = request.files.get('audio')
+    sample = request.files.get('sample')
+    if not source or not source.filename:
+        return jsonify(error='请选择讲课音频'), 400
+    if request.content_length and request.content_length > MAX_BYTES + 30 * 1024 * 1024:
+        return jsonify(error='上传文件过大'), 413
+    try:
+        threshold = float(request.form.get('threshold', .55))
+        if not math.isfinite(threshold) or not .1 <= threshold <= .99:
+            raise ValueError
+    except ValueError:
+        return jsonify(error='匹配阈值须在 0.1 至 0.99 之间'), 400
+    if not sample and not SAMPLE.is_file():
+        return jsonify(error='默认广告样本不存在'), 500
+
+    with tempfile.TemporaryDirectory() as temp:
+        folder = Path(temp)
+        original = folder / 'input'
+        source.save(original)
+        if original.stat().st_size > MAX_BYTES:
+            return jsonify(error='上传文件不能超过 500 MB'), 413
+        sample_path = SAMPLE
+        if sample and sample.filename:
+            sample_path = folder / 'sample'
+            sample.save(sample_path)
+            if sample_path.stat().st_size > 30 * 1024 * 1024:
+                return jsonify(error='样本不能超过 30 MB'), 413
+        clean = folder / 'clean.mp3'
+        try:
+            total = duration(original)
+            cuts = [(m['start'], m['end']) for m in matches(original, sample_path, threshold=threshold)]
+            if cuts:
+                kept = kept_ranges(normalize_ranges(
+                    [{'start': a, 'end': min(b, total)} for a, b in cuts], total), total)
+            else:
+                kept = [(0, total)]
+            render(original, kept, clean)
+        except (subprocess.CalledProcessError, ValueError):
+            return jsonify(error='无法处理音频或广告样本'), 400
+        output = tempfile.TemporaryFile()
+        try:
+            with clean.open('rb') as audio_file:
+                shutil.copyfileobj(audio_file, output)
+            output.seek(0)
+            response = send_file(output, mimetype='audio/mpeg', as_attachment=True,
+                                 download_name=f'{Path(source.filename).stem}-已去广告.mp3')
+            response.headers['X-Ad-Matches'] = str(len(cuts))
+            return response
+        except Exception:
+            output.close()
+            raise
+
+
 def workspace(user, job):
     try:
         job = str(uuid.UUID(job))

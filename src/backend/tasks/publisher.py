@@ -1,3 +1,4 @@
+import math
 import asyncio
 import os
 import sys
@@ -607,14 +608,17 @@ def _prepared_audio_needs_rebuild(edit_path, raw_path, expected_duration):
     return False
 
 
-def _build_audio_preprocess_command(raw_path, edit_path, start_offset, end_seconds, speed):
+def _build_audio_preprocess_command(raw_path, edit_path, start_offset, end_seconds, speed, fade_in_seconds=0):
     cmd = ["ffmpeg", "-y", "-ss", str(start_offset)]
     if end_seconds is not None:
         cmd.extend(["-t", str(max(0.1, float(end_seconds) - float(start_offset or 0)))])
     cmd.extend(["-i", raw_path])
     atempo = _atempo_filter(speed)
-    if atempo:
-        cmd.extend(["-filter:a", atempo])
+    filters = [atempo] if atempo else []
+    if fade_in_seconds:
+        filters.append(f"afade=t=in:st=0:d={float(fade_in_seconds):g}")
+    if filters:
+        cmd.extend(["-filter:a", ",".join(filters)])
     cmd.extend(["-vn", edit_path])
     return cmd
 
@@ -754,12 +758,15 @@ def run_publication_pipeline(self, task_id):
                     raw_path = to_abs_path(seg.get('path'))
                     if not raw_path or not os.path.exists(raw_path): continue
                     
+                    fade_in_seconds = float(seg.get('fade_in_seconds', 0))
+                    if not math.isfinite(fade_in_seconds) or not 0 <= fade_in_seconds <= 10:
+                        raise ValueError('音频淡入必须在 0–10 秒之间')
                     speed = float(seg.get('speed', 1.0))
                     start_offset = float(seg.get('start', 0))
                     end_offset = float(seg.get('end_offset', 0))
                     source_duration = 0
                     end_seconds = None
-                    strict_preprocess = _audio_needs_preprocess(start_offset, end_offset, speed)
+                    strict_preprocess = bool(fade_in_seconds) or _audio_needs_preprocess(start_offset, end_offset, speed)
                     if strict_preprocess:
                         source_duration = _probe_audio_duration(raw_path)
                     if end_offset > 0 and source_duration > 0:
@@ -773,7 +780,8 @@ def run_publication_pipeline(self, task_id):
                     name_part, ext_part = os.path.splitext(file_name)
                     edit_path = os.path.join(
                         file_dir,
-                        f"{name_part}_edit_{AUDIO_PREPROCESS_VERSION}_s{speed}_st{start_offset}_eo{end_offset}{ext_part}",
+                        f"{name_part}_edit_{AUDIO_PREPROCESS_VERSION}_s{speed}_st{start_offset}_eo{end_offset}"
+                        + (f"_fi{fade_in_seconds}" if fade_in_seconds else "") + ext_part,
                     )
                     expected_duration = _expected_prepared_audio_duration(
                         source_duration,
@@ -784,7 +792,7 @@ def run_publication_pipeline(self, task_id):
                     need_rebuild = _prepared_audio_needs_rebuild(edit_path, raw_path, expected_duration)
 
                     if need_rebuild:
-                        cmd = _build_audio_preprocess_command(raw_path, edit_path, start_offset, end_seconds, speed)
+                        cmd = _build_audio_preprocess_command(raw_path, edit_path, start_offset, end_seconds, speed, fade_in_seconds)
                         try:
                             subprocess.run(cmd, check=True, capture_output=True)
                             actual_duration = _probe_audio_duration(edit_path)
